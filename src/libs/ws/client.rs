@@ -32,10 +32,16 @@ pub struct WsClient {
     seq: u32,
 }
 impl WsClient {
-    pub async fn new(connect_addr: &str, header: &str) -> Result<Self> {
+    pub async fn new(connect_addr: &str, protocol_header: &str, headers: Option<Vec<(&'static str, &'static str)>>) -> Result<Self> {
         let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
         req.headers_mut()
-            .insert("Sec-WebSocket-Protocol", HeaderValue::from_str(header)?);
+            .insert("Sec-WebSocket-Protocol", HeaderValue::from_str(&protocol_header)?);
+
+        if let Some(headers) = headers {
+            for header in headers {
+                req.headers_mut().insert(header.0, HeaderValue::from_str(header.1)?);
+            }
+        }
 
         let (ws_stream, _) = connect_async(req).await.context("Failed to connect to endpoint")?;
         Ok(Self {
