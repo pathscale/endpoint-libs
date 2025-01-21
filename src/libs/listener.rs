@@ -4,10 +4,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use eyre::bail;
 use eyre::{ensure, Context, ContextCompat, Result};
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
+use rustls::pki_types::PrivateKeyDer;
 use rustls_pemfile::certs;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
@@ -57,18 +60,12 @@ impl<T: ConnectionListener> TlsListener<T> {
         let certs = load_certs(&pub_certs)?;
         ensure!(!certs.is_empty(), "No certificates found in file: {:?}", pub_certs);
         
-        let keys = load_private_key(&priv_cert)?;
-        ensure!(
-            !keys.is_empty(),
-            "No private key found in file: {}",
-            priv_cert.display()
-        );
-        let key = keys.into_iter().next().context("No private key found")?;
+        let key = load_private_key(&priv_cert)?;
 
         let tls_cfg = {
             let cfg = rustls::ServerConfig::builder()
                 .with_no_client_auth()
-                .with_single_cert(certs, rustls::pki_types::PrivateKeyDer::Pkcs8(key))?;
+                .with_single_cert(certs, key)?;
             Arc::new(cfg)
         };
         let acceptor = TlsAcceptor::from(tls_cfg);
@@ -112,15 +109,13 @@ pub fn load_certs<'a, T: AsRef<Path>>(path: impl IntoIterator<Item = T>) -> Resu
     Ok(r_certs)
 }
 
-// Load private key from file.
-pub fn load_private_key(path: &PathBuf) -> Result<Vec<rustls::pki_types::PrivatePkcs8KeyDer<'static>>> {
-    let file = std::fs::File::open(path).with_context(|| format!("Failed to open private key {:?} ", path))?;
-    let mut reader = std::io::BufReader::new(file);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut reader).into_iter().filter_map(|result| match result {
-        Ok(value) => Some(value),  // Map Ok values to Some(value)
-        Err(_) => None,            // Ignore Err values
-    })
-    .collect();
+/// Load the first private key contained in the given file.
+pub fn load_private_key(path: &PathBuf) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let private_key_result = PrivateKeyDer::from_pem_file(path);
 
-    Ok(keys)
+    let Ok(private_key) = private_key_result else {
+        bail!("Error loading private key from file");
+    };
+
+    Ok(private_key)
 }
