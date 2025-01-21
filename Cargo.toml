@@ -1,6 +1,6 @@
 [package]
 name = "endpoint-libs"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 authors = ["Veon <dveonloch@protonmail.com>"]
 description = "Common dependencies to be used with endpoint-gen."
