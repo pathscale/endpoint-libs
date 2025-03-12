@@ -5,9 +5,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio_tungstenite::tungstenite::Error as WsError;
@@ -20,9 +22,9 @@ use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::listener::{ConnectionListener, TcpListener, TlsListener};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox, TOOLBOX};
 use crate::libs::utils::{get_conn_id, get_log_id};
+use crate::libs::ws::client::WsRequest;
 use crate::libs::ws::{VerifyProtocol, WsClientSession, WsConnection};
 use crate::model::EndpointSchema;
-use crate::libs::ws::client::WsRequest;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
@@ -32,6 +34,57 @@ pub struct WebsocketServer {
     pub message_receiver: Option<mpsc::Receiver<ConnectionId>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
+}
+
+// Helper to combine read bytes + original stream
+struct BufferedStream<S> {
+    buffer: Box<[u8]>,
+    stream: S,
+    pos: usize,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for BufferedStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<tokio::io::Result<()>> {
+        if self.pos < self.buffer.len() {
+            // Serve from owned buffer
+            let remaining = self.buffer.len() - self.pos;
+            let len = std::cmp::min(remaining, buf.remaining());
+            buf.put_slice(&self.buffer[self.pos..self.pos + len]);
+            self.pos += len;
+            Poll::Ready(Ok(()))
+        } else {
+            // Delegate to underlying stream
+            Pin::new(&mut self.stream).poll_read(cx, buf)
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for BufferedStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 impl WebsocketServer {
@@ -52,8 +105,14 @@ impl WebsocketServer {
         check_handler::<T>(&schema).expect("Invalid handler");
         self.add_handler_erased(schema, Arc::new(handler))
     }
-    pub fn add_handler_erased(&mut self, schema: EndpointSchema, handler: Arc<dyn RequestHandlerErased>) {
-        let old = self.handlers.insert(schema.code, WsEndpoint { schema, handler });
+    pub fn add_handler_erased(
+        &mut self,
+        schema: EndpointSchema,
+        handler: Arc<dyn RequestHandlerErased>,
+    ) {
+        let old = self
+            .handlers
+            .insert(schema.code, WsEndpoint { schema, handler });
         if let Some(old) = old {
             panic!(
                 "Overwriting handler for endpoint {} {}",
@@ -61,12 +120,25 @@ impl WebsocketServer {
             );
         }
     }
-    async fn handle_ws_handshake_and_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    async fn handle_ws_handshake_and_connection<
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    >(
         self: Arc<Self>,
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
-        stream: S,
+        mut stream: S,
     ) -> Result<()> {
+        let mut buffer = vec![0u8; 1024];
+        let n = stream.read(&mut buffer).await?; // Use AsyncReadExt::read
+
+        tracing::debug!("Raw request bytes: {:?}", &buffer[..n]);
+
+        let stream = BufferedStream {
+            buffer: buffer.into_boxed_slice(),
+            stream,
+            pos: 0,
+        };
+
         let (tx, mut rx) = mpsc::channel(1);
         let hs = tokio_tungstenite::accept_hdr_async(
             stream,
@@ -90,7 +162,10 @@ impl WebsocketServer {
             log_id: get_log_id(),
         });
         debug!(?addr, "New connection handshaken {:?}", conn);
-        let headers = rx.recv().await.ok_or_else(|| eyre!("Failed to receive ws headers"))?;
+        let headers = rx
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("Failed to receive ws headers"))?;
 
         let (tx, rx) = mpsc::channel(100);
         let conn = Arc::clone(&conn);
@@ -108,7 +183,8 @@ impl WebsocketServer {
             );
             return Err(err);
         }
-        self.handle_session_connection(conn, states, stream, rx).await;
+        self.handle_session_connection(conn, states, stream, rx)
+            .await;
 
         Ok(())
     }
@@ -207,8 +283,17 @@ impl WebsocketServer {
     pub fn dump_schemas(&self) -> Result<()> {
         let _ = std::fs::create_dir_all("docs");
         let file = format!("docs/{}_alive_endpoints.json", self.config.name);
-        let available_schemas: Vec<String> = self.handlers.values().map(|x| x.schema.name.clone()).sorted().collect();
-        info!("Dumping {} endpoint names to {}", available_schemas.len(), file);
+        let available_schemas: Vec<String> = self
+            .handlers
+            .values()
+            .map(|x| x.schema.name.clone())
+            .sorted()
+            .collect();
+        info!(
+            "Dumping {} endpoint names to {}",
+            available_schemas.len(),
+            file
+        );
         serde_json::to_writer_pretty(File::create(file)?, &available_schemas)?;
         Ok(())
     }
