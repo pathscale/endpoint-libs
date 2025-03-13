@@ -187,6 +187,7 @@ impl AuthController for EndpointAuthController {
         let toolbox = toolbox.clone();
 
         async move {
+            debug!("Received header: {}", header);
             let splits = header
                 .split(',')
                 .map(|x| x.trim())
@@ -194,15 +195,20 @@ impl AuthController for EndpointAuthController {
                 .map(|x| (&x[..1], &x[1..]))
                 .collect::<HashMap<&str, &str>>();
 
+            debug!("Parsed header splits: {:?}", splits);
+
             let method = splits.get("0").context("Could not find method")?;
+            debug!("Extracted method: {:?}", method);
             // info!("method: {:?}", method);
             let endpoint = self
                 .auth_endpoints
                 .get(*method)
                 .with_context(|| format!("Could not find endpoint for method {}", method))?;
+            debug!("Resolved endpoint: {:?}", endpoint.schema.code);
             let mut params = serde_json::Map::new();
             for (index, param) in endpoint.schema.parameters.iter().enumerate() {
                 let index = index + 1;
+                debug!("Processing parameter: {} (index {})", param.name, index);
                 match splits.get(&index.to_string().as_str()) {
                     Some(value) => {
                         params.insert(param.name.to_case(Case::Camel), parse_ty(&param.ty, value)?);
