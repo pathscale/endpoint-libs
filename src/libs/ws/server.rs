@@ -133,6 +133,10 @@ impl WebsocketServer {
 
         tracing::debug!("Raw request bytes received: {}", n);
         tracing::debug!("Raw request bytes: {:?}", &buffer[..n]);
+        tracing::debug!(
+            "Raw request bytes (string): {:?}",
+            String::from_utf8_lossy(&buffer[..n])
+        );
 
         let stream = BufferedStream {
             buffer: buffer.into_boxed_slice(),
@@ -198,6 +202,8 @@ impl WebsocketServer {
         let auth_result = Arc::clone(&self.auth_controller)
             .auth(&self.toolbox, headers, Arc::clone(&conn))
             .await;
+
+        tracing::debug!("Auth headers: {:?}", headers);
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
             tracing::error!(?err, "Authentication failed");
