@@ -131,6 +131,7 @@ impl WebsocketServer {
         let mut buffer = vec![0u8; 1024];
         let n = stream.read(&mut buffer).await?; // Use AsyncReadExt::read
 
+        tracing::debug!("Raw request bytes received: {}", n);
         tracing::debug!("Raw request bytes: {:?}", &buffer[..n]);
 
         let stream = BufferedStream {
@@ -140,6 +141,7 @@ impl WebsocketServer {
         };
 
         let (tx, mut rx) = mpsc::channel(1);
+        tracing::debug!("Attemting WebSocket handshake"); 
         let hs = tokio_tungstenite::accept_hdr_async(
             stream,
             VerifyProtocol {
@@ -150,10 +152,21 @@ impl WebsocketServer {
         )
         .await;
 
+        let stream = match wrap_ws_error(hs) {
+            Ok(s) => {
+                tracing::debug!("WebSocket handshake successful");
+                s
+            }
+            Err(e) => {
+                tracing::error!("WebSocket handshake failed: {:?}", e);
+                return Err(e);
+            }
+        };
+
         // TODO remove below after tracing log issue
         tracing::warn!("handle new WS connection");
 
-        let stream = wrap_ws_error(hs)?;
+        // let stream = wrap_ws_error(hs)?;
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
@@ -162,20 +175,32 @@ impl WebsocketServer {
             log_id: get_log_id(),
         });
         debug!(?addr, "New connection handshaken {:?}", conn);
-        let headers = rx
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("Failed to receive ws headers"))?;
+        let headers = match rx.recv().await {
+            Some(h) => {
+                tracing::debug!("WebSocket headers received");
+                h
+            }
+            None => {
+                tracing::error!("Failed to receive WebSocket headers");
+                return Err(eyre!("Failed to receive WebSocket headers"));
+            }
+        };
+        // let headers = rx
+        //     .recv()
+        //     .await
+        //     .ok_or_else(|| eyre!("Failed to receive ws headers"))?;
 
         let (tx, rx) = mpsc::channel(100);
         let conn = Arc::clone(&conn);
         states.insert(conn.connection_id, tx, conn.clone());
+        tracing::debug!("Connection state inserted into WebSocketStates");
 
         let auth_result = Arc::clone(&self.auth_controller)
             .auth(&self.toolbox, headers, Arc::clone(&conn))
             .await;
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
+            tracing::error!(?err, "Authentication failed");
             self.toolbox.send_request_error(
                 &raw_ctx,
                 ErrorCode::new(100400), // BadRequest
@@ -183,6 +208,7 @@ impl WebsocketServer {
             );
             return Err(err);
         }
+        tracing::debug!("Authentication successful");
         self.handle_session_connection(conn, states, stream, rx)
             .await;
 
