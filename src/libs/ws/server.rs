@@ -203,7 +203,6 @@ impl WebsocketServer {
             .auth(&self.toolbox, headers, Arc::clone(&conn))
             .await;
 
-        tracing::debug!("Auth headers: {:?}", headers);
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
             tracing::error!(?err, "Authentication failed");
