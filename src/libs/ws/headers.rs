@@ -25,7 +25,7 @@ pub struct VerifyProtocol<'a> {
     pub allow_cors_domains: &'a Option<Vec<String>>,
 }
 
-impl<'a> Callback for VerifyProtocol<'a> {
+impl Callback for VerifyProtocol<'_>  {
     fn on_request(self, request: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
         let addr = self.addr;
         debug!(?addr, "handshake request: {:?}", request);

@@ -1,12 +1,11 @@
-use std::{fs::OpenOptions, path::PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use eyre::eyre;
-use eyre::WrapErr;
 use serde::{Deserialize, Serialize};
 use tracing::{level_filters::LevelFilter, Level};
-use tracing_subscriber::fmt::{self, layer};
+use tracing_subscriber::fmt;
 use tracing_subscriber::{registry, EnvFilter};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::Layer;

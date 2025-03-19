@@ -121,7 +121,7 @@ pub async fn connect_to_database(config: DatabaseConfig) -> Result<PooledDbClien
         keepalives_idle: config.keepalives_idle,
         target_session_attrs: config.target_session_attrs,
         channel_binding: config.channel_binding,
-        manager: config.manager.or_else(|| {
+        manager: config.manager.or({
             Some(ManagerConfig {
                 recycling_method: RecyclingMethod::Fast,
             })
