@@ -50,11 +50,11 @@ impl FromStr for LogEntry {
 pub async fn get_log_entries(path: impl AsRef<std::path::Path>, limit: usize) -> eyre::Result<Vec<LogEntry>> {
     // Specify the path to your log file
     let file = std::fs::File::open(path.as_ref())?;
-    let mut lines = RevLines::new(file);
+    let lines = RevLines::new(file);
     // get all entries first
     let mut entries = tokio::task::spawn_blocking(move || {
         let mut entries = vec![];
-        while let Some(line) = lines.next() {
+        for line in lines {
             if entries.len() >= limit {
                 break;
             }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::HashMap;

@@ -62,9 +62,6 @@ pub fn align_precision(a: f64, b: f64) -> f64 {
     aligned_a.parse().unwrap()
 }
 
-/// ```
-
-/// ```
 pub fn count_dp(num: f64) -> usize {
     // Convert the f64 to a string representation
     let num_str = format!("{}", num);
