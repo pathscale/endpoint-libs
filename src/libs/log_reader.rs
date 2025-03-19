@@ -24,9 +24,7 @@ lazy_static! {
 impl FromStr for LogEntry {
     type Err = eyre::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        println!("before: {:?}", s);
         let no_control_sequence = CONTROL_SEQUENCE_PATTERN.replace_all(s, "");
-        println!("after: {:?}", no_control_sequence);
         let mut split = no_control_sequence.split_whitespace();
         let datetime = split
             .next()
@@ -129,13 +127,19 @@ mod tests {
         assert_eq!(entry.line_number, 110);
         assert_eq!(entry.message, "terminated diff 0_table_limit_1 initially");
     }
+
     #[tokio::test]
-    // #[allow(dead_code)]
-    async fn log_entry_from_file() {
-        // NOTE use some valid file when needed
-        let path = "/Users/jack/Dev/InsolventCapital/trading.insolvent.app-backend/log/user.log";
-        let entries = get_log_entries(path, 20).await.unwrap();
-        println!("{:?}", entries[0]);
-        assert_eq!(entries.len(), 20);
+    async fn test_get_log_entries() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "2025-03-19T12:34:56Z INFO thread-1 src/main.rs:42 Application started").unwrap();
+        writeln!(temp_file, "2025-03-19T12:35:01Z ERROR thread-2 src/lib.rs:128 Failed to connect").unwrap();
+
+        let entries = get_log_entries(temp_file.path(), 10).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].level, "ERROR");
+        assert_eq!(entries[1].level, "INFO");
     }
 }

@@ -55,21 +55,6 @@ pub fn decimal_sf(num: rust_decimal::Decimal, sig_figs: usize) -> rust_decimal::
 }
 
 /// Aligns the precision of one `f64` value to match another `f64` value.
-///
-/// # Examples
-///
-/// ```
-/// let a = 123.456789;
-/// let b = 78.9;
-/// let aligned_a = lib::utils::align_precision(a, b);
-/// assert_eq!(aligned_a, 123.5);
-/// ```
-/// ```
-/// let a = 2.37;
-/// let b = 631.3;
-/// let aligned_a = lib::utils::align_precision(a, b);
-/// assert_eq!(aligned_a, 2.4);
-/// ```
 pub fn align_precision(a: f64, b: f64) -> f64 {
     let precision_b = count_dp(b);
     let precision_a = format!("{:.0$}", { precision_b });
@@ -78,10 +63,7 @@ pub fn align_precision(a: f64, b: f64) -> f64 {
 }
 
 /// ```
-/// assert_eq!(lib::utils::count_dp(1.5), 1);
-/// ```
-/// ```
-/// assert_eq!(lib::utils::count_dp(1.1), 1);
+
 /// ```
 pub fn count_dp(num: f64) -> usize {
     // Convert the f64 to a string representation
@@ -94,5 +76,29 @@ pub fn count_dp(num: f64) -> usize {
     } else {
         // If there is no decimal point, return 0
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_count_dp() {
+        assert_eq!(count_dp(1.5), 1);
+        assert_eq!(count_dp(1.1), 1);
+    }
+
+    #[test]
+    fn test_align_precision() {
+        let a = 123.456789;
+        let b = 78.9;
+        let aligned_a = align_precision(a, b);
+        assert_eq!(aligned_a, 123.5);
+
+        let a = 2.37;
+        let b = 631.3;
+        let aligned_a = align_precision(a, b);
+        assert_eq!(aligned_a, 2.4);
     }
 }
