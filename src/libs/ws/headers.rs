@@ -135,7 +135,7 @@ impl Default for EndpointAuthController {
     }
 }
 
-impl  {
+impl EndpointAuthController {
     pub fn new() -> Self {
         Self {
             auth_endpoints: Default::default(),
