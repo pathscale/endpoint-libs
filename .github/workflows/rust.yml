@@ -21,7 +21,7 @@ jobs:
       repository-projects: write
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
     - name: Run tests
@@ -31,9 +31,15 @@ jobs:
   clippy_check:
 
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: write
+      repository-projects: write
     
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
             toolchain: stable
