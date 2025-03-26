@@ -24,7 +24,7 @@ tracing-log = "0.2"
 tracing-subscriber = { version = "0.3" , features = ["env-filter", "std"] }
 tokio-cron-scheduler = "0.11"
 dashmap = "6.0"
-tokio-tungstenite = "0.23"
+tokio-tungstenite = "0.26"
 tokio-postgres = "0.7"
 bytes = "1.7"
 chrono = "0.4"
