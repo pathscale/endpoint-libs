@@ -134,7 +134,7 @@ impl WebsocketServer {
         tracing::debug!("Raw request bytes: {:?}", &buffer[..n]);
 
         let stream = BufferedStream {
-            buffer: buffer.into_boxed_slice(),
+            buffer: buffer[..n].to_vec().into_boxed_slice(),
             stream,
             pos: 0,
         };
