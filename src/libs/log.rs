@@ -6,10 +6,10 @@ use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use tracing::{level_filters::LevelFilter, Level};
 use tracing_subscriber::fmt;
-use tracing_subscriber::{registry, EnvFilter};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
-use tracing_subscriber::Layer;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
+use tracing_subscriber::{registry, EnvFilter};
 
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -101,14 +101,21 @@ impl LoggingGuard {
         }
     }
 }
-pub fn setup_logs(log_level: LogLevel, log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>) -> eyre::Result<()> {
+pub fn setup_logs(
+    log_level: LogLevel,
+    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
+) -> eyre::Result<()> {
     let filter = build_env_filter(log_level)?;
 
-    let stdout_layer: tracing_subscriber::filter::Filtered<fmt::Layer<registry::Registry>, EnvFilter, registry::Registry> = fmt::layer()
-    .with_thread_names(true)
-    .with_line_number(true)
-    .with_filter(filter);
-    
+    let stdout_layer: tracing_subscriber::filter::Filtered<
+        fmt::Layer<registry::Registry>,
+        EnvFilter,
+        registry::Registry,
+    > = fmt::layer()
+        .with_thread_names(true)
+        .with_line_number(true)
+        .with_filter(filter);
+
     if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
         let file_filter = if let Some(file_log_level) = file_log_level {
             build_env_filter(file_log_level)?
@@ -118,17 +125,17 @@ pub fn setup_logs(log_level: LogLevel, log_dir_and_file_prefix: Option<(PathBuf,
 
         registry()
             .with(stdout_layer)
-            .with(fmt::layer()
-            .with_thread_names(true)
-            .with_line_number(true)
-            .with_writer(tracing_appender::rolling::hourly(log_dir, file_prefix))
-            .with_filter(file_filter))
+            .with(
+                fmt::layer()
+                    .with_thread_names(true)
+                    .with_line_number(true)
+                    .with_ansi(false)
+                    .with_writer(tracing_appender::rolling::hourly(log_dir, file_prefix))
+                    .with_filter(file_filter),
+            )
             .init();
-        
     } else {
-        registry()
-        .with(stdout_layer)
-        .init();
+        registry().with(stdout_layer).init();
     }
 
     Ok(())
