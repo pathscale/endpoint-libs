@@ -103,6 +103,7 @@ impl<
         context.seq = req.seq;
         context.method = req.method;
         context.user_id = self.conn_info.get_user_id();
+        context.role = self.conn_info.get_role();
 
         let handler = self.server.handlers.get(&req.method);
         let handler = match handler {
@@ -123,7 +124,10 @@ impl<
         let toolbox = self.server.toolbox.clone();
         tokio::task::spawn_local(async move {
             TOOLBOX
-                .scope(toolbox.clone(), handler.handle(&toolbox, context, req.params))
+                .scope(
+                    toolbox.clone(),
+                    handler.handle(&toolbox, context, req.params),
+                )
                 .await;
         });
 

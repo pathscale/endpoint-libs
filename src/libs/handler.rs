@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use eyre::Result;
 use serde_json::Value;
 
-use super::{error_code::ErrorCode, toolbox::{ArcToolbox, RequestContext, Toolbox}, ws::{request_error_to_resp, WsRequest}};
+use super::{
+    error_code::ErrorCode,
+    toolbox::{ArcToolbox, RequestContext, Toolbox},
+    ws::{request_error_to_resp, WsRequest},
+};
 
 #[allow(type_alias_bounds)]
 pub type Response<T: WsRequest> = Result<T::Response>;
@@ -46,6 +50,7 @@ impl<T: RequestHandler> RequestHandlerErased for T {
             }
         };
 
+        // TODO: check role here
         let fut = RequestHandler::handle(self, ctx, data);
 
         let resp = fut.await;
