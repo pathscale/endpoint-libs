@@ -2,6 +2,7 @@ use eyre::Result;
 use futures::StreamExt;
 use futures::{Sink, SinkExt, Stream};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -105,6 +106,21 @@ impl<
         context.user_id = self.conn_info.get_user_id();
         context.role = self.conn_info.get_role();
 
+        // Check roles
+        let allowed_roles = self.server.allowed_roles.get(&req.method).unwrap();
+        let allowed = check_roles(context.role, allowed_roles);
+        if !allowed {
+            self.server.toolbox.send(
+                context.connection_id,
+                request_error_to_resp(
+                    &context,
+                    ErrorCode::new(100403), // Forbidden
+                    "Forbidden",
+                ),
+            );
+            return Ok(true);
+        }
+
         let handler = self.server.handlers.get(&req.method);
         let handler = match handler {
             Some(handler) => handler,
@@ -170,5 +186,30 @@ impl<
         // info!(?msg, "Sending message");
         self.conn.send(msg).await?;
         Ok(())
+    }
+}
+
+fn check_roles(role: u32, allowed_roles: &Option<HashSet<u32>>) -> bool {
+    if let Some(allowed_roles) = allowed_roles {
+        if allowed_roles.is_empty() {
+            return false; // No roles required, do not allow all
+        }
+        return allowed_roles.contains(&role);
+    }
+    true // No roles specified, allow all
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn check_roles_allowed() {
+        use super::check_roles;
+        use std::collections::HashSet;
+
+        let allowed_roles: HashSet<u32> = [1, 2, 3].iter().cloned().collect();
+        assert!(check_roles(1, &Some(allowed_roles.clone())));
+        assert!(check_roles(2, &Some(allowed_roles.clone())));
+        assert!(check_roles(3, &Some(allowed_roles.clone())));
+        assert!(!check_roles(4, &Some(allowed_roles)));
     }
 }

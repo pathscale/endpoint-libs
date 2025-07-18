@@ -1,7 +1,7 @@
 use eyre::{bail, eyre, ContextCompat, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,6 +31,7 @@ use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates,
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
     pub handlers: HashMap<u32, WsEndpoint>,
+    pub allowed_roles: HashMap<u32, Option<HashSet<u32>>>,
     pub message_receiver: Option<mpsc::Receiver<ConnectionId>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
@@ -91,6 +92,7 @@ impl WebsocketServer {
     pub fn new(config: WsServerConfig) -> Self {
         Self {
             auth_controller: Arc::new(SimpleAuthController),
+            allowed_roles: HashMap::new(),
             handlers: Default::default(),
             message_receiver: None,
             toolbox: Toolbox::new(),
@@ -102,17 +104,22 @@ impl WebsocketServer {
     }
     pub fn add_handler<T: RequestHandler + 'static>(&mut self, handler: T) {
         let schema = serde_json::from_str(T::Request::SCHEMA).expect("Invalid schema");
+        let roles: &[&u32] = T::Request::ROLES;
         check_handler::<T>(&schema).expect("Invalid handler");
-        self.add_handler_erased(schema, Arc::new(handler))
+        self.add_handler_erased(schema, roles, Arc::new(handler))
     }
     pub fn add_handler_erased(
         &mut self,
         schema: EndpointSchema,
+        roles: &[&u32],
         handler: Arc<dyn RequestHandlerErased>,
     ) {
+        let roles_set = Some(roles.iter().map(|&x| *x).collect::<HashSet<u32>>());
+        let _old_roles = self.allowed_roles.insert(schema.code.clone(), roles_set);
+
         let old = self
             .handlers
-            .insert(schema.code, WsEndpoint { schema, handler });
+            .insert(schema.code.clone(), WsEndpoint { schema, handler });
         if let Some(old) = old {
             panic!(
                 "Overwriting handler for endpoint {} {}",

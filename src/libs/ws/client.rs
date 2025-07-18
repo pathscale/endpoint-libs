@@ -23,6 +23,7 @@ pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Response: WsResponse;
     const METHOD_ID: u32;
     const SCHEMA: &'static str;
+    const ROLES: &'static [&u32];
 }
 pub trait WsResponse: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Request: WsRequest;
@@ -32,18 +33,27 @@ pub struct WsClient {
     seq: u32,
 }
 impl WsClient {
-    pub async fn new(connect_addr: &str, protocol_header: &str, headers: Option<Vec<(&'static str, &'static str)>>) -> Result<Self> {
+    pub async fn new(
+        connect_addr: &str,
+        protocol_header: &str,
+        headers: Option<Vec<(&'static str, &'static str)>>,
+    ) -> Result<Self> {
         let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
-        req.headers_mut()
-            .insert("Sec-WebSocket-Protocol", HeaderValue::from_str(protocol_header)?);
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_str(protocol_header)?,
+        );
 
         if let Some(headers) = headers {
             for header in headers {
-                req.headers_mut().insert(header.0, HeaderValue::from_str(header.1)?);
+                req.headers_mut()
+                    .insert(header.0, HeaderValue::from_str(header.1)?);
             }
         }
 
-        let (ws_stream, _) = connect_async(req).await.context("Failed to connect to endpoint")?;
+        let (ws_stream, _) = connect_async(req)
+            .await
+            .context("Failed to connect to endpoint")?;
         Ok(Self {
             stream: ws_stream,
             seq: 0,
@@ -61,13 +71,21 @@ impl WsClient {
         Ok(())
     }
     pub async fn recv_raw(&mut self) -> Result<WsResponseValue> {
-        let msg = self.stream.next().await.ok_or(eyre!("Connection closed"))??;
+        let msg = self
+            .stream
+            .next()
+            .await
+            .ok_or(eyre!("Connection closed"))??;
         let resp: WsResponseValue = serde_json::from_str(&msg.to_string())?;
         Ok(resp)
     }
     pub async fn recv_resp<T: DeserializeOwned>(&mut self) -> Result<T> {
         loop {
-            let msg = self.stream.next().await.ok_or(eyre!("Connection closed"))??;
+            let msg = self
+                .stream
+                .next()
+                .await
+                .ok_or(eyre!("Connection closed"))??;
             match msg {
                 Message::Text(text) => {
                     debug!("recv resp: {}", text);
@@ -89,7 +107,10 @@ impl WsClient {
                             bail!("unreachable")
                         }
                         WsResponseGeneric::Log(WsLogResponse {
-                            log_id, level, message, ..
+                            log_id,
+                            level,
+                            message,
+                            ..
                         }) => match level {
                             LogLevel::Error => error!(?log_id, "{}", message),
                             LogLevel::Warn => warn!(?log_id, "{}", message),
