@@ -192,11 +192,11 @@ impl<
 fn check_roles(role: u32, allowed_roles: &Option<HashSet<u32>>) -> bool {
     if let Some(allowed_roles) = allowed_roles {
         if allowed_roles.is_empty() {
-            return false; // No roles required, do not allow all
+            return false; // Empty roles means no roles are allowed
         }
         return allowed_roles.contains(&role);
     }
-    true // No roles specified, allow all
+    true // If roles are None, allow all
 }
 
 #[cfg(test)]
@@ -211,5 +211,21 @@ mod tests {
         assert!(check_roles(2, &Some(allowed_roles.clone())));
         assert!(check_roles(3, &Some(allowed_roles.clone())));
         assert!(!check_roles(4, &Some(allowed_roles)));
+    }
+
+    #[test]
+    fn check_roles_none() {
+        use super::check_roles;
+
+        assert!(check_roles(1, &None)); // If roles are None, allow all
+    }
+
+    #[test]
+    fn check_roles_empty() {
+        use super::check_roles;
+        use std::collections::HashSet;
+
+        let allowed_roles: HashSet<u32> = HashSet::new();
+        assert!(!check_roles(1, &Some(allowed_roles))); // Empty roles means no roles are allowed
     }
 }

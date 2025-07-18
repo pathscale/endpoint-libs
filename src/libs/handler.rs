@@ -50,7 +50,6 @@ impl<T: RequestHandler> RequestHandlerErased for T {
             }
         };
 
-        // TODO: check role here
         let fut = RequestHandler::handle(self, ctx, data);
 
         let resp = fut.await;
