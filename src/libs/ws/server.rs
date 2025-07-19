@@ -114,16 +114,13 @@ impl WebsocketServer {
         roles: Option<&[u32]>,
         handler: Arc<dyn RequestHandlerErased>,
     ) {
-        let roles_set = match roles {
-            Some(roles) => Some(roles.iter().cloned().collect::<HashSet<u32>>()),
-            None => None,
-        };
+        let roles_set = roles.map(|roles| roles.iter().cloned().collect::<HashSet<u32>>());
 
         let _old_roles = self.allowed_roles.insert(schema.code.clone(), roles_set);
 
         let old = self
             .handlers
-            .insert(schema.code.clone(), WsEndpoint { schema, handler });
+            .insert(schema.code, WsEndpoint { schema, handler });
         if let Some(old) = old {
             panic!(
                 "Overwriting handler for endpoint {} {}",
