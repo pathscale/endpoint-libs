@@ -111,10 +111,7 @@ impl<
             return Ok(true);
         };
 
-        let allowed = check_roles(
-            context.role,
-            allowed_roles.expect("Allowed roles must be set into `server`"),
-        );
+        let allowed = check_roles(context.role, allowed_roles);
         if !allowed {
             self.server.toolbox.send(
                 context.connection_id,
