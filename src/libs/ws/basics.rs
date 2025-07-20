@@ -39,11 +39,11 @@ pub struct WsConnection {
 }
 impl WsConnection {
     pub fn get_user_id(&self) -> i64 {
-        self.user_id.load(std::sync::atomic::Ordering::Relaxed)
+        self.user_id.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn get_role(&self) -> u32 {
-        self.role.load(std::sync::atomic::Ordering::Relaxed)
+        self.role.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
