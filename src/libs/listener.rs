@@ -107,12 +107,7 @@ pub fn load_certs<'a, T: AsRef<Path>>(
         let reader = &mut std::io::BufReader::new(f);
         let certs_results = certs(reader);
 
-        let certs: Vec<CertificateDer> = certs_results
-            .filter_map(|result| match result {
-                Ok(value) => Some(value), // Map Ok values to Some(value)
-                Err(_) => None,           // Ignore Err values
-            })
-            .collect();
+        let certs: Vec<CertificateDer> = certs_results.filter_map(|result| result.ok()).collect();
 
         r_certs.extend(certs);
     }
