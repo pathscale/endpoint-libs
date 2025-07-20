@@ -116,7 +116,7 @@ impl WebsocketServer {
     ) {
         let roles_set = roles.map(|roles| roles.iter().cloned().collect::<HashSet<u32>>());
 
-        let _old_roles = self.allowed_roles.insert(schema.code.clone(), roles_set);
+        let _old_roles = self.allowed_roles.insert(schema.code, roles_set);
 
         let old = self
             .handlers

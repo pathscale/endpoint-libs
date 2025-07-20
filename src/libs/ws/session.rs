@@ -107,8 +107,15 @@ impl<
         context.role = self.conn_info.get_role();
 
         // Check roles
-        let allowed_roles = self.server.allowed_roles.get(&req.method).unwrap();
-        let allowed = check_roles(context.role, allowed_roles);
+        let allowed_roles = self.server.allowed_roles.get(&req.method);
+        if allowed_roles.is_none() {
+            return Ok(true);
+        }
+
+        let allowed = check_roles(
+            context.role,
+            allowed_roles.expect("Allowed roles must be set into `server`"),
+        );
         if !allowed {
             self.server.toolbox.send(
                 context.connection_id,
@@ -191,9 +198,6 @@ impl<
 
 fn check_roles(role: u32, allowed_roles: &Option<HashSet<u32>>) -> bool {
     if let Some(allowed_roles) = allowed_roles {
-        if allowed_roles.is_empty() {
-            return false; // Empty roles means no roles are allowed
-        }
         return allowed_roles.contains(&role);
     }
     true // If roles are None, allow all
