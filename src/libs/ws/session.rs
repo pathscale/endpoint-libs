@@ -107,10 +107,9 @@ impl<
         context.role = self.conn_info.get_role();
 
         // Check roles
-        let allowed_roles = self.server.allowed_roles.get(&req.method);
-        if allowed_roles.is_none() {
+        let Some(allowed_roles) = self.server.allowed_roles.get(&req.method) else {
             return Ok(true);
-        }
+        };
 
         let allowed = check_roles(
             context.role,
