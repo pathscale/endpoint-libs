@@ -58,8 +58,12 @@ pub struct TlsListener<T> {
 impl<T: ConnectionListener> TlsListener<T> {
     pub async fn bind(under: T, pub_certs: Vec<PathBuf>, priv_cert: PathBuf) -> Result<Self> {
         let certs = load_certs(&pub_certs)?;
-        ensure!(!certs.is_empty(), "No certificates found in file: {:?}", pub_certs);
-        
+        ensure!(
+            !certs.is_empty(),
+            "No certificates found in file: {:?}",
+            pub_certs
+        );
+
         let key = load_private_key(&priv_cert)?;
 
         let tls_cfg = {
@@ -69,7 +73,10 @@ impl<T: ConnectionListener> TlsListener<T> {
             Arc::new(cfg)
         };
         let acceptor = TlsAcceptor::from(tls_cfg);
-        Ok(Self { tcp: under, acceptor })
+        Ok(Self {
+            tcp: under,
+            acceptor,
+        })
     }
 }
 impl<T: ConnectionListener + 'static> ConnectionListener for TlsListener<T> {
@@ -89,7 +96,9 @@ impl<T: ConnectionListener + 'static> ConnectionListener for TlsListener<T> {
 }
 
 // Load public certificates from files.
-pub fn load_certs<'a, T: AsRef<Path>>(path: impl IntoIterator<Item = T>) -> Result<Vec<CertificateDer<'a>>> {
+pub fn load_certs<'a, T: AsRef<Path>>(
+    path: impl IntoIterator<Item = T>,
+) -> Result<Vec<CertificateDer<'a>>> {
     let mut r_certs = vec![];
     for p in path {
         let p = p.as_ref();
@@ -98,11 +107,7 @@ pub fn load_certs<'a, T: AsRef<Path>>(path: impl IntoIterator<Item = T>) -> Resu
         let reader = &mut std::io::BufReader::new(f);
         let certs_results = certs(reader);
 
-        let certs: Vec<CertificateDer> = certs_results.filter_map(|result| match result {
-            Ok(value) => Some(value),  // Map Ok values to Some(value)
-            Err(_) => None,            // Ignore Err values
-        })
-        .collect();
+        let certs: Vec<CertificateDer> = certs_results.filter_map(|result| result.ok()).collect();
 
         r_certs.extend(certs);
     }

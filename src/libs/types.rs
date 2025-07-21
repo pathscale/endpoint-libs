@@ -21,7 +21,7 @@ pub mod WithBlockchainAddress {
     where
         S: Serializer,
     {
-        format!("{:?}", this).serialize(serializer)
+        format!("{this:?}").serialize(serializer)
     }
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Address, D::Error>
     where
@@ -90,7 +90,7 @@ pub mod WithBlockchainTransactionHash {
     where
         S: Serializer,
     {
-        format!("{:?}", this).serialize(serializer)
+        format!("{this:?}").serialize(serializer)
     }
     pub fn deserialize<'de, D>(deserializer: D) -> Result<H256, D::Error>
     where

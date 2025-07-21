@@ -27,6 +27,9 @@ pub struct EndpointSchema {
     /// The JSON schema of the endpoint (`Default::default()`)
     #[serde(default)]
     pub json_schema: serde_json::Value,
+
+    // Allowed roles for this endoint (["EnumRole::EnumVariant"])
+    pub roles: Option<Vec<String>>,
 }
 
 impl EndpointSchema {
@@ -45,6 +48,7 @@ impl EndpointSchema {
             stream_response: None,
             description: "".to_string(),
             json_schema: Default::default(),
+            roles: None,
         }
     }
 
@@ -57,6 +61,12 @@ impl EndpointSchema {
     /// Adds a description field to the endpoint.
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.description = desc.into();
+        self
+    }
+
+    /// Adds allowed roles to the endpoint.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = Some(roles);
         self
     }
 }
