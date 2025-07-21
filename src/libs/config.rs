@@ -35,6 +35,6 @@ pub fn load_config<Config: DeserializeOwned + Debug>(mut service_name: String) -
     root.remove(&service_name);
     root.insert("name".to_string(), Value::String(service_name.clone()));
     let config: Config = serde_json::from_value(config)?;
-    println!("App config {:#?}", config);
+    println!("App config {config:#?}");
     Ok(config)
 }

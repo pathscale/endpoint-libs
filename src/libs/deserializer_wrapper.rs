@@ -264,6 +264,6 @@ mod tests {
 
         let r: Result<Test, _> = serde_path_to_error::deserialize(jd);
 
-        println!("{:?}", r);
+        println!("{r:?}");
     }
 }

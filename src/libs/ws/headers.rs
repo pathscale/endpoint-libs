@@ -160,13 +160,13 @@ fn parse_ty(ty: &Type, value: &str) -> Result<serde_json::Value> {
         Type::Int => serde_json::Value::Number(
             value
                 .parse::<i64>()
-                .with_context(|| format!("Failed to parse integer: {}", value))?
+                .with_context(|| format!("Failed to parse integer: {value}"))?
                 .into(),
         ),
         Type::Boolean => serde_json::Value::Bool(
             value
                 .parse::<bool>()
-                .with_context(|| format!("Failed to parse boolean: {}", value))?,
+                .with_context(|| format!("Failed to parse boolean: {value}"))?,
         ),
         Type::Enum { .. } => serde_json::Value::String(value.to_string()),
         Type::EnumRef(_) => serde_json::Value::String(value.to_string()),
@@ -199,7 +199,7 @@ impl AuthController for EndpointAuthController {
             let endpoint = self
                 .auth_endpoints
                 .get(*method)
-                .with_context(|| format!("Could not find endpoint for method {}", method))?;
+                .with_context(|| format!("Could not find endpoint for method {method}"))?;
             let mut params = serde_json::Map::new();
             for (index, param) in endpoint.schema.parameters.iter().enumerate() {
                 let index = index + 1;

@@ -21,7 +21,7 @@ pub fn encode_header<T: Serialize>(v: T, schema: EndpointSchema) -> Result<Strin
 
     for (i, f) in schema.parameters.iter().enumerate() {
         let key = f.name.to_case(Case::Camel);
-        let value = v.get(&key).with_context(|| format!("key: {}", key))?;
+        let value = v.get(&key).with_context(|| format!("key: {key}"))?;
         if value.is_null() {
             continue;
         }
@@ -64,7 +64,7 @@ pub fn align_precision(a: f64, b: f64) -> f64 {
 
 pub fn count_dp(num: f64) -> usize {
     // Convert the f64 to a string representation
-    let num_str = format!("{}", num);
+    let num_str = format!("{num}");
 
     // Find the position of the decimal point
     if let Some(decimal_index) = num_str.find('.') {

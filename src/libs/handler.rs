@@ -40,9 +40,9 @@ impl<T: RequestHandler> RequestHandlerErased for T {
                         &ctx,
                         ErrorCode::new(100400), // Bad Request
                         if let Some(path) = path {
-                            format!("{}: {}", path, err)
+                            format!("{path}: {err}")
                         } else {
-                            format!("{}", err)
+                            format!("{err}")
                         },
                     ),
                 );

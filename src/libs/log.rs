@@ -161,13 +161,13 @@ impl DynLogger {
 
 /// actually test writing, there is no direct way to check if the application has the ownership or the write access
 pub fn can_create_file_in_directory(directory: &str) -> bool {
-    let test_file_path: String = format!("{}/test_file.txt", directory);
+    let test_file_path: String = format!("{directory}/test_file.txt");
     match std::fs::File::create(&test_file_path) {
         Ok(file) => {
             // File created successfully; remove it after checking
             drop(file);
             if let Err(err) = std::fs::remove_file(&test_file_path) {
-                eprintln!("Error deleting test file: {}", err);
+                eprintln!("Error deleting test file: {err}");
             }
             true
         }
