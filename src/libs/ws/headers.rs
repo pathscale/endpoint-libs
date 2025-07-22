@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio_tungstenite::tungstenite::handshake::server::{Callback, ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::handshake::server::{
+    Callback, ErrorResponse, Request, Response,
+};
 use tracing::*;
 
 use crate::libs::toolbox::ArcToolbox;
@@ -25,8 +27,12 @@ pub struct VerifyProtocol<'a> {
     pub allow_cors_domains: &'a Option<Vec<String>>,
 }
 
-impl Callback for VerifyProtocol<'_>  {
-    fn on_request(self, request: &Request, mut response: Response) -> Result<Response, ErrorResponse> {
+impl Callback for VerifyProtocol<'_> {
+    fn on_request(
+        self,
+        request: &Request,
+        mut response: Response,
+    ) -> Result<Response, ErrorResponse> {
         let addr = self.addr;
         debug!(?addr, "handshake request: {:?}", request);
 
@@ -38,7 +44,9 @@ impl Callback for VerifyProtocol<'_>  {
         let protocol_str = match protocol {
             Some(protocol) => protocol
                 .to_str()
-                .map_err(|_| ErrorResponse::new(Some("Sec-WebSocket-Protocol is not valid utf-8".to_owned())))?
+                .map_err(|_| {
+                    ErrorResponse::new(Some("Sec-WebSocket-Protocol is not valid utf-8".to_owned()))
+                })?
                 .to_string(),
             None => "".to_string(),
         };
@@ -51,7 +59,12 @@ impl Callback for VerifyProtocol<'_>  {
         if !protocol_str.is_empty() {
             response.headers_mut().insert(
                 "Sec-WebSocket-Protocol",
-                protocol_str.split(',').next().unwrap_or("").parse().unwrap(),
+                protocol_str
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .parse()
+                    .unwrap(),
             );
         }
 
@@ -141,7 +154,11 @@ impl EndpointAuthController {
             auth_endpoints: Default::default(),
         }
     }
-    pub fn add_auth_endpoint(&mut self, schema: EndpointSchema, handler: impl SubAuthController + 'static) {
+    pub fn add_auth_endpoint(
+        &mut self,
+        schema: EndpointSchema,
+        handler: impl SubAuthController + 'static,
+    ) {
         self.auth_endpoints.insert(
             schema.name.to_ascii_lowercase(),
             WsAuthController {

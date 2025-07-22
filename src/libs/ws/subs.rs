@@ -29,7 +29,12 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
         }
     }
 
-    pub fn subscribe(&mut self, ctx: RequestContext, setting: S, modify: impl FnOnce(&mut SubscribeContext<S>)) {
+    pub fn subscribe(
+        &mut self,
+        ctx: RequestContext,
+        setting: S,
+        modify: impl FnOnce(&mut SubscribeContext<S>),
+    ) {
         self.subscribe_with(ctx, vec![], || setting, modify)
     }
     pub fn subscribe_with_keys(
@@ -58,7 +63,10 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             });
 
         for key in keys {
-            self.mappings.entry(key).or_default().insert(ctx.connection_id);
+            self.mappings
+                .entry(key)
+                .or_default()
+                .insert(ctx.connection_id);
         }
     }
 
@@ -94,7 +102,12 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
         }
     }
 
-    pub fn publish_to(&mut self, toolbox: &ArcToolbox, connection_id: ConnectionId, msg: &impl Serialize) {
+    pub fn publish_to(
+        &mut self,
+        toolbox: &ArcToolbox,
+        connection_id: ConnectionId,
+        msg: &impl Serialize,
+    ) {
         let mut dead_connection = None;
 
         let Some(sub) = self.subscribes.get(&connection_id) else {
@@ -186,7 +199,6 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-
 
     use crate::libs::toolbox::{RequestContext, Toolbox};
 

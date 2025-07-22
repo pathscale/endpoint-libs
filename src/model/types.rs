@@ -13,7 +13,10 @@ pub struct Field {
 impl Field {
     /// Creates a new `Field` with the given name and type.
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
-        Self { name: name.into(), ty }
+        Self {
+            name: name.into(),
+            ty,
+        }
     }
 }
 
@@ -42,7 +45,11 @@ impl EnumVariant {
     }
 
     /// Creates a new `EnumVariant` with the given name, value and comment.
-    pub fn new_with_comment(name: impl Into<String>, value: i64, comment: impl Into<String>) -> Self {
+    pub fn new_with_comment(
+        name: impl Into<String>,
+        value: i64,
+        comment: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             value,
@@ -63,14 +70,23 @@ pub enum Type {
     Bytea,
     UUID,
     Inet,
-    Struct { name: String, fields: Vec<Field> },
+    Struct {
+        name: String,
+        fields: Vec<Field>,
+    },
     StructRef(String),
     Object,
-    DataTable { name: String, fields: Vec<Field> },
+    DataTable {
+        name: String,
+        fields: Vec<Field>,
+    },
     Vec(Box<Type>),
     Unit,
     Optional(Box<Type>),
-    Enum { name: String, variants: Vec<EnumVariant> },
+    Enum {
+        name: String,
+        variants: Vec<EnumVariant>,
+    },
     EnumRef(String),
     TimeStampMs,
     BlockchainDecimal,

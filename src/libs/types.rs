@@ -98,8 +98,8 @@ pub mod WithBlockchainTransactionHash {
     {
         let value = String::deserialize(deserializer)?;
 
-        let h256_value = H256::from_str(&value).map_err(|e| D::Error::custom(e.to_string()))?;        
-        
+        let h256_value = H256::from_str(&value).map_err(|e| D::Error::custom(e.to_string()))?;
+
         Ok(h256_value)
     }
 }
