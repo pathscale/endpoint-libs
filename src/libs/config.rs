@@ -9,7 +9,13 @@ use std::path::PathBuf;
 #[clap(author, version, about, long_about = None)]
 struct CliArgument {
     /// The path to config file
-    #[arg(short, long, value_name = "FILE", default_value = "etc/config.json", env = "CONFIG")]
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        default_value = "etc/config.json",
+        env = "CONFIG"
+    )]
     config: PathBuf,
     /// The path to config file
     #[clap(long)]

@@ -29,12 +29,20 @@ fn sort_parameters(parameters: Vec<Field>) -> Vec<Field> {
 
 impl ProceduralFunction {
     /// Creates a new `ProceduralFunction` with the given name, parameters, returns and body.
-    pub fn new(name: impl Into<String>, parameters: Vec<Field>, returns: Vec<Field>, body: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        parameters: Vec<Field>,
+        returns: Vec<Field>,
+        body: impl Into<String>,
+    ) -> Self {
         let name = name.into();
         Self {
             name: name.clone(),
             parameters: sort_parameters(parameters),
-            return_row_type: Type::struct_(format!("{}RespRow", name.to_case(Case::Pascal)), returns),
+            return_row_type: Type::struct_(
+                format!("{}RespRow", name.to_case(Case::Pascal)),
+                returns,
+            ),
             body: body.into(),
         }
     }

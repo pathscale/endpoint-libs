@@ -30,8 +30,13 @@ impl WebsocketStates {
         message_queue: tokio::sync::mpsc::Sender<Message>,
         conn: Arc<WsConnection>,
     ) {
-        self.states
-            .insert(connection_id, Arc::new(WsStreamState { conn, message_queue }));
+        self.states.insert(
+            connection_id,
+            Arc::new(WsStreamState {
+                conn,
+                message_queue,
+            }),
+        );
     }
 }
 

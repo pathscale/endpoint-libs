@@ -58,17 +58,22 @@ impl PooledDbClient {
                 .get()
                 .await
                 .context("Failed to connect to database")?;
-            let statement =
-                tokio::time::timeout(Duration::from_secs(20), client.prepare_cached(req.statement()))
-                    .await
-                    .context("timeout preparing statement")??;
+            let statement = tokio::time::timeout(
+                Duration::from_secs(20),
+                client.prepare_cached(req.statement()),
+            )
+            .await
+            .context("timeout preparing statement")??;
             let rows = match tokio::time::timeout(
                 Duration::from_secs(20),
                 client.query(&statement, &req.params()),
             )
             .await
-            .context(format!("timeout executing statement: {}, params: {:?}", req.statement(), req.params()))?
-            {
+            .context(format!(
+                "timeout executing statement: {}, params: {:?}",
+                req.statement(),
+                req.params()
+            ))? {
                 Ok(rows) => rows,
                 Err(err) => {
                     let reason = err.to_string();

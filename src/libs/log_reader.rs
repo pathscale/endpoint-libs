@@ -30,11 +30,20 @@ impl FromStr for LogEntry {
             .next()
             .and_then(|x| chrono::DateTime::parse_from_rfc3339(x).ok())
             .context("no datetime")?;
-        let level: tracing::Level = split.next().and_then(|x| x.parse().ok()).context("no level")?;
+        let level: tracing::Level = split
+            .next()
+            .and_then(|x| x.parse().ok())
+            .context("no level")?;
         let thread = split.next().context("no thread")?;
-        let path = split.next().map(|x| x[..x.len() - 1].to_string()).context("no path")?;
+        let path = split
+            .next()
+            .map(|x| x[..x.len() - 1].to_string())
+            .context("no path")?;
 
-        let line_number = split.next().and_then(|x| x[..x.len() - 1].parse().ok()).unwrap_or(0);
+        let line_number = split
+            .next()
+            .and_then(|x| x[..x.len() - 1].parse().ok())
+            .unwrap_or(0);
         let message = split.collect::<Vec<&str>>().join(" ");
         Ok(LogEntry {
             datetime: datetime.timestamp_millis(),
@@ -47,7 +56,10 @@ impl FromStr for LogEntry {
     }
 }
 
-pub async fn get_log_entries(path: impl AsRef<std::path::Path>, limit: usize) -> eyre::Result<Vec<LogEntry>> {
+pub async fn get_log_entries(
+    path: impl AsRef<std::path::Path>,
+    limit: usize,
+) -> eyre::Result<Vec<LogEntry>> {
     // Specify the path to your log file
     let file = std::fs::File::open(path.as_ref())?;
     let lines = RevLines::new(file);
@@ -134,8 +146,16 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        writeln!(temp_file, "2025-03-19T12:34:56Z INFO thread-1 src/main.rs:42 Application started").unwrap();
-        writeln!(temp_file, "2025-03-19T12:35:01Z ERROR thread-2 src/lib.rs:128 Failed to connect").unwrap();
+        writeln!(
+            temp_file,
+            "2025-03-19T12:34:56Z INFO thread-1 src/main.rs:42 Application started"
+        )
+        .unwrap();
+        writeln!(
+            temp_file,
+            "2025-03-19T12:35:01Z ERROR thread-2 src/lib.rs:128 Failed to connect"
+        )
+        .unwrap();
 
         let entries = get_log_entries(temp_file.path(), 10).await.unwrap();
         assert_eq!(entries.len(), 2);

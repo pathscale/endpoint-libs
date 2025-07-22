@@ -49,7 +49,10 @@ impl<T> RDataTable<T> {
     pub fn map<R>(self, f: impl Fn(T) -> R) -> Vec<R> {
         self.rows.into_iter().map(f).collect()
     }
-    pub async fn map_async<R, F: Future<Output = Result<R>>>(self, f: impl Fn(T) -> F) -> Result<Vec<R>> {
+    pub async fn map_async<R, F: Future<Output = Result<R>>>(
+        self,
+        f: impl Fn(T) -> F,
+    ) -> Result<Vec<R>> {
         let mut futures = Vec::with_capacity(self.rows.len());
         for row in self.rows {
             futures.push(f(row).await?);

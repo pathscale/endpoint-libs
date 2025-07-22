@@ -12,7 +12,10 @@ use tracing::*;
 
 use super::error_code::ErrorCode;
 use super::log::LogLevel;
-use super::ws::{internal_error_to_resp, request_error_to_resp, ConnectionId, WsConnection, WsLogResponse, WsResponseValue, WsStreamState, WsSuccessResponse};
+use super::ws::{
+    internal_error_to_resp, request_error_to_resp, ConnectionId, WsConnection, WsLogResponse,
+    WsResponseValue, WsStreamState, WsSuccessResponse,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NoResponseError;
@@ -106,7 +109,11 @@ impl Toolbox {
         })
     }
 
-    pub fn set_ws_states(&self, states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>, oneshot: bool) {
+    pub fn set_ws_states(
+        &self,
+        states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+        oneshot: bool,
+    ) {
         *self.send_msg.write() = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
@@ -118,7 +125,11 @@ impl Toolbox {
         });
     }
 
-    pub fn send_ws_msg(sender: &tokio::sync::mpsc::Sender<Message>, resp: WsResponseValue, oneshot: bool) {
+    pub fn send_ws_msg(
+        sender: &tokio::sync::mpsc::Sender<Message>,
+        resp: WsResponseValue,
+        oneshot: bool,
+    ) {
         let resp = serde_json::to_string(&resp).unwrap();
         if let Err(err) = sender.try_send(resp.into()) {
             warn!("Failed to send websocket message: {:?}", err)
@@ -157,7 +168,10 @@ impl Toolbox {
             }),
         );
     }
-    pub fn encode_ws_response<Resp: Serialize>(ctx: RequestContext, resp: Result<Resp>) -> Option<WsResponseValue> {
+    pub fn encode_ws_response<Resp: Serialize>(
+        ctx: RequestContext,
+        resp: Result<Resp>,
+    ) -> Option<WsResponseValue> {
         #[allow(unused_variables)]
         let RequestContext {
             connection_id,

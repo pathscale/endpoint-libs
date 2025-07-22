@@ -12,7 +12,9 @@ pub struct WarnManager {
 
 impl WarnManager {
     pub fn new() -> Self {
-        Self { warns: HashMap::new() }
+        Self {
+            warns: HashMap::new(),
+        }
     }
 
     pub fn warn(&mut self, s: impl AsRef<str>) {
@@ -22,7 +24,8 @@ impl WarnManager {
             stats.warn_count += 1;
         } else {
             warn!("First warning: {}", s);
-            self.warns.insert(s.to_string(), WarnStats { warn_count: 1 });
+            self.warns
+                .insert(s.to_string(), WarnStats { warn_count: 1 });
         }
     }
     pub fn get_warns(&self) -> &HashMap<String, WarnStats> {
