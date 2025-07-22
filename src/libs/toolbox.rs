@@ -66,7 +66,7 @@ impl std::error::Error for CustomError {}
 #[derive(Copy, Clone)]
 pub struct RequestContext {
     pub connection_id: ConnectionId,
-    pub user_id: i64,
+    pub user_id: u64,
     pub seq: u32,
     pub method: u32,
     pub log_id: u64,

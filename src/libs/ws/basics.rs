@@ -2,7 +2,7 @@ use serde::*;
 use serde_json::Value;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI64, AtomicU32};
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 use crate::libs::error_code::ErrorCode;
@@ -32,13 +32,13 @@ pub struct WsResponseError {
 #[derive(Debug)]
 pub struct WsConnection {
     pub connection_id: ConnectionId,
-    pub user_id: AtomicI64,
+    pub user_id: AtomicU64,
     pub role: AtomicU32,
     pub address: SocketAddr,
     pub log_id: u64,
 }
 impl WsConnection {
-    pub fn get_user_id(&self) -> i64 {
+    pub fn get_user_id(&self) -> u64 {
         self.user_id.load(std::sync::atomic::Ordering::Acquire)
     }
 
