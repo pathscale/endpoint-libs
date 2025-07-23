@@ -31,7 +31,7 @@ use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates,
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
     pub handlers: HashMap<u32, WsEndpoint>,
-    pub allowed_roles: HashMap<u32, Option<HashSet<u32>>>,
+    pub allowed_roles: HashMap<u32, HashSet<u32>>,
     pub message_receiver: Option<mpsc::Receiver<ConnectionId>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
@@ -104,17 +104,17 @@ impl WebsocketServer {
     }
     pub fn add_handler<T: RequestHandler + 'static>(&mut self, handler: T) {
         let schema = serde_json::from_str(T::Request::SCHEMA).expect("Invalid schema");
-        let roles: Option<&[u32]> = T::Request::ROLES;
+        let roles: &[u32] = T::Request::ROLES;
         check_handler::<T>(&schema).expect("Invalid handler");
         self.add_handler_erased(schema, roles, Arc::new(handler))
     }
     pub fn add_handler_erased(
         &mut self,
         schema: EndpointSchema,
-        roles: Option<&[u32]>,
+        roles: &[u32],
         handler: Arc<dyn RequestHandlerErased>,
     ) {
-        let roles_set = roles.map(|roles| roles.iter().cloned().collect::<HashSet<u32>>());
+        let roles_set = roles.iter().cloned().collect::<HashSet<u32>>();
 
         let _old_roles = self.allowed_roles.insert(schema.code, roles_set);
 

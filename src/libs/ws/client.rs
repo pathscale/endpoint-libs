@@ -23,7 +23,7 @@ pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Response: WsResponse;
     const METHOD_ID: u32;
     const SCHEMA: &'static str;
-    const ROLES: Option<&'static [u32]>;
+    const ROLES: &'static [u32];
 }
 pub trait WsResponse: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Request: WsRequest;
