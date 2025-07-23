@@ -193,7 +193,7 @@ impl<
 }
 
 fn check_roles(role: u32, allowed_roles: &HashSet<u32>) -> bool {
-    return allowed_roles.contains(&role);
+    allowed_roles.contains(&role)
 }
 
 #[cfg(test)]
