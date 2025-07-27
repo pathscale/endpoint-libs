@@ -50,10 +50,10 @@ impl<T: RequestHandler> RequestHandlerErased for T {
             }
         };
 
-        let fut = RequestHandler::handle(self, ctx, data);
+        let fut = RequestHandler::handle(self, ctx.clone(), data);
 
         let resp = fut.await;
-        if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
+        if let Some(resp) = Toolbox::encode_ws_response(ctx.clone(), resp) {
             toolbox.send(ctx.connection_id, resp);
         }
     }

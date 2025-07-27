@@ -46,7 +46,7 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
     }
     pub fn subscribe_multi(&self, topics: Vec<Key>, ctx: RequestContext) {
         for topic in topics {
-            self.subscribe(topic, ctx);
+            self.subscribe(topic, ctx.clone());
         }
     }
     pub fn subscribe(&self, topic: Key, ctx: RequestContext) {

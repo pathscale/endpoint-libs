@@ -6,8 +6,7 @@ use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
@@ -165,7 +164,7 @@ impl WebsocketServer {
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
-            role: AtomicU32::new(0),
+            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             address: addr,
             log_id: get_log_id(),
         });

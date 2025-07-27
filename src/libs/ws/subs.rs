@@ -57,7 +57,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             .entry(ctx.connection_id)
             .and_modify(modify)
             .or_insert_with(|| SubscribeContext {
-                ctx,
+                ctx: ctx.clone(),
                 stream_seq: AtomicU32::new(0),
                 settings: new(),
             });
@@ -212,9 +212,10 @@ mod tests {
             connection_id: 1,
             ..RequestContext::empty()
         };
-        manager.subscribe(ctx, (), |_| {});
+        manager.subscribe(ctx.clone(), (), |_| {});
         assert_eq!(manager.subscribes.len(), 1);
         assert_eq!(manager.mappings.len(), 0);
+
         let toolbox = Arc::new(Toolbox::new());
         manager.publish_to_all(&toolbox, &());
         manager.publish_to_key(&toolbox, &(), &());

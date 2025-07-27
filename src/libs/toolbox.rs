@@ -5,7 +5,6 @@ use serde::*;
 use serde_json::Value;
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
@@ -63,16 +62,17 @@ impl Display for CustomError {
 
 impl std::error::Error for CustomError {}
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct RequestContext {
     pub connection_id: ConnectionId,
     pub user_id: u64,
     pub seq: u32,
     pub method: u32,
     pub log_id: u64,
-    pub role: u32,
+    pub roles: Arc<Vec<u32>>,
     pub ip_addr: IpAddr,
 }
+
 impl RequestContext {
     pub fn empty() -> Self {
         Self {
@@ -81,18 +81,19 @@ impl RequestContext {
             seq: 0,
             method: 0,
             log_id: 0,
-            role: 0,
+            roles: Arc::new(Vec::new()),
             ip_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
         }
     }
     pub fn from_conn(conn: &WsConnection) -> Self {
+        let roles = conn.roles.read().unwrap().clone();
         Self {
             connection_id: conn.connection_id,
             user_id: conn.get_user_id(),
             seq: 0,
             method: 0,
             log_id: conn.log_id,
-            role: conn.role.load(Ordering::Relaxed),
+            roles,
             ip_addr: conn.address.ip(),
         }
     }
