@@ -43,7 +43,10 @@ impl WsConnection {
     }
 
     pub fn get_roles(&self) -> Vec<u32> {
-        let roles = self.roles.read().unwrap();
+        let roles = self
+            .roles
+            .read()
+            .expect("Failed to acquire roles read lock in WsConnection");
         Vec::from_iter(roles.iter().cloned())
     }
 
@@ -53,7 +56,10 @@ impl WsConnection {
     }
 
     pub fn set_roles(&self, roles: Arc<Vec<u32>>) {
-        let mut roles_lock = self.roles.write().unwrap();
+        let mut roles_lock = self
+            .roles
+            .write()
+            .expect("Failed to acquire roles write lock in WsConnection");
         *roles_lock = roles;
     }
 }
