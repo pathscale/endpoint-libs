@@ -56,20 +56,12 @@ jobs:
 
   format_check:
     runs-on: buildjet-8vcpu-ubuntu-2204
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: read
-      checks: write
-      repository-projects: write
+    
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - name: Install Rust Stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-            toolchain: stable
-            components: rustfmt
-            override: true
-      - uses: actions-rs/rustfmt@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --check --all --verbose
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
