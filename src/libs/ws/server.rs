@@ -1,12 +1,12 @@
 use eyre::{bail, eyre, ContextCompat, Result};
 use itertools::Itertools;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
@@ -165,7 +165,7 @@ impl WebsocketServer {
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
-            role: AtomicU32::new(0),
+            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             address: addr,
             log_id: get_log_id(),
         });

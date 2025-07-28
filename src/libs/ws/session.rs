@@ -104,14 +104,14 @@ impl<
         context.seq = req.seq;
         context.method = req.method;
         context.user_id = self.conn_info.get_user_id();
-        context.role = self.conn_info.get_role();
+        context.roles = Arc::new(self.conn_info.get_roles());
 
         // Check roles
         let Some(allowed_roles) = self.server.allowed_roles.get(&req.method) else {
             return Ok(true);
         };
 
-        let allowed = check_roles(context.role, allowed_roles);
+        let allowed = check_roles(context.roles.clone(), allowed_roles);
         if !allowed {
             self.server.toolbox.send(
                 context.connection_id,
@@ -192,22 +192,34 @@ impl<
     }
 }
 
-fn check_roles(role: u32, allowed_roles: &HashSet<u32>) -> bool {
-    allowed_roles.contains(&role)
+fn check_roles(actual_roles: Arc<Vec<u32>>, allowed_roles: &HashSet<u32>) -> bool {
+    if allowed_roles.is_empty() {
+        return false; // No roles are allowed
+    }
+    for role in actual_roles.iter() {
+        if allowed_roles.contains(role) {
+            return true; // At least one role is allowed
+        }
+    }
+    false // No roles matched
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     #[test]
     fn check_roles_allowed() {
         use super::check_roles;
         use std::collections::HashSet;
 
         let allowed_roles: HashSet<u32> = [1, 2, 3].iter().cloned().collect();
-        assert!(check_roles(1, &allowed_roles.clone()));
-        assert!(check_roles(2, &allowed_roles.clone()));
-        assert!(check_roles(3, &allowed_roles.clone()));
-        assert!(!check_roles(4, &allowed_roles));
+        assert!(check_roles(Arc::new(vec![1]), &allowed_roles.clone()));
+        assert!(check_roles(Arc::new(vec![2]), &allowed_roles.clone()));
+        assert!(check_roles(Arc::new(vec![1, 2]), &allowed_roles.clone()));
+        assert!(check_roles(Arc::new(vec![4, 2]), &allowed_roles.clone()));
+
+        assert!(!check_roles(Arc::new(vec![4]), &allowed_roles.clone()));
     }
 
     #[test]
@@ -216,6 +228,6 @@ mod tests {
         use std::collections::HashSet;
 
         let allowed_roles: HashSet<u32> = HashSet::new();
-        assert!(!check_roles(1, &allowed_roles)); // Empty roles means no roles are allowed
+        assert!(!check_roles(Arc::new(vec![1]), &allowed_roles));
     }
 }

@@ -1,8 +1,9 @@
+use parking_lot::RwLock;
 use serde::*;
 use serde_json::Value;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::libs::error_code::ErrorCode;
@@ -33,7 +34,7 @@ pub struct WsResponseError {
 pub struct WsConnection {
     pub connection_id: ConnectionId,
     pub user_id: AtomicU64,
-    pub role: AtomicU32,
+    pub roles: Arc<RwLock<Arc<Vec<u32>>>>,
     pub address: SocketAddr,
     pub log_id: u64,
 }
@@ -42,8 +43,19 @@ impl WsConnection {
         self.user_id.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn get_role(&self) -> u32 {
-        self.role.load(std::sync::atomic::Ordering::Acquire)
+    pub fn get_roles(&self) -> Vec<u32> {
+        let roles = self.roles.read();
+        roles.as_ref().clone()
+    }
+
+    pub fn set_user_id(&self, user_id: u64) {
+        self.user_id
+            .store(user_id, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn set_roles(&self, roles: Arc<Vec<u32>>) {
+        let mut roles_lock = self.roles.write();
+        *roles_lock = roles;
     }
 }
 

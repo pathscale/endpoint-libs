@@ -6,7 +6,6 @@ use futures::future::LocalBoxFuture;
 use futures::FutureExt;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
@@ -230,23 +229,30 @@ impl AuthController for EndpointAuthController {
                     _ => {}
                 }
             }
+            let roles = conn.roles.read().clone();
             let ctx = RequestContext {
                 connection_id: conn.connection_id,
                 user_id: 0,
                 seq: 0,
                 method: endpoint.schema.code,
                 log_id: conn.log_id,
-                role: conn.role.load(Ordering::Relaxed),
+                roles: roles.clone(),
                 ip_addr: conn.address.ip(),
             };
             let resp = endpoint
                 .handler
                 .clone()
-                .auth(&toolbox, serde_json::Value::Object(params), ctx, conn)
+                .auth(
+                    &toolbox,
+                    serde_json::Value::Object(params),
+                    ctx.clone(),
+                    conn,
+                )
                 .await;
             debug!("Auth response: {:?}", resp);
+            let conn_id = ctx.connection_id;
             if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
-                toolbox.send(ctx.connection_id, resp);
+                toolbox.send(conn_id, resp);
             }
             Ok(())
         }
