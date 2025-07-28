@@ -86,11 +86,7 @@ impl RequestContext {
         }
     }
     pub fn from_conn(conn: &WsConnection) -> Self {
-        let roles = conn
-            .roles
-            .read()
-            .expect("Can not get read lock for WsConnection")
-            .clone();
+        let roles = conn.roles.read().clone();
         Self {
             connection_id: conn.connection_id,
             user_id: conn.get_user_id(),

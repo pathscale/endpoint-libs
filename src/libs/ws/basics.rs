@@ -1,9 +1,10 @@
+use parking_lot::RwLock;
 use serde::*;
 use serde_json::Value;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::RequestHandlerErased;
@@ -43,10 +44,7 @@ impl WsConnection {
     }
 
     pub fn get_roles(&self) -> Vec<u32> {
-        let roles = self
-            .roles
-            .read()
-            .expect("Failed to acquire roles read lock in WsConnection");
+        let roles = self.roles.read();
         Vec::from_iter(roles.iter().cloned())
     }
 
@@ -56,10 +54,7 @@ impl WsConnection {
     }
 
     pub fn set_roles(&self, roles: Arc<Vec<u32>>) {
-        let mut roles_lock = self
-            .roles
-            .write()
-            .expect("Failed to acquire roles write lock in WsConnection");
+        let mut roles_lock = self.roles.write();
         *roles_lock = roles;
     }
 }

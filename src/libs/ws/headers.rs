@@ -229,11 +229,7 @@ impl AuthController for EndpointAuthController {
                     _ => {}
                 }
             }
-            let roles = conn
-                .roles
-                .read()
-                .expect("Can not get read lock for WsConnection")
-                .clone();
+            let roles = conn.roles.read().clone();
             let ctx = RequestContext {
                 connection_id: conn.connection_id,
                 user_id: 0,
