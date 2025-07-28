@@ -45,7 +45,7 @@ impl WsConnection {
 
     pub fn get_roles(&self) -> Vec<u32> {
         let roles = self.roles.read();
-        Vec::from_iter(roles.iter().cloned())
+        roles.as_ref().clone()
     }
 
     pub fn set_user_id(&self, user_id: u64) {
