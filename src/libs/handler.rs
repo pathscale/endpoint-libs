@@ -38,7 +38,7 @@ impl<T: RequestHandler> RequestHandlerErased for T {
                     ctx.connection_id,
                     request_error_to_resp(
                         &ctx,
-                        ErrorCode::new(100400), // Bad Request
+                        ErrorCode::BAD_REQUEST,
                         if let Some(path) = path {
                             format!("{path}: {err}")
                         } else {

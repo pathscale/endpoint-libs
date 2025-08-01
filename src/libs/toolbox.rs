@@ -197,11 +197,7 @@ impl Toolbox {
                 let err = err.downcast::<CustomError>().unwrap();
                 request_error_to_resp(&ctx, err.code, err.params)
             }
-            Err(err) => internal_error_to_resp(
-                &ctx,
-                ErrorCode::new(100500), // Internal Error
-                err,
-            ),
+            Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
         };
         Some(resp)
     }

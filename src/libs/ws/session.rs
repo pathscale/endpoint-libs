@@ -92,11 +92,7 @@ impl<
             Err(err) => {
                 self.server.toolbox.send(
                     context.connection_id,
-                    request_error_to_resp(
-                        &context,
-                        ErrorCode::new(100400), // BadRequest
-                        err.to_string(),
-                    ),
+                    request_error_to_resp(&context, ErrorCode::BAD_REQUEST, err.to_string()),
                 );
                 return Ok(true);
             }
@@ -115,11 +111,7 @@ impl<
         if !allowed {
             self.server.toolbox.send(
                 context.connection_id,
-                request_error_to_resp(
-                    &context,
-                    ErrorCode::new(100403), // Forbidden
-                    "Forbidden",
-                ),
+                request_error_to_resp(&context, ErrorCode::FORBIDDEN, "Forbidden"),
             );
             return Ok(true);
         }
@@ -130,11 +122,7 @@ impl<
             None => {
                 self.server.toolbox.send(
                     context.connection_id,
-                    request_error_to_resp(
-                        &context,
-                        ErrorCode::new(100501), // Not Implemented
-                        Value::Null,
-                    ),
+                    request_error_to_resp(&context, ErrorCode::NOT_IMPLEMENTED, Value::Null),
                 );
                 return Ok(true);
             }
