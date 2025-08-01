@@ -186,7 +186,7 @@ impl WebsocketServer {
         if let Err(err) = auth_result {
             self.toolbox.send_request_error(
                 &raw_ctx,
-                ErrorCode::new(100400), // BadRequest
+                ErrorCode::BAD_REQUEST,
                 err.to_string(),
             );
             return Err(err);
