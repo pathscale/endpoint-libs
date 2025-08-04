@@ -184,11 +184,8 @@ impl WebsocketServer {
             .await;
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
-            self.toolbox.send_request_error(
-                &raw_ctx,
-                ErrorCode::new(100400), // BadRequest
-                err.to_string(),
-            );
+            self.toolbox
+                .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
             return Err(err);
         }
         self.handle_session_connection(conn, states, stream, rx)
