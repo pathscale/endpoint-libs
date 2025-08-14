@@ -22,8 +22,8 @@ pub trait ConnectionListener: Send + Sync + Unpin {
     type Channel1: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
     type Channel2: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
 
-    fn accept(&self) -> BoxFuture<Result<(Self::Channel1, SocketAddr)>>;
-    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<Result<Self::Channel2>>;
+    fn accept(&self) -> BoxFuture<'_, Result<(Self::Channel1, SocketAddr)>>;
+    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<'_, Result<Self::Channel2>>;
 }
 
 pub struct TcpListener {
@@ -39,14 +39,14 @@ impl ConnectionListener for TcpListener {
     type Channel1 = TcpStream;
     type Channel2 = TcpStream;
 
-    fn accept(&self) -> BoxFuture<Result<(Self::Channel1, SocketAddr)>> {
+    fn accept(&self) -> BoxFuture<'_, Result<(Self::Channel1, SocketAddr)>> {
         async {
             let (stream, addr) = self.listener.accept().await?;
             Ok((stream, addr))
         }
         .boxed()
     }
-    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<Result<Self::Channel2>> {
+    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<'_, Result<Self::Channel2>> {
         async move { Ok(channel) }.boxed()
     }
 }
@@ -82,10 +82,10 @@ impl<T: ConnectionListener> TlsListener<T> {
 impl<T: ConnectionListener + 'static> ConnectionListener for TlsListener<T> {
     type Channel1 = T::Channel1;
     type Channel2 = TlsStream<T::Channel2>;
-    fn accept(&self) -> BoxFuture<Result<(Self::Channel1, SocketAddr)>> {
+    fn accept(&self) -> BoxFuture<'_, Result<(Self::Channel1, SocketAddr)>> {
         self.tcp.accept()
     }
-    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<Result<Self::Channel2>> {
+    fn handshake(&self, channel: Self::Channel1) -> BoxFuture<'_, Result<Self::Channel2>> {
         async {
             let channel = self.tcp.handshake(channel).await?;
             let tls_stream = self.acceptor.accept(channel).await?;
