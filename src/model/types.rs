@@ -7,7 +7,7 @@ pub struct Field {
     pub name: String,
 
     /// The description of the field
-    pub description: String,
+    pub description: Option<String>,
 
     /// The type of the field (e.g. `Type::BigInt`)
     pub ty: Type,
@@ -18,7 +18,7 @@ impl Field {
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
         Self {
             name: name.into(),
-            description: Default::default(),
+            description: None,
             ty,
         }
     }
@@ -31,7 +31,7 @@ impl Field {
     ) -> Self {
         Self {
             name: name.into(),
-            description: description.into(),
+            description: Some(description.into()),
             ty,
         }
     }
