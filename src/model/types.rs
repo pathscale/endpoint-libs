@@ -6,6 +6,9 @@ pub struct Field {
     /// The name of the field (e.g. `user_id`)
     pub name: String,
 
+    /// The description of the field
+    pub description: String,
+
     /// The type of the field (e.g. `Type::BigInt`)
     pub ty: Type,
 }
@@ -15,6 +18,20 @@ impl Field {
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
         Self {
             name: name.into(),
+            description: Default::default(),
+            ty,
+        }
+    }
+
+    /// Creates a new `Field` with the given name and type.
+    pub fn new_with_description(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        ty: Type,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
             ty,
         }
     }
