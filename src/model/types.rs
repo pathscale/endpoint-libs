@@ -7,7 +7,8 @@ pub struct Field {
     pub name: String,
 
     /// The description of the field
-    pub description: Option<String>,
+    #[serde(default)]
+    pub description: String,
 
     /// The type of the field (e.g. `Type::BigInt`)
     pub ty: Type,
@@ -15,11 +16,11 @@ pub struct Field {
 
 impl Field {
     /// Creates a new `Field` with the given name and type.
-    /// `description` is set to `None`.
+    /// `description` is set to `""`.
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
         Self {
             name: name.into(),
-            description: None,
+            description: "".into(),
             ty,
         }
     }
@@ -32,7 +33,7 @@ impl Field {
     ) -> Self {
         Self {
             name: name.into(),
-            description: Some(description.into()),
+            description: description.into(),
             ty,
         }
     }
@@ -45,7 +46,7 @@ pub struct EnumVariant {
     pub name: String,
 
     /// A description added by `new_with_description` method
-    pub description: Option<String>,
+    pub description: String,
 
     /// The value of the variant (e.g. 1)
     pub value: i64,
@@ -53,11 +54,11 @@ pub struct EnumVariant {
 
 impl EnumVariant {
     /// Creates a new `EnumVariant` with the given name and value.
-    /// `description` is set to `None`.
+    /// `description` is set to `""`.
     pub fn new(name: impl Into<String>, value: i64) -> Self {
         Self {
             name: name.into(),
-            description: None,
+            description: "".into(),
             value,
         }
     }
@@ -70,7 +71,7 @@ impl EnumVariant {
     ) -> Self {
         Self {
             name: name.into(),
-            description: Some(description.into()),
+            description: description.into(),
             value,
         }
     }
