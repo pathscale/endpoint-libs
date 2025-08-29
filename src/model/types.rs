@@ -6,15 +6,34 @@ pub struct Field {
     /// The name of the field (e.g. `user_id`)
     pub name: String,
 
+    /// The description of the field
+    #[serde(default)]
+    pub description: String,
+
     /// The type of the field (e.g. `Type::BigInt`)
     pub ty: Type,
 }
 
 impl Field {
     /// Creates a new `Field` with the given name and type.
+    /// `description` is set to `""`.
     pub fn new(name: impl Into<String>, ty: Type) -> Self {
         Self {
             name: name.into(),
+            description: "".into(),
+            ty,
+        }
+    }
+
+    /// Creates a new `Field` with the given name, type and description.
+    pub fn new_with_description(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        ty: Type,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
             ty,
         }
     }
@@ -26,34 +45,34 @@ pub struct EnumVariant {
     /// The name of the variant (e.g. `UniSwap`)
     pub name: String,
 
+    /// A description added by `new_with_description` method
+    pub description: String,
+
     /// The value of the variant (e.g. 1)
     pub value: i64,
-
-    /// A comment added by `new_with_comment` method
-    pub comment: String,
 }
 
 impl EnumVariant {
     /// Creates a new `EnumVariant` with the given name and value.
-    /// `comment` is set to `""`.
+    /// `description` is set to `""`.
     pub fn new(name: impl Into<String>, value: i64) -> Self {
         Self {
             name: name.into(),
+            description: "".into(),
             value,
-            comment: "".to_owned(),
         }
     }
 
-    /// Creates a new `EnumVariant` with the given name, value and comment.
-    pub fn new_with_comment(
+    /// Creates a new `EnumVariant` with the given name, value and description.
+    pub fn new_with_description(
         name: impl Into<String>,
+        description: impl Into<String>,
         value: i64,
-        comment: impl Into<String>,
     ) -> Self {
         Self {
             name: name.into(),
+            description: description.into(),
             value,
-            comment: comment.into(),
         }
     }
 }
