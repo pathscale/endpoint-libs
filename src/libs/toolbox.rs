@@ -191,13 +191,10 @@ impl Toolbox {
             Err(err) if err.is::<NoResponseError>() => {
                 return None;
             }
-
-            Err(err) if err.is::<CustomError>() => {
-                error!("CustomError: {:?}", err);
-                let err = err.downcast::<CustomError>().unwrap();
-                request_error_to_resp(&ctx, err.code, err.params)
-            }
-            Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
+            Err(err) => match err.downcast::<CustomError>() {
+                Ok(err) => request_error_to_resp(&ctx, err.code, err.params),
+                Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
+            },
         };
         Some(resp)
     }
