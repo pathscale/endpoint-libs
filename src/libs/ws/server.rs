@@ -90,6 +90,9 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for BufferedStream<S> {
 
 impl WebsocketServer {
     pub fn new(config: WsServerConfig) -> Self {
+        if config.insecure {
+            tracing::warn!("WS Server has been configured with insecure=true, is this desired?")
+        }
         Self {
             auth_controller: Arc::new(SimpleAuthController),
             allowed_roles: HashMap::new(),
