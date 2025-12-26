@@ -67,7 +67,7 @@ impl WsClient {
             params,
         })?;
         debug!("send req: {}", req);
-        self.stream.send(Message::Text(req)).await?;
+        self.stream.send(Message::Text(req.into())).await?;
         Ok(())
     }
     pub async fn recv_raw(&mut self) -> Result<WsResponseValue> {
