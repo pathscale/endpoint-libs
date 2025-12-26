@@ -116,11 +116,8 @@ pub fn load_certs<'a, T: AsRef<Path>>(
 
 /// Load the first private key contained in the given file.
 pub fn load_private_key(path: &PathBuf) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let private_key_result = PrivateKeyDer::from_pem_file(path);
-
-    let Ok(private_key) = private_key_result else {
-        bail!("Error loading private key from file");
-    };
+    let private_key =
+        PrivateKeyDer::from_pem_file(path).wrap_err("Error loading private key from file.")?;
 
     Ok(private_key)
 }
