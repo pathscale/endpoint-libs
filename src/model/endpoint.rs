@@ -28,7 +28,7 @@ pub struct EndpointSchema {
     #[serde(default)]
     pub json_schema: serde_json::Value,
 
-    // Allowed roles for this endoint ["EnumRole::EnumVariant"]
+    // Allowed roles for this endpoint ["EnumRole::EnumVariant"]
     pub roles: Vec<String>,
 }
 

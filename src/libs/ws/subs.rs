@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::libs::toolbox::{ArcToolbox, RequestContext};
+use crate::libs::ws::{ArcToolbox, RequestContext};
 
 use super::{ConnectionId, WsResponseGeneric, WsStreamResponseGeneric};
 
@@ -200,7 +200,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::libs::toolbox::{RequestContext, Toolbox};
+    use crate::libs::ws::{RequestContext, Toolbox};
 
     pub(super) use super::*;
 
