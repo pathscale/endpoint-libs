@@ -5,11 +5,14 @@ use std::sync::Arc;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use tracing::{level_filters::LevelFilter, Level};
+use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::{registry, EnvFilter};
+
+pub use tracing_appender::rolling::Rotation as LogRotation;
 
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -101,9 +104,30 @@ impl LoggingGuard {
         }
     }
 }
+
+/// Sets up logs with hourly rotation
+#[deprecated(
+    since = "1.3.0",
+    note = "Use [`setup_logs_with_rotation`] or [`setup_logs_without_rotation`] instead"
+)]
 pub fn setup_logs(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
+) -> eyre::Result<()> {
+    setup_logs_with_rotation(log_level, log_dir_and_file_prefix, LogRotation::HOURLY)
+}
+
+pub fn setup_logs_without_rotation(
+    log_level: LogLevel,
+    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
+) -> eyre::Result<()> {
+    setup_logs_with_rotation(log_level, log_dir_and_file_prefix, LogRotation::NEVER)
+}
+
+pub fn setup_logs_with_rotation(
+    log_level: LogLevel,
+    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
+    rotation: LogRotation,
 ) -> eyre::Result<()> {
     let filter = build_env_filter(log_level)?;
 
@@ -130,7 +154,7 @@ pub fn setup_logs(
                     .with_thread_names(true)
                     .with_line_number(true)
                     .with_ansi(false)
-                    .with_writer(tracing_appender::rolling::hourly(log_dir, file_prefix))
+                    .with_writer(RollingFileAppender::new(rotation, log_dir, file_prefix))
                     .with_filter(file_filter),
             )
             .init();
@@ -138,11 +162,6 @@ pub fn setup_logs(
         registry().with(stdout_layer).init();
     }
 
-    Ok(())
-}
-
-pub fn setup_logs_with_config(log_config: impl SubscriberInitExt) -> eyre::Result<()> {
-    log_config.init();
     Ok(())
 }
 
