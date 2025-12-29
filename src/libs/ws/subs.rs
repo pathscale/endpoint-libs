@@ -200,7 +200,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
 mod tests {
     use std::sync::Arc;
 
-    use crate::libs::ws::{RequestContext, Toolbox};
+    use crate::libs::toolbox::{RequestContext, Toolbox};
 
     pub(super) use super::*;
 

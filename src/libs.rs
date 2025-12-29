@@ -10,7 +10,9 @@ pub mod utils;
 #[cfg(feature = "ws")]
 pub mod ws;
 
+#[cfg(feature = "ws")]
 pub use ws::handler;
+#[cfg(feature = "ws")]
 pub use ws::toolbox;
 
 pub mod config;
