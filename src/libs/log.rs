@@ -141,6 +141,11 @@ pub fn setup_logs(
     Ok(())
 }
 
+pub fn setup_logs_with_config(log_config: impl SubscriberInitExt) -> eyre::Result<()> {
+    log_config.init();
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct DynLogger {
     logger: Arc<dyn Fn(&str) + Send + Sync>,
