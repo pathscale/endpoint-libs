@@ -12,6 +12,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::{registry, EnvFilter};
 
+// Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
 
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
