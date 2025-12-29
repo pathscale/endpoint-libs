@@ -12,9 +12,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 use tracing::*;
 
-use crate::libs::toolbox::ArcToolbox;
-use crate::libs::toolbox::RequestContext;
-use crate::libs::toolbox::Toolbox;
+use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox};
 use crate::model::EndpointSchema;
 use crate::model::Type;
 

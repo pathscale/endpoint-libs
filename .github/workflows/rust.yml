@@ -10,8 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  build-test-all-features:
     runs-on: buildjet-8vcpu-ubuntu-2204
     permissions:
       contents: write
@@ -26,10 +25,11 @@ jobs:
       with:
           toolchain: stable
           override: true
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Install cargo-all-features
+      run: cargo install cargo-all-features
+    - name: Run tests for all feature combinations
+      # This command builds/tests all combinations sequentially
+      run: cargo all-features test -- --verbose
 
 
   clippy_check:

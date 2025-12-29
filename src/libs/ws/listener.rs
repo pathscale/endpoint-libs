@@ -4,7 +4,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use eyre::bail;
 use eyre::{ensure, Context, Result};
 use futures::future::BoxFuture;
 use futures::FutureExt;
