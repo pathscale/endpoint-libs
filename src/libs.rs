@@ -10,6 +10,9 @@ pub mod utils;
 #[cfg(feature = "ws")]
 pub mod ws;
 
+pub use ws::handler;
+pub use ws::toolbox;
+
 pub mod config;
 #[cfg(feature = "database")]
 pub mod database;

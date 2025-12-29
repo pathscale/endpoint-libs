@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::libs::ws::{ArcToolbox, RequestContext};
+use crate::libs::toolbox::{ArcToolbox, RequestContext};
 
 use super::{ConnectionId, WsResponseGeneric, WsStreamResponseGeneric};
 

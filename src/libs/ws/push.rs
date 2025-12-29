@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::libs::ws::{ArcToolbox, RequestContext};
+use crate::libs::toolbox::{ArcToolbox, RequestContext};
 
 use super::{ConnectionId, WsResponseGeneric, WsStreamResponseGeneric};
 

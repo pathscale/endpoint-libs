@@ -1,22 +1,20 @@
 mod basics;
 mod client;
 mod conn;
-mod handler;
+pub mod handler;
 mod headers;
 mod listener;
 mod push;
 mod server;
 mod session;
 mod subs;
-mod toolbox;
+pub mod toolbox;
 
 pub use basics::*;
 pub use client::*;
 pub use conn::*;
-pub use handler::*;
 pub use headers::*;
 pub use listener::*;
 pub use server::*;
 pub use session::*;
 pub use subs::*;
-pub use toolbox::*;

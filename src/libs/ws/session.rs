@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
-use crate::libs::ws::{RequestContext, TOOLBOX};
+use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
 use super::{request_error_to_resp, WebsocketServer, WsConnection, WsRequestValue};
 pub struct WsClientSession<WS> {
