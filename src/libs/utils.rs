@@ -1,10 +1,4 @@
-use std::fmt::Write;
-
-use convert_case::{Case, Casing};
-use eyre::{ContextCompat, Result};
-use serde::Serialize;
-
-use crate::model::EndpointSchema;
+use eyre::Result;
 
 pub fn get_log_id() -> u64 {
     chrono::Utc::now().timestamp_micros() as _
@@ -12,27 +6,6 @@ pub fn get_log_id() -> u64 {
 
 pub fn get_conn_id() -> u32 {
     chrono::Utc::now().timestamp_micros() as _
-}
-
-pub fn encode_header<T: Serialize>(v: T, schema: EndpointSchema) -> Result<String> {
-    let mut s = String::new();
-    write!(s, "0{}", schema.name.to_ascii_lowercase())?;
-    let v = serde_json::to_value(&v)?;
-
-    for (i, f) in schema.parameters.iter().enumerate() {
-        let key = f.name.to_case(Case::Camel);
-        let value = v.get(&key).with_context(|| format!("key: {key}"))?;
-        if value.is_null() {
-            continue;
-        }
-        write!(
-            s,
-            ", {}{}",
-            i + 1,
-            urlencoding::encode(&value.to_string().replace('\"', ""))
-        )?;
-    }
-    Ok(s)
 }
 
 pub fn get_time_milliseconds() -> i64 {

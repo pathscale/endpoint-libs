@@ -1,5 +1,8 @@
 use crate::model::{Field, Type};
+use convert_case::{Case, Casing};
+use eyre::{ContextCompat, Result};
 use serde::*;
+use std::fmt::Write;
 
 /// `EndpointSchema` is a struct that represents a single endpoint in the API.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -69,4 +72,25 @@ impl EndpointSchema {
         self.roles = roles;
         self
     }
+}
+
+pub fn encode_header<T: Serialize>(v: T, schema: EndpointSchema) -> Result<String> {
+    let mut s = String::new();
+    write!(s, "0{}", schema.name.to_ascii_lowercase())?;
+    let v = serde_json::to_value(&v)?;
+
+    for (i, f) in schema.parameters.iter().enumerate() {
+        let key = f.name.to_case(Case::Camel);
+        let value = v.get(&key).with_context(|| format!("key: {key}"))?;
+        if value.is_null() {
+            continue;
+        }
+        write!(
+            s,
+            ", {}{}",
+            i + 1,
+            urlencoding::encode(&value.to_string().replace('\"', ""))
+        )?;
+    }
+    Ok(s)
 }

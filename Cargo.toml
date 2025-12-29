@@ -34,6 +34,8 @@ database = [
     "dep:tokio-postgres",
     "dep:dashmap",
     "dep:secrecy",
+    "dep:postgres-from-row",
+    "dep:deadpool-postgres",
     # "dep:",
 ]
 signal = [
