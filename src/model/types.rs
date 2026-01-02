@@ -7,7 +7,7 @@ pub struct Field {
     pub name: String,
 
     /// The description of the field
-    #[serde(default)]
+    #[serde(skip)]
     pub description: String,
 
     /// The type of the field (e.g. `Type::BigInt`)
