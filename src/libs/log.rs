@@ -7,11 +7,15 @@ use std::sync::Arc;
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use tracing::{level_filters::LevelFilter, Level};
+use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::{registry, EnvFilter};
+
+// Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
+pub use tracing_appender::rolling::Rotation as LogRotation;
 
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -239,7 +243,7 @@ pub fn setup_logs_with_rotation(
                     .with_thread_names(true)
                     .with_line_number(true)
                     .with_ansi(false)
-                    .with_writer(tracing_appender::rolling::hourly(log_dir, file_prefix))
+                    .with_writer(RollingFileAppender::new(rotation, log_dir, file_prefix))
                     .with_filter(file_filter),
             )
             .init();
