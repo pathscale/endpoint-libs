@@ -60,6 +60,13 @@ log_reader = [
     "dep:lazy_static",
     # "dep:",
 ]
+error_aggregation = [
+    # Feature dependencies
+    "dep:tokio",
+    "dep:regex",
+    "dep:lazy_static",
+    # "dep:",
+]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
