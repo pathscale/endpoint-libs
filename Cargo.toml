@@ -77,7 +77,11 @@ itertools = "0.12"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "std"] }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+    "std",
+    "fmt",
+] }
 bytes = "1.7"
 chrono = "0.4"
 urlencoding = "2.1"
@@ -116,3 +120,6 @@ regex = { version = "1.5", optional = true }
 rev_lines = { version = "0.3", optional = true }
 lazy_static = { version = "1.5", optional = true }
 async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tempfile = "3.19"

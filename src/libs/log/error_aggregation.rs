@@ -1,12 +1,8 @@
 /// Error Aggregation - Collection of recent errors with optional deduping and other convenience stuff
 use std::cmp::Ordering;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing_appender::rolling::RollingFileAppender;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, registry, EnvFilter, Layer};
+use tracing_subscriber::Layer;
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
@@ -15,87 +11,15 @@ use std::collections::HashMap;
 
 use std::hash::Hash;
 
-use crate::libs::log::build_env_filter;
-#[cfg(feature = "error_aggregation")]
-use crate::libs::log::LogLevel;
-
-/// Sets up logs with hourly rotation
-#[deprecated(
-    since = "1.3.0",
-    note = "Use [`setup_logs_with_rotation`] or [`setup_logs_without_rotation`] instead"
-)]
-pub fn setup_logs(
-    log_level: LogLevel,
-    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
-    error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
-    setup_logs_with_rotation(
-        log_level,
-        log_dir_and_file_prefix,
-        LogRotation::HOURLY,
-        error_aggregation,
-    )
-}
-
-pub fn setup_logs_without_rotation(
-    log_level: LogLevel,
-    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
-    error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
-    setup_logs_with_rotation(
-        log_level,
-        log_dir_and_file_prefix,
-        LogRotation::NEVER,
-        error_aggregation,
-    )
-}
-
 // Version with error aggregation feature
-pub fn setup_logs_with_rotation(
-    log_level: LogLevel,
-    log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
-    rotation: LogRotation,
+pub fn get_error_aggregation(
     error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
-    let filter = build_env_filter(log_level)?;
-
-    let stdout_layer: tracing_subscriber::filter::Filtered<
-        fmt::Layer<registry::Registry>,
-        EnvFilter,
-        registry::Registry,
-    > = fmt::layer()
-        .with_thread_names(true)
-        .with_line_number(true)
-        .with_filter(filter);
-
+) -> (Arc<ErrorAggregationContainer>, ErrorAggregationLayer) {
     // Create error aggregation container and layer
     let error_container = Arc::new(ErrorAggregationContainer::new(error_aggregation));
     let error_layer = ErrorAggregationLayer::new(error_container.sender.clone());
 
-    if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
-        let file_filter = if let Some(file_log_level) = file_log_level {
-            build_env_filter(file_log_level)?
-        } else {
-            build_env_filter(log_level)?
-        };
-
-        let file_layer = fmt::layer()
-            .with_thread_names(true)
-            .with_line_number(true)
-            .with_ansi(false)
-            .with_writer(RollingFileAppender::new(rotation, log_dir, file_prefix))
-            .with_filter(file_filter);
-
-        registry()
-            .with(stdout_layer)
-            .with(file_layer)
-            .with(error_layer)
-            .init();
-    } else {
-        registry().with(stdout_layer).with(error_layer).init();
-    }
-
-    Ok(error_container)
+    (error_container, error_layer)
 }
 
 /// Error object provided for convenience for display in UI etc.
@@ -151,6 +75,7 @@ impl ErrorStorage {
 }
 
 /// Container for aggregated errors with async query methods
+#[derive(Debug)]
 pub struct ErrorAggregationContainer {
     storage: Arc<tokio::sync::RwLock<ErrorStorage>>,
     sender: tokio::sync::mpsc::UnboundedSender<ErrorEntry>,
@@ -355,7 +280,7 @@ fn normalize_message(message: &str) -> String {
 }
 
 /// Tracing layer that captures ERROR level events and sends them to the aggregator
-struct ErrorAggregationLayer {
+pub struct ErrorAggregationLayer {
     sender: tokio::sync::mpsc::UnboundedSender<ErrorEntry>,
 }
 
