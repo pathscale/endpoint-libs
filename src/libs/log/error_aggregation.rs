@@ -83,6 +83,8 @@ pub struct ErrorAggregationContainer {
     config: ErrorAggregationConfig,
 }
 
+pub type ErrorSortingFn = Box<dyn FnMut(&ErrorEntry, &ErrorEntry) -> Ordering + 'static>;
+
 impl ErrorAggregationContainer {
     /// Create a new error aggregation container
     pub fn new(config: ErrorAggregationConfig) -> Self {
@@ -110,7 +112,7 @@ impl ErrorAggregationContainer {
         &self,
         limit: usize,
         offset: usize,
-        sort_by: Option<Box<dyn FnMut(&ErrorEntry, &ErrorEntry) -> Ordering>>,
+        sort_by: Option<ErrorSortingFn>,
     ) -> Vec<ErrorEntry> {
         let storage = self.storage.read().await;
         let map = storage.get_map();

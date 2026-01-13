@@ -104,12 +104,12 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
             .with(file_layer)
             .with(error_layer);
 
-        return Ok(LoggingSubscriberParts {
+        Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handles,
             file_log_guard: worker_guard,
             errors_container: container,
-        });
+        })
     }
 
     #[cfg(not(feature = "error_aggregation"))]
@@ -147,11 +147,11 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 
     #[cfg(feature = "error_aggregation")]
     {
-        return Ok(LogSetupReturn {
+        Ok(LogSetupReturn {
             reload_handles: parts.reload_handles,
             file_log_guard: parts.file_log_guard,
             errors_container: parts.errors_container,
-        });
+        })
     }
 
     #[cfg(not(feature = "error_aggregation"))]
@@ -298,12 +298,12 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
 
     #[cfg(feature = "error_aggregation")]
     {
-        return Ok(LogSetupReturnTest {
+        Ok(LogSetupReturnTest {
             _guard: guard,
             reload_handles: parts.reload_handles,
             file_log_guard: parts.file_log_guard,
             errors_container: parts.errors_container,
-        });
+        })
     }
 
     #[cfg(not(feature = "error_aggregation"))]
