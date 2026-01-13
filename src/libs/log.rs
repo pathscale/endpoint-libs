@@ -10,6 +10,7 @@ use tracing::{level_filters::LevelFilter, Level};
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+use tracing_subscriber::reload;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 use tracing_subscriber::{registry, EnvFilter};
@@ -95,6 +96,54 @@ fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     Ok(filter)
 }
 
+/// Type alias for the filter reload function.
+type FilterReloader = Box<dyn Fn(EnvFilter) -> Result<(), reload::Error> + Send + Sync>;
+
+/// Handle for changing log level at runtime without service restart.
+///
+/// Returned by `setup_logs_with_rotation` and related functions.
+/// Use `set_level` to change the log level for both stdout and file outputs.
+pub struct LogLevelHandle {
+    reloaders: Vec<FilterReloader>,
+}
+
+impl LogLevelHandle {
+    /// Change the log level at runtime.
+    ///
+    /// This updates both stdout and file log filters (if file logging is enabled).
+    pub fn set_level(&self, level: LogLevel) -> eyre::Result<()> {
+        // Pre-build all filters to avoid partial updates on failure
+        let filters: Vec<EnvFilter> = self
+            .reloaders
+            .iter()
+            .map(|_| build_env_filter(level))
+            .collect::<eyre::Result<_>>()?;
+
+        for (i, (reloader, filter)) in self.reloaders.iter().zip(filters).enumerate() {
+            reloader(filter).map_err(|e| eyre::eyre!("Failed to reload filter {i}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn new<S1>(stdout_handle: reload::Handle<EnvFilter, S1>) -> Self
+    where
+        S1: 'static,
+    {
+        Self {
+            reloaders: vec![Box::new(move |filter| stdout_handle.reload(filter))],
+        }
+    }
+
+    fn with_file_handle<S2>(mut self, file_handle: reload::Handle<EnvFilter, S2>) -> Self
+    where
+        S2: 'static,
+    {
+        self.reloaders
+            .push(Box::new(move |filter| file_handle.reload(filter)));
+        self
+    }
+}
+
 pub enum LoggingGuard {
     NonBlocking(tracing_appender::non_blocking::WorkerGuard, PathBuf),
     StdoutWithPath(Option<PathBuf>),
@@ -118,7 +167,7 @@ pub fn setup_logs(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
     error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
+) -> eyre::Result<(LogLevelHandle, Arc<ErrorAggregationContainer>)> {
     setup_logs_with_rotation(
         log_level,
         log_dir_and_file_prefix,
@@ -136,7 +185,7 @@ pub fn setup_logs(
 pub fn setup_logs(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
-) -> eyre::Result<()> {
+) -> eyre::Result<LogLevelHandle> {
     setup_logs_with_rotation(log_level, log_dir_and_file_prefix, LogRotation::HOURLY)
 }
 
@@ -145,7 +194,7 @@ pub fn setup_logs_without_rotation(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
     error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
+) -> eyre::Result<(LogLevelHandle, Arc<ErrorAggregationContainer>)> {
     setup_logs_with_rotation(
         log_level,
         log_dir_and_file_prefix,
@@ -158,7 +207,7 @@ pub fn setup_logs_without_rotation(
 pub fn setup_logs_without_rotation(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
-) -> eyre::Result<()> {
+) -> eyre::Result<LogLevelHandle> {
     setup_logs_with_rotation(log_level, log_dir_and_file_prefix, LogRotation::NEVER)
 }
 
@@ -169,14 +218,11 @@ pub fn setup_logs_with_rotation(
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
     rotation: LogRotation,
     error_aggregation: ErrorAggregationConfig,
-) -> eyre::Result<Arc<ErrorAggregationContainer>> {
+) -> eyre::Result<(LogLevelHandle, Arc<ErrorAggregationContainer>)> {
     let filter = build_env_filter(log_level)?;
+    let (filter, stdout_handle) = reload::Layer::new(filter);
 
-    let stdout_layer: tracing_subscriber::filter::Filtered<
-        fmt::Layer<registry::Registry>,
-        EnvFilter,
-        registry::Registry,
-    > = fmt::layer()
+    let stdout_layer = fmt::layer()
         .with_thread_names(true)
         .with_line_number(true)
         .with_filter(filter);
@@ -185,12 +231,13 @@ pub fn setup_logs_with_rotation(
     let error_container = Arc::new(ErrorAggregationContainer::new(error_aggregation));
     let error_layer = ErrorAggregationLayer::new(error_container.sender.clone());
 
-    if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
+    let handle = if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
         let file_filter = if let Some(file_log_level) = file_log_level {
             build_env_filter(file_log_level)?
         } else {
             build_env_filter(log_level)?
         };
+        let (file_filter, file_handle) = reload::Layer::new(file_filter);
 
         let file_layer = fmt::layer()
             .with_thread_names(true)
@@ -204,11 +251,14 @@ pub fn setup_logs_with_rotation(
             .with(file_layer)
             .with(error_layer)
             .init();
+
+        LogLevelHandle::new(stdout_handle).with_file_handle(file_handle)
     } else {
         registry().with(stdout_layer).with(error_layer).init();
-    }
+        LogLevelHandle::new(stdout_handle)
+    };
 
-    Ok(error_container)
+    Ok((handle, error_container))
 }
 
 // Version without error aggregation feature
@@ -217,24 +267,22 @@ pub fn setup_logs_with_rotation(
     log_level: LogLevel,
     log_dir_and_file_prefix: Option<(PathBuf, &str, Option<LogLevel>)>,
     rotation: LogRotation,
-) -> eyre::Result<()> {
+) -> eyre::Result<LogLevelHandle> {
     let filter = build_env_filter(log_level)?;
+    let (filter, stdout_handle) = reload::Layer::new(filter);
 
-    let stdout_layer: tracing_subscriber::filter::Filtered<
-        fmt::Layer<registry::Registry>,
-        EnvFilter,
-        registry::Registry,
-    > = fmt::layer()
+    let stdout_layer = fmt::layer()
         .with_thread_names(true)
         .with_line_number(true)
         .with_filter(filter);
 
-    if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
+    let handle = if let Some((log_dir, file_prefix, file_log_level)) = log_dir_and_file_prefix {
         let file_filter = if let Some(file_log_level) = file_log_level {
             build_env_filter(file_log_level)?
         } else {
             build_env_filter(log_level)?
         };
+        let (file_filter, file_handle) = reload::Layer::new(file_filter);
 
         registry()
             .with(stdout_layer)
@@ -247,11 +295,14 @@ pub fn setup_logs_with_rotation(
                     .with_filter(file_filter),
             )
             .init();
+
+        LogLevelHandle::new(stdout_handle).with_file_handle(file_handle)
     } else {
         registry().with(stdout_layer).init();
-    }
+        LogLevelHandle::new(stdout_handle)
+    };
 
-    Ok(())
+    Ok(handle)
 }
 
 #[derive(Clone)]
@@ -294,6 +345,10 @@ pub fn can_create_file_in_directory(directory: &str) -> bool {
 use std::collections::HashMap;
 #[cfg(feature = "error_aggregation")]
 use std::hash::Hash;
+
+/// Type alias for custom error sorting function.
+#[cfg(feature = "error_aggregation")]
+pub type ErrorSortFn = Box<dyn FnMut(&ErrorEntry, &ErrorEntry) -> Ordering>;
 
 /// Error object provided for convenience for display in UI etc.
 #[cfg(feature = "error_aggregation")]
@@ -390,7 +445,7 @@ impl ErrorAggregationContainer {
         &self,
         limit: usize,
         offset: usize,
-        sort_by: Option<Box<dyn FnMut(&ErrorEntry, &ErrorEntry) -> Ordering>>,
+        sort_by: Option<ErrorSortFn>,
     ) -> Vec<ErrorEntry> {
         let storage = self.storage.read().await;
         let map = storage.get_map();
@@ -617,7 +672,7 @@ struct MessageVisitor<'a>(&'a mut String);
 impl<'a> tracing::field::Visit for MessageVisitor<'a> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            *self.0 = format!("{:?}", value);
+            *self.0 = format!("{value:?}");
             // Remove quotes added by Debug formatting
             if self.0.starts_with('"') && self.0.ends_with('"') && self.0.len() > 1 {
                 *self.0 = self.0[1..self.0.len() - 1].to_string();
@@ -683,7 +738,7 @@ mod tests {
             container
                 .sender
                 .send(ErrorEntry {
-                    message: format!("Error {}", i),
+                    message: format!("Error {i}"),
                     timestamp: i as i64,
                     target: "test".to_string(),
                     count: 1,
@@ -758,7 +813,7 @@ mod tests {
             container
                 .sender
                 .send(ErrorEntry {
-                    message: format!("Error {}", i),
+                    message: format!("Error {i}"),
                     timestamp: i as i64,
                     target: "test".to_string(),
                     count: 1,
@@ -846,7 +901,7 @@ mod tests {
             container
                 .sender
                 .send(ErrorEntry {
-                    message: format!("Error {}", i),
+                    message: format!("Error {i}"),
                     timestamp: i as i64,
                     target: "test".to_string(),
                     count: 1,
@@ -878,7 +933,7 @@ mod tests {
             container
                 .sender
                 .send(ErrorEntry {
-                    message: format!("Error {}", i),
+                    message: format!("Error {i}"),
                     timestamp: i as i64,
                     target: "test".to_string(),
                     count: 1,
