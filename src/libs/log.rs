@@ -386,6 +386,7 @@ impl ErrorAggregationContainer {
 
     /// Get errors with pagination support and optional custom sorting. Sorts by most-recent by default
     /// TODO: performance. Figure out how to paginate and sort without having to read/iterate over the entire container
+    #[allow(clippy::type_complexity)]
     pub async fn get_errors(
         &self,
         limit: usize,
