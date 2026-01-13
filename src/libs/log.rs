@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use eyre::{bail, Context};
+use tracing::Subscriber;
 use tracing_appender::{non_blocking::WorkerGuard, rolling::RollingFileAppender};
 use tracing_subscriber::{
     fmt,
@@ -11,7 +12,6 @@ use tracing_subscriber::{
     reload::{self, Handle},
     EnvFilter, Layer, Registry,
 };
-use tracing::Subscriber;
 
 #[cfg(feature = "error_aggregation")]
 use {crate::libs::log::error_aggregation::*, std::sync::Arc};
@@ -35,31 +35,31 @@ pub use tracing_appender::rolling::Rotation as LogRotation;
 
 #[derive(Debug)]
 pub struct LoggingConfig {
-    level: LogLevel,
-    file_config: Option<FileLoggingConfig>,
+    pub level: LogLevel,
+    pub file_config: Option<FileLoggingConfig>,
     #[cfg(feature = "error_aggregation")]
-    error_aggregation: ErrorAggregationConfig,
+    pub error_aggregation: ErrorAggregationConfig,
 }
 
 #[derive(Debug)]
 pub struct LogSetupReturn {
     #[allow(dead_code)]
-    reload_handles: LogReloadHandles,
+    pub reload_handles: LogReloadHandles,
     #[allow(dead_code)]
-    file_log_guard: Option<WorkerGuard>,
+    pub file_log_guard: Option<WorkerGuard>,
     #[cfg(feature = "error_aggregation")]
     #[allow(dead_code)]
-    errors_container: Arc<ErrorAggregationContainer>,
+    pub errors_container: Arc<ErrorAggregationContainer>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FileLoggingConfig {
-    path: PathBuf,
-    file_prefix: String,
+    pub path: PathBuf,
+    pub file_prefix: String,
     /// Used to specify a separate level than the overall log level. e.g. stdout logs DEBUG, but file only logs INFO
-    file_log_level: Option<LogLevel>,
+    pub file_log_level: Option<LogLevel>,
     // Specifying None means that there will be one log file per program execution
-    rotation: Option<LogRotation>,
+    pub rotation: Option<LogRotation>,
 }
 
 /// Internal struct to hold the result of building the logging subscriber
@@ -331,8 +331,8 @@ mod tests {
     }
 
     /// Basic test that verifies logging setup succeeds and logs can be emitted
-    #[test]
-    fn test_basic_logging_stdout() {
+    #[tokio::test]
+    async fn test_basic_logging_stdout() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
@@ -352,8 +352,8 @@ mod tests {
     /// - Basic file logging
     /// - Log level filtering (separate stdout vs file levels)
     /// - Log level reloading at runtime
-    #[test]
-    fn test_file_logging_comprehensive() {
+    #[tokio::test]
+    async fn test_file_logging_comprehensive() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let config = LoggingConfig {
@@ -415,8 +415,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_env_filter() {
+    #[tokio::test]
+    async fn test_build_env_filter() {
         let filter = build_env_filter(LogLevel::Info);
         assert!(filter.is_ok());
 
