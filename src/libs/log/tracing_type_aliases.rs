@@ -52,7 +52,6 @@ pub type FileLogReloadHandle = Handle<
 >;
 
 /// Some types to prevent duplication in the above types, and make them a bit easier to read
-
 pub type FileFilteredTypeT = fmt::Layer<
     tracing_subscriber::layer::Layered<
         reload::Layer<

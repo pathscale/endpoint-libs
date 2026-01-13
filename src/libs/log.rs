@@ -116,11 +116,11 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     {
         let subscriber = registry().with(stdout_layer).with(file_layer);
 
-        return Ok(LoggingSubscriberParts {
+        Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handles,
             file_log_guard: worker_guard,
-        });
+        })
     }
 }
 
@@ -156,10 +156,10 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 
     #[cfg(not(feature = "error_aggregation"))]
     {
-        return Ok(LogSetupReturn {
+        Ok(LogSetupReturn {
             reload_handles: parts.reload_handles,
             file_log_guard: parts.file_log_guard,
-        });
+        })
     }
 }
 
