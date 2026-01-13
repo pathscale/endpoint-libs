@@ -20,13 +20,26 @@ jobs:
       repository-projects: write
 
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions-rs/toolchain@v1
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-provider: buildjet
+        cache-on-failure: "true"
+        add-job-id-key: "false"
+        add-rust-environment-hash-key: "false"
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
       with:
           toolchain: stable
+          profile: minimal
           override: true
+
     - name: Install cargo-all-features
       run: cargo install cargo-all-features
+
     - name: Run tests for all feature combinations
       # This command builds/tests all combinations sequentially
       run: cargo all-features test -- --verbose
@@ -42,10 +55,21 @@ jobs:
       checks: write
       repository-projects: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-provider: buildjet
+          cache-on-failure: "true"
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
         with:
             toolchain: stable
+            profile: minimal
             components: clippy
             override: true
       - uses: actions-rs/clippy-check@v1
@@ -58,10 +82,23 @@ jobs:
     runs-on: buildjet-8vcpu-ubuntu-2204
     
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust Stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          components: rustfmt
+          cache-provider: buildjet
+          cache-on-failure: "true"
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            profile: minimal
+            components: rustfmt
+            override: true
+            
       - name: Check formatting
         run: cargo fmt --all -- --check
