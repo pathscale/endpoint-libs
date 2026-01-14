@@ -2,6 +2,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use itertools::Itertools;
 use tracing_subscriber::Layer;
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
@@ -305,6 +306,19 @@ impl<S: tracing::Subscriber> Layer<S> for ErrorAggregationLayer {
 
         // Extract metadata
         let target = event.metadata().target().to_string();
+
+        let caller_location = event
+            .fields()
+            .find_or_first(|field| field.name() == "caller_location");
+
+        let target = {
+            if let Some(location) = caller_location {
+                format!("{location} ({target})")
+            } else {
+                target
+            }
+        };
+
         let timestamp = chrono::Utc::now().timestamp_millis();
 
         // Extract message from event

@@ -1,10 +1,10 @@
 //! Tracing-based logging setup with stdout and file logging support
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
-use eyre::{bail, Context};
+use eyre::{bail, Context, DefaultHandler, EyreHandler};
 use tracing::Subscriber;
-use tracing_appender::{non_blocking::WorkerGuard, rolling::RollingFileAppender};
+use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::{
     fmt,
     layer::SubscriberExt,
@@ -12,6 +12,9 @@ use tracing_subscriber::{
     reload::{self, Handle},
     EnvFilter, Layer, Registry,
 };
+
+#[cfg(feature = "log_throttling")]
+use tracing_throttle::TracingRateLimitLayer;
 
 #[cfg(feature = "error_aggregation")]
 use {crate::libs::log::error_aggregation::*, std::sync::Arc};
@@ -33,23 +36,16 @@ pub use tracing_type_aliases::*;
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
 
+pub use tracing_appender::non_blocking::WorkerGuard;
+
 #[derive(Debug)]
 pub struct LoggingConfig {
     pub level: LogLevel,
     pub file_config: Option<FileLoggingConfig>,
     #[cfg(feature = "error_aggregation")]
     pub error_aggregation: ErrorAggregationConfig,
-}
-
-#[derive(Debug)]
-pub struct LogSetupReturn {
-    #[allow(dead_code)]
-    pub reload_handles: LogReloadHandles,
-    #[allow(dead_code)]
-    pub file_log_guard: Option<WorkerGuard>,
-    #[cfg(feature = "error_aggregation")]
-    #[allow(dead_code)]
-    pub errors_container: Arc<ErrorAggregationContainer>,
+    #[cfg(feature = "log_throttling")]
+    pub throttling_config: Option<LogThrottlingConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +56,39 @@ pub struct FileLoggingConfig {
     pub file_log_level: Option<LogLevel>,
     // Specifying None means that there will be one log file per program execution
     pub rotation: Option<LogRotation>,
+}
+
+#[derive(Debug, Default)]
+pub struct LogThrottlingConfig {
+    /// How often to emit throttling summaries as WARN events, set to None to disable entirely
+    pub summary_emission_interval: Option<Duration>,
+    /// How often to throttling metrics as INFO events, set to None to disable entirely
+    pub metrics_emission_interval: Option<Duration>,
+    /// Fields to exclude from uniqueness checks, set to None to disable entirely.<br><br>
+    /// Example:
+    /// ```rust
+    /// tracing::info!(user_id=1, "User joined");
+    /// tracing::info!(user_id=2, "User joined");  
+    ///```
+    /// If the `user_id` field is excluded, these will be treated as exactly the same log, so multiple users join messages could be throttled
+    pub excluded_fields: Option<Vec<String>>,
+    /// Targets to exempt from any throttling. This allows the caller to ensure that any high priority logs are always displayed.<br><br>
+    /// Example:
+    /// ```rust
+    /// let exemptions = Some(vec!["nothrottle"]); // Assuming this is passed during config stage
+    /// .....
+    /// tracing::error!(target: "nothrottle", user_id=1, "User joined"); // Will never be throttled
+    /// tracing::error!(user_id=2, "User joined");  // Can possibly be throttled
+    /// ```
+    pub exemptions: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+pub struct LogSetupReturn {
+    pub reload_handles: LogReloadHandles,
+    pub file_log_guard: Option<WorkerGuard>,
+    #[cfg(feature = "error_aggregation")]
+    pub errors_container: Arc<ErrorAggregationContainer>,
 }
 
 /// Internal struct to hold the result of building the logging subscriber
@@ -93,15 +122,38 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         file: file_reload_handle,
     };
 
+    #[cfg(feature = "log_throttling")]
+    let throttling_config = config.throttling_config.unwrap_or_default();
+
+    #[cfg(feature = "log_throttling")]
+    let rate_limit_filter = TracingRateLimitLayer::builder()
+        .with_excluded_fields(throttling_config.excluded_fields.unwrap_or_default())
+        .with_exempt_targets(throttling_config.exemptions.unwrap_or_default())
+        .with_active_emission(throttling_config.summary_emission_interval.is_some())
+        .with_summary_interval(
+            throttling_config
+                .summary_emission_interval
+                .unwrap_or(Duration::from_mins(5)),
+        )
+        .build()
+        .unwrap();
+
     #[cfg(feature = "error_aggregation")]
     {
         use crate::libs::log::error_aggregation::get_error_aggregation;
 
         let (container, error_layer) = get_error_aggregation(config.error_aggregation);
 
+        #[cfg(not(feature = "log_throttling"))]
         let subscriber = registry()
             .with(stdout_layer)
             .with(file_layer)
+            .with(error_layer);
+
+        #[cfg(feature = "log_throttling")]
+        let subscriber = registry()
+            .with(stdout_layer)
+            .with(file_layer.with_filter(rate_limit_filter))
             .with(error_layer);
 
         Ok(LoggingSubscriberParts {
@@ -114,7 +166,13 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
     #[cfg(not(feature = "error_aggregation"))]
     {
+        #[cfg(not(feature = "log_throttling"))]
         let subscriber = registry().with(stdout_layer).with(file_layer);
+
+        #[cfg(feature = "log_throttling")]
+        let subscriber = registry()
+            .with(stdout_layer)
+            .with(file_layer.with_filter(rate_limit_filter));
 
         Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
@@ -217,6 +275,8 @@ pub struct LogReloadHandles {
     file: Option<Handle<FileLayerType, RegistryWithStdout>>,
 }
 
+// TODO: Find out if the log throttling still works after reloading
+
 impl LogReloadHandles {
     pub fn new(
         stdout: Handle<StdoutLayerType, Registry>,
@@ -273,6 +333,52 @@ impl LogReloadHandles {
         }
 
         Ok(())
+    }
+}
+
+/// This is used to wrap the default EyreHandler but simply expose the [CustomEyreHandler::location] field via [CustomEyreHandler::get_location]
+/// This allows the code in [crate::libs::ws::internal_error_to_resp] to access the original caller location which is then stored in a [tracing::Field]
+/// for access within [error_aggregation::ErrorAggregationLayer::on_event] (see trait impl) so that the original caller can be recorded within the displayed target
+pub struct CustomEyreHandler {
+    default_handler: Box<dyn EyreHandler>,
+    location: Option<&'static std::panic::Location<'static>>,
+}
+
+impl CustomEyreHandler {
+    pub fn default_with_location_saving(
+        error: &(dyn std::error::Error + 'static),
+    ) -> Box<dyn EyreHandler> {
+        Box::new(Self {
+            default_handler: DefaultHandler::default_with(error),
+            location: None,
+        })
+    }
+
+    pub fn get_location(&self) -> &Option<&'static std::panic::Location<'static>> {
+        &self.location
+    }
+}
+
+impl EyreHandler for CustomEyreHandler {
+    fn display(
+        &self,
+        error: &(dyn std::error::Error + 'static),
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        self.default_handler.display(error, f)
+    }
+
+    fn debug(
+        &self,
+        error: &(dyn std::error::Error + 'static),
+        f: &mut core::fmt::Formatter<'_>,
+    ) -> core::fmt::Result {
+        self.default_handler.debug(error, f)
+    }
+
+    fn track_caller(&mut self, location: &'static std::panic::Location<'static>) {
+        self.location = Some(location); // Store the location for access later
+        self.default_handler.track_caller(location);
     }
 }
 
@@ -338,6 +444,8 @@ mod tests {
             file_config: None,
             #[cfg(feature = "error_aggregation")]
             error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: Some(LogThrottlingConfig::default()),
         };
 
         let _guard = setup_logging_test(config);
@@ -366,6 +474,8 @@ mod tests {
             }),
             #[cfg(feature = "error_aggregation")]
             error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: Some(LogThrottlingConfig::default()),
         };
 
         let log_setup = setup_logging_test(config).unwrap();
@@ -426,4 +536,86 @@ mod tests {
         let filter = build_env_filter(LogLevel::Detail);
         assert!(filter.is_ok());
     }
+
+    // TODO: Test for log throttling
+
+    // #[tokio::test(start_paused = true)]
+    // async fn test_log_throttling_summaries() {
+    //     use std::time::{Duration, Instant};
+    //     use tracing::warn;
+
+    //     let start = Instant::now();
+
+    //     let temp_dir = tempfile::tempdir().unwrap();
+
+    //     let config = LoggingConfig {
+    //         level: LogLevel::Debug,
+    //         file_config: Some(FileLoggingConfig {
+    //             path: temp_dir.path().to_path_buf(),
+    //             file_prefix: "test".to_string(),
+    //             file_log_level: Some(LogLevel::Info),
+    //             rotation: None,
+    //         }),
+    //         #[cfg(feature = "error_aggregation")]
+    //         error_aggregation: default_error_aggregation_config(),
+    //         #[cfg(feature = "log_throttling")]
+    //         throttling_config: Some(LogThrottlingConfig {
+    //             summary_emission_interval: Some(Duration::from_secs(60)),
+    //             ..Default::default()
+    //         }),
+    //     };
+
+    //     let log_setup = setup_logging_test(config).unwrap();
+
+    //     // The elapsed time should be 0 because the clock is paused
+    //     assert_eq!(start.elapsed().as_secs(), 0);
+
+    //     tokio::time::advance(Duration::from_secs(75)).await;
+
+    //     // Now the elapsed time should reflect the advanced duration
+    //     assert!(start.elapsed().as_secs() >= 75);
+
+    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    //     // Test 3: Verify debug logs now appear after reload
+    //     debug!("debug log");
+    //     info!("info log");
+    //     warn!("debug log");
+    //     error!("debug log");
+
+    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    //     drop(log_setup);
+
+    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    //     // Verify file was created and contains expected logs
+    //     let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
+    //     assert_eq!(log_files.len(), 1, "Expected exactly one log file");
+
+    //     let log_file = log_files[0].as_ref().unwrap();
+    //     let log_contents = fs::read_to_string(log_file.path()).unwrap();
+
+    //     // Verify messages before reload
+    //     assert!(log_contents.contains("info_message_before_reload"));
+    //     assert!(
+    //         !log_contents.contains("debug_message_before_reload"),
+    //         "Debug should not appear before reload"
+    //     );
+    //     assert!(log_contents.contains("error_message"));
+
+    //     // Verify messages after reload
+    //     assert!(log_contents.contains("info_message_after_reload"));
+    //     assert!(
+    //         log_contents.contains("debug_message_after_reload"),
+    //         "Debug should appear after reload to DEBUG level"
+    //     );
+
+    //     // let handle = tokio::spawn(move || {
+    //     //     clock_clone.advance(Duration::from_secs(5));
+    //     // });
+
+    //     // handle.join().unwrap();
+
+    //     assert_eq!(clock.now(), start + Duration::from_secs(5));
+    // }
 }

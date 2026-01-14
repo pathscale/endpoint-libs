@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::RequestHandlerErased;
-use crate::libs::log::LogLevel;
+use crate::libs::log::{CustomEyreHandler, LogLevel};
 use crate::libs::toolbox::RequestContext;
 use crate::model::EndpointSchema;
 
@@ -121,7 +121,23 @@ pub fn internal_error_to_resp(
         log_id,
         params: Value::Null,
     };
-    tracing::error!("Internal error: {:?} {:?}", err, err0);
+
+    let location = match err0.handler().downcast_ref::<CustomEyreHandler>() {
+        Some(handler) => handler.get_location().map(|location| location.to_string()),
+        None => None,
+    };
+
+    if let Some(location) = location {
+        tracing::error!(
+            caller_location = location,
+            "Internal error: {:?} {:?}",
+            err,
+            err0
+        );
+    } else {
+        tracing::error!("Internal error: {:?} {:?}", err, err0);
+    }
+
     WsResponseValue::Error(err)
 }
 
