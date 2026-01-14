@@ -66,7 +66,7 @@ pub struct LogThrottlingConfig {
     pub metrics_emission_interval: Option<Duration>,
     /// Fields to exclude from uniqueness checks, set to None to disable entirely.<br><br>
     /// Example:
-    /// ```rust
+    /// ```ignore
     /// tracing::info!(user_id=1, "User joined");
     /// tracing::info!(user_id=2, "User joined");  
     ///```
@@ -74,9 +74,9 @@ pub struct LogThrottlingConfig {
     pub excluded_fields: Option<Vec<String>>,
     /// Targets to exempt from any throttling. This allows the caller to ensure that any high priority logs are always displayed.<br><br>
     /// Example:
-    /// ```rust
+    /// ```ignore
     /// let exemptions = Some(vec!["nothrottle"]); // Assuming this is passed during config stage
-    /// .....
+    ///
     /// tracing::error!(target: "nothrottle", user_id=1, "User joined"); // Will never be throttled
     /// tracing::error!(user_id=2, "User joined");  // Can possibly be throttled
     /// ```
