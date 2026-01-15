@@ -83,12 +83,14 @@ pub struct LogThrottlingConfig {
     pub exemptions: Option<Vec<String>>,
 }
 
-#[derive(Debug)]
 pub struct LogSetupReturn {
     pub reload_handles: LogReloadHandles,
     pub file_log_guard: Option<WorkerGuard>,
     #[cfg(feature = "error_aggregation")]
     pub errors_container: Arc<ErrorAggregationContainer>,
+    #[cfg(feature = "log_throttling")]
+    /// Call shutdown on this during graceful shutdown
+    pub log_throttling_handle: TracingRateLimitLayer,
 }
 
 /// Internal struct to hold the result of building the logging subscriber
@@ -98,6 +100,8 @@ struct LoggingSubscriberParts {
     file_log_guard: Option<WorkerGuard>,
     #[cfg(feature = "error_aggregation")]
     errors_container: Arc<ErrorAggregationContainer>,
+    #[cfg(feature = "log_throttling")]
+    log_throttling_handle: TracingRateLimitLayer,
 }
 
 /// Internal function that builds the logging subscriber without initializing it.
@@ -138,6 +142,9 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         .build()
         .unwrap();
 
+    #[cfg(feature = "log_throttling")]
+    let log_throttling_handle = rate_limit_filter.clone();
+
     #[cfg(feature = "error_aggregation")]
     {
         use crate::libs::log::error_aggregation::get_error_aggregation;
@@ -156,12 +163,22 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
             .with(file_layer.with_filter(rate_limit_filter))
             .with(error_layer);
 
-        Ok(LoggingSubscriberParts {
+        #[cfg(feature = "log_throttling")]
+        return Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handles,
             file_log_guard: worker_guard,
             errors_container: container,
-        })
+            log_throttling_handle: rate_limit_handle,
+        });
+
+        #[cfg(not(feature = "log_throttling"))]
+        return Ok(LoggingSubscriberParts {
+            subscriber: Box::new(subscriber),
+            reload_handles,
+            file_log_guard: worker_guard,
+            errors_container: container,
+        });
     }
 
     #[cfg(not(feature = "error_aggregation"))]
@@ -174,11 +191,20 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
             .with(stdout_layer)
             .with(file_layer.with_filter(rate_limit_filter));
 
-        Ok(LoggingSubscriberParts {
+        #[cfg(feature = "log_throttling")]
+        return Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handles,
             file_log_guard: worker_guard,
-        })
+            log_throttling_handle,
+        });
+
+        #[cfg(not(feature = "log_throttling"))]
+        return Ok(LoggingSubscriberParts {
+            subscriber: Box::new(subscriber),
+            reload_handles,
+            file_log_guard: worker_guard,
+        });
     }
 }
 
@@ -205,19 +231,34 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 
     #[cfg(feature = "error_aggregation")]
     {
-        Ok(LogSetupReturn {
+        #[cfg(feature = "log_throttling")]
+        return Ok(LogSetupReturn {
             reload_handles: parts.reload_handles,
             file_log_guard: parts.file_log_guard,
             errors_container: parts.errors_container,
-        })
+            log_throttling_handle: parts.log_throttling_handle,
+        });
+        #[cfg(not(feature = "log_throttling"))]
+        return Ok(LogSetupReturn {
+            reload_handles: parts.reload_handles,
+            file_log_guard: parts.file_log_guard,
+            errors_container: parts.errors_container,
+        });
     }
 
     #[cfg(not(feature = "error_aggregation"))]
     {
-        Ok(LogSetupReturn {
+        #[cfg(feature = "log_throttling")]
+        return Ok(LogSetupReturn {
             reload_handles: parts.reload_handles,
             file_log_guard: parts.file_log_guard,
-        })
+            log_throttling_handle: parts.log_throttling_handle,
+        });
+        #[cfg(not(feature = "log_throttling"))]
+        return Ok(LogSetupReturn {
+            reload_handles: parts.reload_handles,
+            file_log_guard: parts.file_log_guard,
+        });
     }
 }
 
