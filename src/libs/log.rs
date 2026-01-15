@@ -169,7 +169,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
             reload_handles,
             file_log_guard: worker_guard,
             errors_container: container,
-            log_throttling_handle: rate_limit_handle,
+            log_throttling_handle,
         });
 
         #[cfg(not(feature = "log_throttling"))]
