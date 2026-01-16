@@ -58,7 +58,7 @@ pub struct FileLoggingConfig {
     pub rotation: Option<LogRotation>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LogThrottlingConfig {
     /// How often to emit throttling summaries as WARN events, set to None to disable entirely
     pub summary_emission_interval: Option<Duration>,
@@ -93,6 +93,14 @@ pub struct LogSetupReturn {
     pub log_throttling_handle: TracingRateLimitLayer,
 }
 
+/// Input parts for building the file logging layer
+pub struct FileLayerParts {
+    pub config: LoggingConfig,
+    pub file_config: FileLoggingConfig,
+    #[cfg(feature = "log_throttling")]
+    pub log_throttling_filter: TracingRateLimitLayer,
+}
+
 /// Internal struct to hold the result of building the logging subscriber
 struct LoggingSubscriberParts {
     subscriber: Box<dyn Subscriber + Send + Sync + 'static>,
@@ -113,21 +121,11 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
     let (stdout_layer, stdout_reload_handle) = reload::Layer::new(stdout_layer);
 
-    let (file_layer, file_reload_handle, worker_guard) = config.file_config.as_ref().map_or_else(
-        || (None, None, None),
-        |file_config| {
-            let (layer, handle, guard) = build_file_layer(&config, file_config.clone());
-            (layer, handle, Some(guard))
-        },
-    );
-
-    let reload_handles = LogReloadHandles {
-        stdout: stdout_reload_handle,
-        file: file_reload_handle,
-    };
+    #[cfg(feature = "error_aggregation")]
+    let error_aggregation_config = config.error_aggregation.clone();
 
     #[cfg(feature = "log_throttling")]
-    let throttling_config = config.throttling_config.unwrap_or_default();
+    let throttling_config = config.throttling_config.clone().unwrap_or_default();
 
     #[cfg(feature = "log_throttling")]
     let rate_limit_filter = TracingRateLimitLayer::builder()
@@ -145,22 +143,34 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     #[cfg(feature = "log_throttling")]
     let log_throttling_handle = rate_limit_filter.clone();
 
+    let (file_layer, file_reload_handle, worker_guard) = config.file_config.clone().map_or_else(
+        || (None, None, None),
+        |file_config| {
+            let parts = FileLayerParts {
+                config,
+                file_config,
+                #[cfg(feature = "log_throttling")]
+                log_throttling_filter: rate_limit_filter,
+            };
+            let (layer, handle, guard) = build_file_layer(parts);
+            (layer, handle, Some(guard))
+        },
+    );
+
+    let reload_handles = LogReloadHandles {
+        stdout: stdout_reload_handle,
+        file: file_reload_handle,
+    };
+
     #[cfg(feature = "error_aggregation")]
     {
         use crate::libs::log::error_aggregation::get_error_aggregation;
 
-        let (container, error_layer) = get_error_aggregation(config.error_aggregation);
+        let (container, error_layer) = get_error_aggregation(error_aggregation_config);
 
-        #[cfg(not(feature = "log_throttling"))]
         let subscriber = registry()
             .with(stdout_layer)
             .with(file_layer)
-            .with(error_layer);
-
-        #[cfg(feature = "log_throttling")]
-        let subscriber = registry()
-            .with(stdout_layer)
-            .with(file_layer.with_filter(rate_limit_filter))
             .with(error_layer);
 
         #[cfg(feature = "log_throttling")]
@@ -183,13 +193,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
     #[cfg(not(feature = "error_aggregation"))]
     {
-        #[cfg(not(feature = "log_throttling"))]
         let subscriber = registry().with(stdout_layer).with(file_layer);
-
-        #[cfg(feature = "log_throttling")]
-        let subscriber = registry()
-            .with(stdout_layer)
-            .with(file_layer.with_filter(rate_limit_filter));
 
         #[cfg(feature = "log_throttling")]
         return Ok(LoggingSubscriberParts {
@@ -263,34 +267,43 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 }
 
 fn build_file_layer(
-    config: &LoggingConfig,
-    file_config: FileLoggingConfig,
+    parts: FileLayerParts,
 ) -> (
     Option<FileLogReloadableLayer>,
     Option<FileLogReloadHandle>,
     WorkerGuard,
 ) {
     let file_loglevel_filter = {
-        let file_log_level = file_config.file_log_level.unwrap_or(config.level);
+        let file_log_level = parts
+            .file_config
+            .file_log_level
+            .unwrap_or(parts.config.level);
 
         build_env_filter(file_log_level)
             .expect("Error building log level env filter for file layer")
     };
 
     let appender = RollingFileAppender::new(
-        file_config.rotation.unwrap_or(LogRotation::NEVER),
-        file_config.path,
-        file_config.file_prefix,
+        parts.file_config.rotation.unwrap_or(LogRotation::NEVER),
+        parts.file_config.path,
+        parts.file_config.file_prefix,
     );
 
     let (non_blocking_appender, guard) = tracing_appender::non_blocking(appender);
 
-    let filtered_layer = tracing_subscriber::fmt::layer()
+    let base_layer = tracing_subscriber::fmt::layer()
         .with_thread_names(true)
         .with_line_number(true)
         .with_ansi(false)
-        .with_writer(non_blocking_appender)
+        .with_writer(non_blocking_appender);
+
+    #[cfg(feature = "log_throttling")]
+    let filtered_layer = base_layer
+        .with_filter(parts.log_throttling_filter)
         .with_filter(file_loglevel_filter);
+
+    #[cfg(not(feature = "log_throttling"))]
+    let filtered_layer = base_layer.with_filter(file_loglevel_filter);
 
     let (file_layer, reload_handle) = reload::Layer::new(filtered_layer);
 
@@ -310,10 +323,25 @@ fn build_stdout_layer(
         .with_filter(stdout_loglevel_filter)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LogReloadHandles {
     stdout: Handle<StdoutLayerType, Registry>,
     file: Option<Handle<FileLayerType, RegistryWithStdout>>,
+}
+
+impl std::fmt::Debug for LogReloadHandles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogReloadHandles")
+            .field("stdout", &"Handle<StdoutLayerType, Registry>")
+            .field(
+                "file",
+                &self
+                    .file
+                    .as_ref()
+                    .map(|_| "Handle<FileLayerType, RegistryWithStdout>"),
+            )
+            .finish()
+    }
 }
 
 // TODO: Find out if the log throttling still works after reloading

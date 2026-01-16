@@ -3,10 +3,13 @@
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
 use tracing_subscriber::{
-    fmt, registry,
+    fmt,
     reload::{self, Handle},
     EnvFilter, Registry,
 };
+
+#[cfg(feature = "log_throttling")]
+use tracing_throttle::TracingRateLimitLayer;
 
 // Type aliases for the concrete layer types used in this module, since generics for client code would be very annoying
 pub type StdoutLayerType = tracing_subscriber::filter::Filtered<
@@ -20,6 +23,29 @@ pub type RegistryWithStdout = tracing_subscriber::layer::Layered<
     Registry,
 >;
 
+/// The inner file layer filtered by TracingRateLimitLayer (throttling happens after env filtering)
+#[cfg(feature = "log_throttling")]
+pub type FileLayerThrottled = tracing_subscriber::filter::Filtered<
+    tracing_subscriber::fmt::Layer<
+        RegistryWithStdout,
+        fmt::format::DefaultFields,
+        tracing_subscriber::fmt::format::Format,
+        tracing_appender::non_blocking::NonBlocking,
+    >,
+    TracingRateLimitLayer,
+    RegistryWithStdout,
+>;
+
+/// The complete file layer type: throttled layer wrapped with EnvFilter
+#[cfg(feature = "log_throttling")]
+pub type FileLayerType = tracing_subscriber::filter::Filtered<
+    FileLayerThrottled,
+    EnvFilter,
+    RegistryWithStdout,
+>;
+
+/// The file layer type without throttling
+#[cfg(not(feature = "log_throttling"))]
 pub type FileLayerType = tracing_subscriber::filter::Filtered<
     tracing_subscriber::fmt::Layer<
         RegistryWithStdout,
@@ -31,94 +57,8 @@ pub type FileLayerType = tracing_subscriber::filter::Filtered<
     RegistryWithStdout,
 >;
 
-pub type FileLogReloadableLayer = reload::Layer<
-    tracing_subscriber::filter::Filtered<FileFilteredTypeT, EnvFilter, FileFilteredTypeS>,
-    tracing_subscriber::layer::Layered<
-        reload::Layer<
-            tracing_subscriber::filter::Filtered<
-                fmt::Layer<registry::Registry>,
-                EnvFilter,
-                registry::Registry,
-            >,
-            registry::Registry,
-        >,
-        registry::Registry,
-    >,
->;
+/// The reloadable file logging layer type, wrapping a reload::Layer around FileLayerType
+pub type FileLogReloadableLayer = reload::Layer<FileLayerType, RegistryWithStdout>;
 
-pub type FileLogReloadHandle = Handle<
-    tracing_subscriber::filter::Filtered<FileFilteredTypeT, EnvFilter, FileFilteredTypeS>,
-    FileReloadHandleTypeS,
->;
-
-/// Some types to prevent duplication in the above types, and make them a bit easier to read
-pub type FileFilteredTypeT = fmt::Layer<
-    tracing_subscriber::layer::Layered<
-        reload::Layer<
-            tracing_subscriber::filter::Filtered<
-                fmt::Layer<registry::Registry>,
-                EnvFilter,
-                registry::Registry,
-            >,
-            registry::Registry,
-        >,
-        registry::Registry,
-    >,
-    fmt::format::DefaultFields,
-    fmt::format::Format,
-    tracing_appender::non_blocking::NonBlocking,
->;
-
-pub type FileFilteredTypeS = tracing_subscriber::layer::Layered<
-    reload::Layer<
-        tracing_subscriber::filter::Filtered<
-            fmt::Layer<registry::Registry>,
-            EnvFilter,
-            registry::Registry,
-        >,
-        registry::Registry,
-    >,
-    registry::Registry,
->;
-
-pub type FileReloadHandleTypeS = tracing_subscriber::layer::Layered<
-    reload::Layer<
-        tracing_subscriber::filter::Filtered<
-            fmt::Layer<registry::Registry>,
-            EnvFilter,
-            registry::Registry,
-        >,
-        registry::Registry,
-    >,
-    registry::Registry,
->;
-
-// // Alias for extremely verbose type
-// type FileLayerType = std::option::Option<
-//     tracing_subscriber::filter::Filtered<
-//         tracing_subscriber::fmt::Layer<
-//             tracing_subscriber::layer::Layered<
-//                 tracing_subscriber::filter::Filtered<
-//                     tracing_subscriber::fmt::Layer<registry::Registry>,
-//                     EnvFilter,
-//                     registry::Registry,
-//                 >,
-//                 registry::Registry,
-//             >,
-//             fmt::format::DefaultFields,
-//             tracing_subscriber::fmt::format::Format,
-//             RollingFileAppender,
-//         >,
-//         EnvFilter,
-//         tracing_subscriber::layer::Layered<
-//             tracing_subscriber::filter::Filtered<
-//                 tracing_subscriber::fmt::Layer<registry::Registry>,
-//                 EnvFilter,
-//                 registry::Registry,
-//             >,
-//             registry::Registry,
-//         >,
-//     >,
-// >;
-
-// // for<'writer> std::option::Option<Filtered<tracing_subscriber::fmt::Layer<Layered<Filtered<tracing_subscriber::fmt::Layer<Registry>, EnvFilter, Registry>, Registry>, DefaultFields, tracing_subscriber::fmt::format::Format, RollingFileAppender>, EnvFilter, Layered<Filtered<tracing_subscriber::fmt::Layer<Registry>, EnvFilter, Registry>, Registry>>>: MakeWriter<'writer>
+/// Handle for reloading the file logging layer at runtime
+pub type FileLogReloadHandle = Handle<FileLayerType, RegistryWithStdout>;
