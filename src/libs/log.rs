@@ -5,9 +5,7 @@ use std::{path::PathBuf, time::Duration};
 use eyre::{bail, Context, DefaultHandler, EyreHandler};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
-use tracing_subscriber::{
-    layer::SubscriberExt, registry, reload, EnvFilter, Layer, Registry,
-};
+use tracing_subscriber::{layer::SubscriberExt, registry, reload, EnvFilter, Layer, Registry};
 
 #[cfg(feature = "log_throttling")]
 use tracing_throttle::TracingRateLimitLayer;
@@ -129,9 +127,14 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let throttling_config = config.throttling_config.clone().unwrap_or_default();
 
     #[cfg(feature = "log_throttling")]
+    let mut exemptions = vec!["tracing_throttle::infrastructure::layer".to_string()]; // It seems like it tries to throttle its own logs
+    #[cfg(feature = "log_throttling")]
+    exemptions.extend(throttling_config.exemptions.unwrap_or_default());
+
+    #[cfg(feature = "log_throttling")]
     let rate_limit_filter = TracingRateLimitLayer::builder()
         .with_excluded_fields(throttling_config.excluded_fields.unwrap_or_default())
-        .with_exempt_targets(throttling_config.exemptions.unwrap_or_default())
+        .with_exempt_targets(exemptions)
         .with_active_emission(throttling_config.summary_emission_interval.is_some())
         .with_summary_interval(
             throttling_config
@@ -316,9 +319,7 @@ fn build_file_layer(
     (Some(file_layer), Some(env_filter_handle), guard)
 }
 
-fn build_stdout_layer(
-    reloadable_filter: reload::Layer<EnvFilter, Registry>,
-) -> StdoutLayerType {
+fn build_stdout_layer(reloadable_filter: reload::Layer<EnvFilter, Registry>) -> StdoutLayerType {
     tracing_subscriber::fmt::layer()
         .with_thread_names(true)
         .with_line_number(true)
