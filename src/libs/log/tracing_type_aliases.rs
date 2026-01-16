@@ -11,40 +11,51 @@ use tracing_subscriber::{
 #[cfg(feature = "log_throttling")]
 use tracing_throttle::TracingRateLimitLayer;
 
+#[cfg(feature = "log_throttling")]
+use tracing_subscriber::filter::combinator::And;
+
 // Type aliases for the concrete layer types used in this module, since generics for client code would be very annoying
+
+/// Reloadable EnvFilter for stdout (wrapped in reload::Layer, implements Filter)
+pub type ReloadableStdoutFilter = reload::Layer<EnvFilter, Registry>;
+
+/// Stdout layer with reloadable EnvFilter
 pub type StdoutLayerType = tracing_subscriber::filter::Filtered<
     tracing_subscriber::fmt::Layer<Registry>,
-    EnvFilter,
+    ReloadableStdoutFilter,
     Registry,
 >;
+
+/// Handle for reloading the stdout EnvFilter at runtime
+pub type StdoutLogReloadHandle = Handle<EnvFilter, Registry>;
 
 pub type RegistryWithStdout = tracing_subscriber::layer::Layered<
-    tracing_subscriber::reload::Layer<StdoutLayerType, Registry>,
+    StdoutLayerType,
     Registry,
 >;
 
-/// The inner file layer filtered by TracingRateLimitLayer (throttling happens after env filtering)
+/// Reloadable EnvFilter wrapped in reload::Layer (implements Filter trait)
+pub type ReloadableEnvFilter = reload::Layer<EnvFilter, RegistryWithStdout>;
+
+/// Combined filter: Reloadable EnvFilter AND TracingRateLimitLayer
+/// EnvFilter is checked first, then TracingRateLimitLayer (only sees events that pass EnvFilter)
 #[cfg(feature = "log_throttling")]
-pub type FileLayerThrottled = tracing_subscriber::filter::Filtered<
+pub type CombinedFileFilter = And<ReloadableEnvFilter, TracingRateLimitLayer, RegistryWithStdout>;
+
+/// The file layer type with combined filter (EnvFilter checked first, then throttling)
+#[cfg(feature = "log_throttling")]
+pub type FileLayerType = tracing_subscriber::filter::Filtered<
     tracing_subscriber::fmt::Layer<
         RegistryWithStdout,
         fmt::format::DefaultFields,
         tracing_subscriber::fmt::format::Format,
         tracing_appender::non_blocking::NonBlocking,
     >,
-    TracingRateLimitLayer,
+    CombinedFileFilter,
     RegistryWithStdout,
 >;
 
-/// The complete file layer type: throttled layer wrapped with EnvFilter
-#[cfg(feature = "log_throttling")]
-pub type FileLayerType = tracing_subscriber::filter::Filtered<
-    FileLayerThrottled,
-    EnvFilter,
-    RegistryWithStdout,
->;
-
-/// The file layer type without throttling
+/// The file layer type without throttling (still uses reloadable EnvFilter)
 #[cfg(not(feature = "log_throttling"))]
 pub type FileLayerType = tracing_subscriber::filter::Filtered<
     tracing_subscriber::fmt::Layer<
@@ -53,12 +64,10 @@ pub type FileLayerType = tracing_subscriber::filter::Filtered<
         tracing_subscriber::fmt::format::Format,
         tracing_appender::non_blocking::NonBlocking,
     >,
-    EnvFilter,
+    ReloadableEnvFilter,
     RegistryWithStdout,
 >;
 
-/// The reloadable file logging layer type, wrapping a reload::Layer around FileLayerType
-pub type FileLogReloadableLayer = reload::Layer<FileLayerType, RegistryWithStdout>;
-
-/// Handle for reloading the file logging layer at runtime
-pub type FileLogReloadHandle = Handle<FileLayerType, RegistryWithStdout>;
+/// Handle for reloading the file EnvFilter at runtime
+/// This allows changing the file log level independently of the throttling layer
+pub type FileLogReloadHandle = Handle<EnvFilter, RegistryWithStdout>;

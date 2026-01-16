@@ -6,15 +6,14 @@ use eyre::{bail, Context, DefaultHandler, EyreHandler};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::{
-    fmt,
-    layer::SubscriberExt,
-    registry,
-    reload::{self, Handle},
-    EnvFilter, Layer, Registry,
+    layer::SubscriberExt, registry, reload, EnvFilter, Layer, Registry,
 };
 
 #[cfg(feature = "log_throttling")]
 use tracing_throttle::TracingRateLimitLayer;
+
+#[cfg(feature = "log_throttling")]
+use tracing_subscriber::filter::FilterExt;
 
 #[cfg(feature = "error_aggregation")]
 use {crate::libs::log::error_aggregation::*, std::sync::Arc};
@@ -117,9 +116,11 @@ struct LoggingSubscriberParts {
 fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscriberParts> {
     let stdout_loglevel_filter = build_env_filter(config.level)?;
 
-    let stdout_layer = build_stdout_layer(stdout_loglevel_filter);
+    // Wrap EnvFilter in reload::Layer so it can be reloaded independently
+    let (reloadable_stdout_filter, stdout_reload_handle) =
+        reload::Layer::new(stdout_loglevel_filter);
 
-    let (stdout_layer, stdout_reload_handle) = reload::Layer::new(stdout_layer);
+    let stdout_layer = build_stdout_layer(reloadable_stdout_filter);
 
     #[cfg(feature = "error_aggregation")]
     let error_aggregation_config = config.error_aggregation.clone();
@@ -269,7 +270,7 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 fn build_file_layer(
     parts: FileLayerParts,
 ) -> (
-    Option<FileLogReloadableLayer>,
+    Option<FileLayerType>,
     Option<FileLogReloadHandle>,
     WorkerGuard,
 ) {
@@ -297,36 +298,37 @@ fn build_file_layer(
         .with_ansi(false)
         .with_writer(non_blocking_appender);
 
+    // Wrap EnvFilter in reload::Layer so it can be reloaded independently
+    // reload::Layer<EnvFilter> implements Filter, so we can use it with .and()
+    let (reloadable_env_filter, env_filter_handle) = reload::Layer::new(file_loglevel_filter);
+
+    // Use .and() combinator: EnvFilter is checked first, then TracingRateLimitLayer
+    // This ensures level filtering happens before throttling sees the events
     #[cfg(feature = "log_throttling")]
-    let filtered_layer = base_layer
-        .with_filter(parts.log_throttling_filter)
-        .with_filter(file_loglevel_filter);
+    let combined_filter = reloadable_env_filter.and(parts.log_throttling_filter);
+
+    #[cfg(feature = "log_throttling")]
+    let file_layer = base_layer.with_filter(combined_filter);
 
     #[cfg(not(feature = "log_throttling"))]
-    let filtered_layer = base_layer.with_filter(file_loglevel_filter);
+    let file_layer = base_layer.with_filter(reloadable_env_filter);
 
-    let (file_layer, reload_handle) = reload::Layer::new(filtered_layer);
-
-    (Some(file_layer), Some(reload_handle), guard)
+    (Some(file_layer), Some(env_filter_handle), guard)
 }
 
 fn build_stdout_layer(
-    stdout_loglevel_filter: EnvFilter,
-) -> tracing_subscriber::filter::Filtered<
-    fmt::Layer<registry::Registry>,
-    EnvFilter,
-    registry::Registry,
-> {
+    reloadable_filter: reload::Layer<EnvFilter, Registry>,
+) -> StdoutLayerType {
     tracing_subscriber::fmt::layer()
         .with_thread_names(true)
         .with_line_number(true)
-        .with_filter(stdout_loglevel_filter)
+        .with_filter(reloadable_filter)
 }
 
 #[derive(Clone)]
 pub struct LogReloadHandles {
-    stdout: Handle<StdoutLayerType, Registry>,
-    file: Option<Handle<FileLayerType, RegistryWithStdout>>,
+    stdout: StdoutLogReloadHandle,
+    file: Option<FileLogReloadHandle>,
 }
 
 impl std::fmt::Debug for LogReloadHandles {
@@ -347,10 +349,7 @@ impl std::fmt::Debug for LogReloadHandles {
 // TODO: Find out if the log throttling still works after reloading
 
 impl LogReloadHandles {
-    pub fn new(
-        stdout: Handle<StdoutLayerType, Registry>,
-        file: Option<Handle<FileLayerType, RegistryWithStdout>>,
-    ) -> Self {
+    pub fn new(stdout: StdoutLogReloadHandle, file: Option<FileLogReloadHandle>) -> Self {
         Self { stdout, file }
     }
 
@@ -366,7 +365,8 @@ impl LogReloadHandles {
     ) -> eyre::Result<()> {
         if let Some(level) = stdout_level {
             match build_env_filter(level) {
-                Ok(filter) => match self.stdout.modify(|layer| *layer.filter_mut() = filter) {
+                // The stdout handle is now for the EnvFilter directly (wrapped in reload::Layer)
+                Ok(filter) => match self.stdout.modify(|env_filter| *env_filter = filter) {
                     Ok(_) => (),
                     Err(error) => {
                         tracing::error!(
@@ -384,13 +384,17 @@ impl LogReloadHandles {
         }
 
         if let Some(level) = file_level {
+            // The file handle is now for the EnvFilter directly (wrapped in reload::Layer)
+            // This works regardless of whether log_throttling is enabled
             if let Some(file_handle) = &self.file {
                 match build_env_filter(level) {
-                    Ok(filter) => file_handle
-                        .modify(|layer| *layer.filter_mut() = filter)
-                        .wrap_err(
-                            "Error setting new filter on file layer. Ignoring reload attempt",
-                        )?,
+                    Ok(filter) => {
+                        file_handle
+                            .modify(|env_filter| *env_filter = filter)
+                            .wrap_err(
+                                "Error setting new filter on file layer. Ignoring reload attempt",
+                            )?;
+                    }
                     Err(error) => {
                         tracing::error!(?error, "Error building new filter for file logging from given log level. Ignoring reload attempt");
                         bail!("Error building new filter for file logging from given log level: {error}. Ignoring reload attempt")
@@ -398,7 +402,7 @@ impl LogReloadHandles {
                 }
             }
         } else {
-            tracing::warn!("Attempted to set a new log level for the file layer, but not file layer was configured on startup. Ignoring");
+            tracing::warn!("Attempted to set a new log level for the file layer, but no file layer was configured on startup. Ignoring");
         }
 
         Ok(())
@@ -588,6 +592,9 @@ mod tests {
 
         // Verify messages after reload
         assert!(log_contents.contains("info_message_after_reload"));
+
+        // File log level reload now works even with log_throttling enabled
+        // (EnvFilter is wrapped in reload::Layer and combined with TracingRateLimitLayer via .and())
         assert!(
             log_contents.contains("debug_message_after_reload"),
             "Debug should appear after reload to DEBUG level"
