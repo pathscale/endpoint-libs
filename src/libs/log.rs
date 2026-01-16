@@ -137,7 +137,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         .with_summary_interval(
             throttling_config
                 .summary_emission_interval
-                .unwrap_or(Duration::from_mins(5)),
+                .unwrap_or(Duration::from_secs(5 * 60)),
         )
         .build()
         .unwrap();
