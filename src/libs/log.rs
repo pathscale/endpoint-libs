@@ -137,7 +137,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
                 .unwrap_or(Duration::from_secs(5 * 60)),
         )
         .build()
-        .unwrap();
+        .expect("Error building tracing rate limit layer");
 
     #[cfg(feature = "log_throttling")]
     let log_throttling_handle = rate_limit_filter.clone();
@@ -178,13 +178,9 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
         let (container, error_layer) = get_error_aggregation(error_aggregation_config);
 
-        // Global filter is outermost via and_then - its enabled() is checked first
-        let combined_layers = reloadable_global_filter
-            .and_then(stdout_layer)
-            .and_then(file_layer)
-            .and_then(error_layer);
-
-        let subscriber = registry().with(combined_layers);
+        let subscriber = registry()
+            .with(reloadable_global_filter) // Global filter
+            .with(stdout_layer.and_then(file_layer).and_then(error_layer));
 
         #[cfg(feature = "log_throttling")]
         return Ok(LoggingSubscriberParts {
@@ -199,25 +195,22 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         return Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handle,
-            log_guards: file_guard,
+            log_guards: (stdout_guard, file_guard),
             errors_container: container,
         });
     }
 
     #[cfg(not(feature = "error_aggregation"))]
     {
-        // Global filter is outermost via and_then - its enabled() is checked first
-        let combined_layers = reloadable_global_filter
-            .and_then(stdout_layer)
-            .and_then(file_layer);
-
-        let subscriber = registry().with(combined_layers);
+        let subscriber = registry()
+            .with(reloadable_global_filter) // Global filter
+            .with(stdout_layer.and_then(file_layer));
 
         #[cfg(feature = "log_throttling")]
         return Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handle,
-            log_guards: worker_guard,
+            log_guards: (stdout_guard, file_guard),
             log_throttling_handle,
         });
 
@@ -225,7 +218,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         return Ok(LoggingSubscriberParts {
             subscriber: Box::new(subscriber),
             reload_handle,
-            log_guards: worker_guard,
+            log_guards: (stdout_guard, file_guard),
         });
     }
 }
@@ -264,7 +257,7 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
         #[cfg(not(feature = "log_throttling"))]
         return Ok(LogSetupReturn {
             reload_handle: parts.reload_handle,
-            log_guards: parts.file_log_guard,
+            log_guards: parts.log_guards,
             errors_container: parts.errors_container,
         });
     }
@@ -274,13 +267,13 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
         #[cfg(feature = "log_throttling")]
         return Ok(LogSetupReturn {
             reload_handle: parts.reload_handle,
-            log_guards: parts.file_log_guard,
+            log_guards: parts.log_guards,
             log_throttling_handle: parts.log_throttling_handle,
         });
         #[cfg(not(feature = "log_throttling"))]
         return Ok(LogSetupReturn {
             reload_handle: parts.reload_handle,
-            log_guards: parts.file_log_guard,
+            log_guards: parts.log_guards,
         });
     }
 }
@@ -377,7 +370,7 @@ pub struct LogSetupReturnTest {
     _guard: tracing::subscriber::DefaultGuard,
     reload_handle: LogReloadHandle,
     #[allow(dead_code)]
-    log_guards: Option<WorkerGuard>,
+    log_guards: (WorkerGuard, Option<WorkerGuard>),
     #[cfg(feature = "error_aggregation")]
     #[allow(dead_code)]
     errors_container: Arc<ErrorAggregationContainer>,
@@ -397,7 +390,7 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
         Ok(LogSetupReturnTest {
             _guard: guard,
             reload_handle: parts.reload_handle,
-            log_guards: parts.file_log_guard,
+            log_guards: parts.log_guards,
             errors_container: parts.errors_container,
         })
     }
@@ -407,7 +400,7 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
         return Ok(LogSetupReturnTest {
             _guard: guard,
             reload_handle: parts.reload_handle,
-            log_guards: parts.file_log_guard,
+            log_guards: parts.log_guards,
         });
     }
 }
