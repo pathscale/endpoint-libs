@@ -126,6 +126,8 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     #[cfg(feature = "log_throttling")]
     exemptions.extend(throttling_config.exemptions.unwrap_or_default());
 
+    let filter_handle_clone = global_reload_handle.clone();
+
     #[cfg(feature = "log_throttling")]
     let rate_limit_filter = TracingRateLimitLayer::builder()
         .with_excluded_fields(throttling_config.excluded_fields.unwrap_or_default())
@@ -136,8 +138,55 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
                 .summary_emission_interval
                 .unwrap_or(Duration::from_secs(5 * 60)),
         )
+        .with_summary_formatter(Arc::new(move |summary| {
+            let current_env_filter = filter_handle_clone.clone_current();
+
+            current_env_filter.inspect(|filter| {
+                if let Some(metadata) = &summary.metadata {
+                    use std::str::FromStr;
+
+                    use tracing::{level_filters::LevelFilter, Level};
+
+                    // Attempt manual filtering for these summaries. We default to levels that will result in no summaries being produced if unexpected states occur
+                    if filter
+                        .max_level_hint()
+                        .unwrap_or(LevelFilter::ERROR) // If no max level hint, default to highest level
+                        .le(&Level::from_str(&metadata.level).unwrap_or(Level::TRACE))
+                    // If event level can't be parsed, default to lowest level
+                    {
+                        tracing::warn!(
+                        level  = %metadata.level,
+                        target = %metadata.target,
+                        count = summary.count,
+                        duration_secs = summary.duration.as_secs(),
+                        "Log Throttling summary"
+                        );
+                    }
+                }
+            });
+        }))
         .build()
         .expect("Error building tracing rate limit layer");
+
+    #[cfg(feature = "log_throttling")]
+    if let Some(metrics_duration) = throttling_config.metrics_emission_interval {
+        let metrics = rate_limit_filter.metrics().clone();
+
+        // Periodic metrics reporting
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(metrics_duration).await;
+
+                let snapshot = metrics.snapshot();
+                tracing::info!(
+                    events_allowed = snapshot.events_allowed,
+                    events_suppressed = snapshot.events_suppressed,
+                    suppression_rate = format!("{:.1}%", snapshot.suppression_rate() * 100.0),
+                    "Rate limiting metrics"
+                );
+            }
+        });
+    }
 
     #[cfg(feature = "log_throttling")]
     let log_throttling_handle = rate_limit_filter.clone();
