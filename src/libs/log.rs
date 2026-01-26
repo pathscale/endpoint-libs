@@ -165,11 +165,12 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let (file_layer, file_guard) = match config.file_config {
         None => (None, None),
         Some(file_config) => {
-            let appender = RollingFileAppender::new(
-                file_config.rotation.unwrap_or(LogRotation::NEVER),
-                file_config.path,
-                file_config.file_prefix,
-            );
+            let appender = RollingFileAppender::builder()
+                .rotation(file_config.rotation.unwrap_or(LogRotation::NEVER))
+                .filename_prefix(file_config.file_prefix)
+                .filename_suffix("log")
+                .build(file_config.path)?;
+
             let (non_blocking_appender, guard) = tracing_appender::non_blocking(appender);
 
             let base_layer = tracing_subscriber::fmt::layer()
