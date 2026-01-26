@@ -2,6 +2,7 @@
 
 use std::{path::PathBuf, time::Duration};
 
+use chrono::SecondsFormat;
 use eyre::{bail, DefaultHandler, EyreHandler};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
@@ -48,7 +49,7 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone)]
 pub struct FileLoggingConfig {
     pub path: PathBuf,
-    pub file_prefix: String,
+    pub file_prefix: Option<String>,
     /// Used to specify a separate level than the overall log level. e.g. stdout logs DEBUG, but file only logs INFO
     pub file_log_level: Option<LogLevel>,
     // Specifying None means that there will be one log file per program execution
@@ -167,7 +168,9 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         Some(file_config) => {
             let appender = RollingFileAppender::builder()
                 .rotation(file_config.rotation.unwrap_or(LogRotation::NEVER))
-                .filename_prefix(file_config.file_prefix)
+                .filename_prefix(file_config.file_prefix.unwrap_or_else(|| {
+                    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+                })) // Default filename prefix is a timestamp. RollingFileAppender requires a prefix if we are using a simple suffix like ".log"
                 .filename_suffix("log")
                 .build(file_config.path)?;
 
