@@ -49,6 +49,8 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone)]
 pub struct FileLoggingConfig {
     pub path: PathBuf,
+    /// The name of the log file before the '.log', e.g. <file_prefix>.log will be the final log file.
+    /// Set to None for the current timestamp
     pub file_prefix: Option<String>,
     /// Used to specify a separate level than the overall log level. e.g. stdout logs DEBUG, but file only logs INFO
     pub file_log_level: Option<LogLevel>,
@@ -475,7 +477,7 @@ mod tests {
             level: LogLevel::Info,
             file_config: Some(FileLoggingConfig {
                 path: temp_dir.path().to_path_buf(),
-                file_prefix: "test".to_string(),
+                file_prefix: Some("test".to_string()),
                 file_log_level: Some(LogLevel::Info),
                 rotation: None,
             }),

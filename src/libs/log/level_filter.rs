@@ -22,7 +22,9 @@ pub enum LogLevel {
 
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     let level: Level = log_level.into();
-    let mut filter = EnvFilter::from_default_env().add_directive(level.into());
+    let level_str = level.to_string().to_lowercase();
+    let mut filter = EnvFilter::from_default_env()
+        .add_directive(format!("*={}", level_str).parse()?);
 
     if log_level != LogLevel::Detail {
         const DIRECTIVES: &[(Level, &str)] = &[
