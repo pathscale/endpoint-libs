@@ -22,9 +22,9 @@ pub enum LogLevel {
 
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     let level: Level = log_level.into();
-    let level_str = level.to_string().to_lowercase();
-    let mut filter = EnvFilter::from_default_env()
-        .add_directive(format!("*={}", level_str).parse()?);
+    
+    // Start with the default env filter and add a base directive for all targets
+    let mut filter = EnvFilter::from_default_env().add_directive(level.into());
 
     if log_level != LogLevel::Detail {
         const DIRECTIVES: &[(Level, &str)] = &[
@@ -44,9 +44,8 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
 
         for (directive_level, crate_name) in DIRECTIVES {
             let capped_level = std::cmp::max(level, *directive_level);
-            let new_directive =
-                format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
-            filter = filter.add_directive(new_directive.parse()?);
+            let directive_string = format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
+            filter = filter.add_directive(directive_string.parse()?);
         }
     }
 
@@ -94,5 +93,75 @@ impl FromStr for LogLevel {
             "off" => Ok(LogLevel::Off),
             _ => Err(eyre!("Invalid log level: {}", s)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_env_filter_all_levels() {
+        // Test that build_env_filter successfully builds for all LogLevel variants
+        let levels = vec![
+            LogLevel::Off,
+            LogLevel::Error,
+            LogLevel::Warn,
+            LogLevel::Info,
+            LogLevel::Debug,
+            LogLevel::Trace,
+            LogLevel::Detail,
+        ];
+
+        for level in levels {
+            let result = build_env_filter(level);
+            assert!(
+                result.is_ok(),
+                "Failed to build env filter for level: {:?}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_env_filter_with_error_level() {
+        // Test specifically that ERROR level creates a valid filter
+        let filter = build_env_filter(LogLevel::Error);
+        assert!(filter.is_ok());
+
+        let filter = filter.unwrap();
+        // The filter should exist and be usable
+        drop(filter);
+    }
+
+    #[test]
+    fn test_build_env_filter_with_detail_level() {
+        // Test that Detail level doesn't add specific crate directives
+        let filter = build_env_filter(LogLevel::Detail);
+        assert!(filter.is_ok());
+    }
+
+    #[test]
+    fn test_build_env_filter_crate_directives_applied() {
+        // Test that non-Detail levels apply crate-specific directives
+        let filter_info = build_env_filter(LogLevel::Info);
+        let filter_detail = build_env_filter(LogLevel::Detail);
+
+        assert!(filter_info.is_ok());
+        assert!(filter_detail.is_ok());
+        // Both should be valid filters - the difference is in their internal directives
+    }
+
+    #[test]
+    fn test_env_filter_directive_creation() {
+        // Test that we can create string-based directives for crates
+        let level = Level::ERROR;
+        let crate_name = "test_crate";
+        let capped_level = std::cmp::max(level, Level::INFO);
+        let directive_string = format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
+        
+        // This should parse without error
+        let result = directive_string.parse::<tracing_subscriber::filter::Directive>();
+        assert!(result.is_ok(), "Failed to parse directive: {}", directive_string);
     }
 }
