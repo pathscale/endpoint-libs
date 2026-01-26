@@ -23,21 +23,31 @@ pub enum LogLevel {
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     let level: Level = log_level.into();
     let mut filter = EnvFilter::from_default_env().add_directive(level.into());
+
     if log_level != LogLevel::Detail {
-        filter = filter
-            .add_directive("tungstenite::protocol=debug".parse()?)
-            .add_directive("tokio_postgres::connection=debug".parse()?)
-            .add_directive("tokio_util::codec::framed_impl=debug".parse()?)
-            .add_directive("tokio_tungstenite=debug".parse()?)
-            .add_directive("h2=info".parse()?)
-            .add_directive("rustls::client::hs=info".parse()?)
-            .add_directive("rustls::client::tls13=info".parse()?)
-            .add_directive("hyper::client=info".parse()?)
-            .add_directive("hyper::proto=info".parse()?)
-            .add_directive("mio=info".parse()?)
-            .add_directive("want=info".parse()?)
-            .add_directive("sqlparser=info".parse()?);
+        const DIRECTIVES: &[(Level, &str)] = &[
+            (Level::DEBUG, "tungstenite::protocol"),
+            (Level::DEBUG, "tokio_postgres::connection"),
+            (Level::DEBUG, "tokio_util::codec::framed_impl"),
+            (Level::DEBUG, "tokio_tungstenite"),
+            (Level::INFO, "h2"),
+            (Level::INFO, "rustls::client::hs"),
+            (Level::INFO, "rustls::client::tls13"),
+            (Level::INFO, "hyper::client"),
+            (Level::INFO, "hyper::proto"),
+            (Level::INFO, "mio"),
+            (Level::INFO, "want"),
+            (Level::INFO, "sqlparser"),
+        ];
+
+        for (directive_level, crate_name) in DIRECTIVES {
+            let capped_level = std::cmp::max(level, *directive_level);
+            let new_directive =
+                format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
+            filter = filter.add_directive(new_directive.parse()?);
+        }
     }
+
     Ok(filter)
 }
 
