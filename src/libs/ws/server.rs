@@ -291,7 +291,7 @@ impl WebsocketServer {
                                     }
                                 };
 
-                                let future = TOOLBOX.scope(this.toolbox.clone(), this.handle_ws_handshake_and_connection(addr, states, stream));
+                                let _ = TOOLBOX.scope(this.toolbox.clone(), this.handle_ws_handshake_and_connection(addr, states, stream)).await;
                             });
                         }
                     }
