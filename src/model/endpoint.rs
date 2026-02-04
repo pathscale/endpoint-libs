@@ -5,7 +5,7 @@ use serde::*;
 use std::fmt::Write;
 
 /// `EndpointSchema` is a struct that represents a single endpoint in the API.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct EndpointSchema {
     /// The name of the endpoint (e.g. `UserListSymbols`)
     pub name: String,
