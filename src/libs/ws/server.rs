@@ -161,8 +161,7 @@ impl WebsocketServer {
         )
         .await;
 
-        // TODO remove below after tracing log issue
-        tracing::warn!("handle new WS connection");
+        tracing::debug!("handle new WS connection");
 
         let stream = wrap_ws_error(hs)?;
         let conn = Arc::new(WsConnection {
@@ -189,8 +188,25 @@ impl WebsocketServer {
         if let Err(err) = auth_result {
             self.toolbox
                 .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
+
+            error!(
+                error_code=?ErrorCode::BAD_REQUEST, 
+                ip_addr=%raw_ctx.ip_addr,
+                user_id=raw_ctx.user_id, 
+                conn_id=raw_ctx.connection_id, 
+                roles=?raw_ctx.roles, 
+                error=%err, 
+                "Error while handling connection");
             return Err(err);
         }
+
+        info!(
+            ip_addr=%raw_ctx.ip_addr,
+            user_id=raw_ctx.user_id, 
+            conn_id=raw_ctx.connection_id, 
+            roles=?raw_ctx.roles, 
+            "WS connection request valid, proceeding to initiate the session"
+        );
         self.handle_session_connection(conn, states, stream, rx)
             .await;
 
@@ -266,7 +282,7 @@ impl WebsocketServer {
                             local_set.spawn_local(async move {
                                 let stream = match listener.handshake(stream).await {
                                     Ok(channel) => {
-                                        info!("Accepted stream from {}", addr);
+                                        debug!("Accepted stream from {}", addr);
                                         channel
                                     }
                                     Err(err) => {
@@ -276,9 +292,6 @@ impl WebsocketServer {
                                 };
 
                                 let future = TOOLBOX.scope(this.toolbox.clone(), this.handle_ws_handshake_and_connection(addr, states, stream));
-                                if let Err(err) = future.await {
-                                    error!("Error while handling connection: {:?}", err);
-                                }
                             });
                         }
                     }
