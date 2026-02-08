@@ -106,7 +106,11 @@ pub enum Type {
         name: String,
         variants: Vec<EnumVariant>,
     },
-    EnumRef(String),
+    EnumRef {
+        name: String,
+        #[serde(default)]
+        prefixed_name: bool,
+    },
     TimeStampMs,
     BlockchainDecimal,
     BlockchainAddress,
@@ -146,8 +150,11 @@ impl Type {
     }
 
     /// Creates a new `Type::EnumRef` with the given name.
-    pub fn enum_ref(name: impl Into<String>) -> Self {
-        Self::EnumRef(name.into())
+    pub fn enum_ref(name: impl Into<String>, prefixed_name: bool) -> Self {
+        Self::EnumRef {
+            name: name.into(),
+            prefixed_name,
+        }
     }
 
     /// Creates a new `Type::Enum` with the given name and fields/variants.
@@ -163,5 +170,20 @@ impl Type {
             Self::DataTable { .. } => None,
             _ => Some(self),
         }
+    }
+
+    pub fn add_default_enum_derives(input: String) -> String {
+        format!(
+            r#"#[derive(Debug, Clone, Copy, Serialize, Deserialize, FromPrimitive, PartialEq, Eq, PartialOrd, Ord, EnumString, Display, Hash)]{input}"#
+        )
+    }
+
+    pub fn add_default_struct_derives(input: String) -> String {
+        format!(
+            r#" #[derive(Serialize, Deserialize, Debug, Clone)]
+                #[serde(rename_all = "camelCase")]
+                {input}
+            "#
+        )
     }
 }
