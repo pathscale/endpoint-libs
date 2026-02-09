@@ -99,6 +99,9 @@ pub enum Type {
         name: String,
         fields: Vec<Field>,
     },
+    StructTable {
+        struct_ref: String,
+    },
     Vec(Box<Type>),
     Unit,
     Optional(Box<Type>),
@@ -136,6 +139,13 @@ impl Type {
         Self::DataTable {
             name: name.into(),
             fields,
+        }
+    }
+
+    /// Creates a new `Type::StructTable` with the given struct reference.
+    pub fn struct_table(struct_ref: impl Into<String>) -> Self {
+        Self::StructTable {
+            struct_ref: struct_ref.into(),
         }
     }
 
