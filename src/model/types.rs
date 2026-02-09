@@ -108,7 +108,7 @@ pub enum Type {
     },
     EnumRef {
         name: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing)]
         prefixed_name: bool,
     },
     TimeStampMs,
