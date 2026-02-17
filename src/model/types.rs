@@ -178,6 +178,7 @@ impl Type {
         match self {
             Self::Vec(v) => Some(*v),
             Self::DataTable { .. } => None,
+            Self::StructTable { .. } => None,
             _ => Some(self),
         }
     }
