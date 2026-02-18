@@ -95,10 +95,10 @@ pub enum Type {
     },
     StructRef(String),
     Object,
-    DataTable {
-        name: String,
-        fields: Vec<Field>,
-    },
+    // DataTable {
+    //     name: String,
+    //     fields: Vec<Field>,
+    // },
     StructTable {
         struct_ref: String,
     },
@@ -134,13 +134,13 @@ impl Type {
         Self::StructRef(name.into())
     }
 
-    /// Creates a new `Type::DataTable` with the given name and fields.
-    pub fn datatable(name: impl Into<String>, fields: Vec<Field>) -> Self {
-        Self::DataTable {
-            name: name.into(),
-            fields,
-        }
-    }
+    // /// Creates a new `Type::DataTable` with the given name and fields.
+    // pub fn datatable(name: impl Into<String>, fields: Vec<Field>) -> Self {
+    //     Self::DataTable {
+    //         name: name.into(),
+    //         fields,
+    //     }
+    // }
 
     /// Creates a new `Type::StructTable` with the given struct reference.
     pub fn struct_table(struct_ref: impl Into<String>) -> Self {
@@ -177,7 +177,7 @@ impl Type {
     pub fn try_unwrap(self) -> Option<Self> {
         match self {
             Self::Vec(v) => Some(*v),
-            Self::DataTable { .. } => None,
+            // Self::DataTable { .. } => None,
             Self::StructTable { .. } => None,
             _ => Some(self),
         }
