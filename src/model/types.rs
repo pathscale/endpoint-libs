@@ -80,15 +80,15 @@ impl EnumVariant {
 /// `Type` is an enum that represents the types of the fields in an endpoint schema.
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, PartialOrd, Eq, Ord)]
 pub enum Type {
-    Date,
-    Int,
-    BigInt,
-    Numeric,
+    UInt32,
+    Int32,
+    Int64,
+    Float64,
     Boolean,
     String,
     Bytea,
     UUID,
-    Inet,
+    IpAddr,
     Struct {
         name: String,
         fields: Vec<Field>,
