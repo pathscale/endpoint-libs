@@ -171,7 +171,7 @@ fn parse_ty(ty: &Type, value: &str) -> Result<serde_json::Value> {
             let decoded = urlencoding::decode(value)?;
             serde_json::Value::String(decoded.to_string())
         }
-        Type::Int => serde_json::Value::Number(
+        Type::Int64 => serde_json::Value::Number(
             value
                 .parse::<i64>()
                 .with_context(|| format!("Failed to parse integer: {value}"))?
