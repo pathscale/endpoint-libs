@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "endpoint-libs"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "alloy-primitives",
  "async-trait",
