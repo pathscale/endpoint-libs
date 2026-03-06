@@ -11,7 +11,7 @@ use tracing::*;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
-use super::{request_error_to_resp, WebsocketServer, WsConnection, WsRequestValue};
+use super::{WebsocketServer, WsConnection, WsRequestValue, request_error_to_resp};
 pub struct WsClientSession<WS> {
     conn_info: Arc<WsConnection>,
     conn: WS,
@@ -19,10 +19,10 @@ pub struct WsClientSession<WS> {
     server: Arc<WebsocketServer>,
 }
 impl<
-        WS: Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
-            + Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
-            + Unpin,
-    > WsClientSession<WS>
+    WS: Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin,
+> WsClientSession<WS>
 {
     pub fn new(
         conn_info: Arc<WsConnection>,

@@ -251,6 +251,7 @@ mod tests {
     struct Test {
         name: String,
     }
+
     #[test]
     fn test_wrapper() {
         let data = r#"

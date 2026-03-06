@@ -3,8 +3,8 @@ use serde::*;
 use serde_json::Value;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::RequestHandlerErased;

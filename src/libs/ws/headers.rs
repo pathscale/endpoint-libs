@@ -1,9 +1,9 @@
 use chrono::Utc;
 use convert_case::Case;
 use convert_case::Casing;
-use eyre::{bail, Context, ContextCompat, Result};
-use futures::future::LocalBoxFuture;
+use eyre::{Context, ContextCompat, Result, bail};
 use futures::FutureExt;
+use futures::future::LocalBoxFuture;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

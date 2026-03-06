@@ -1,4 +1,4 @@
-use eyre::{bail, eyre, ContextCompat, Result};
+use eyre::{ContextCompat, Result, bail, eyre};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -12,14 +12,14 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
-use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox, TOOLBOX};
+use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
 use crate::libs::ws::client::WsRequest;
 use crate::libs::ws::{ConnectionListener, TcpListener, TlsListener};

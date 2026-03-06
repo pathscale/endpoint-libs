@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
-use tracing::{level_filters::LevelFilter, Level};
+use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
 /// Helper function to determine if one level is more restrictive than another
@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn test_min_logic_filters_verbose_crates() {
         // Import necessary items for logging test setup
-        use crate::libs::log::{setup_logging_test, LoggingConfig};
+        use crate::libs::log::{LoggingConfig, setup_logging_test};
         use tracing::{debug, error, info, warn};
 
         // Setup logging at Debug level (which is > Info, so directives apply)
@@ -245,7 +245,7 @@ mod tests {
     async fn test_no_directives_applied_at_info_level() {
         // When log level is Info or above, directives should NOT be applied
         // because the global level is restrictive enough
-        use crate::libs::log::{setup_logging_test, LoggingConfig};
+        use crate::libs::log::{LoggingConfig, setup_logging_test};
         use tracing::{debug, error, info, warn};
 
         let config = LoggingConfig {

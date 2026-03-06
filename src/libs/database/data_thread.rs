@@ -1,6 +1,6 @@
 use eyre::*;
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use postgres_from_row::FromRow;
 use std::any::Any;
 use std::fmt::Debug;

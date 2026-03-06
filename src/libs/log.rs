@@ -3,14 +3,14 @@
 use std::{path::PathBuf, time::Duration};
 
 use chrono::SecondsFormat;
-use eyre::{bail, DefaultHandler, EyreHandler};
+use eyre::{DefaultHandler, EyreHandler, bail};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_subscriber::{
+    EnvFilter, Layer, Registry,
     layer::SubscriberExt,
     registry,
     reload::{self, Handle},
-    EnvFilter, Layer, Registry,
 };
 
 #[cfg(feature = "log_throttling")]
@@ -337,7 +337,9 @@ impl LogReloadHandle {
                     ?error,
                     "Error building new filter from given log level. Ignoring reload attempt"
                 );
-                bail!("Error building new filter from given log level: {error}. Ignoring reload attempt")
+                bail!(
+                    "Error building new filter from given log level: {error}. Ignoring reload attempt"
+                )
             }
         }
     }

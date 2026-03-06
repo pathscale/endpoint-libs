@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 
 lazy_static! {

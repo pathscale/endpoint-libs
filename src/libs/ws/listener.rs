@@ -4,18 +4,18 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use eyre::{ensure, Context, Result};
-use futures::future::BoxFuture;
+use eyre::{Context, Result, ensure};
 use futures::FutureExt;
-use rustls::pki_types::pem::PemObject;
+use futures::future::BoxFuture;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
+use rustls::pki_types::pem::PemObject;
 use rustls_pemfile::certs;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
-use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
 
 pub trait ConnectionListener: Send + Sync + Unpin {
     type Channel1: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;

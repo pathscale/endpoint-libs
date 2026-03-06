@@ -11,8 +11,8 @@ use std::hash::Hasher;
 use std::result::Result::Ok;
 use std::sync::Arc;
 use std::time::Duration;
-pub use tokio_postgres::types::ToSql;
 use tokio_postgres::Statement;
+pub use tokio_postgres::types::ToSql;
 pub use tokio_postgres::{NoTls, Row, ToStatement};
 use tracing::*;
 

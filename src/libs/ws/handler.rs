@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::libs::{
     error_code::ErrorCode,
     toolbox::{ArcToolbox, RequestContext, Toolbox},
-    ws::{request_error_to_resp, WsRequest},
+    ws::{WsRequest, request_error_to_resp},
 };
 
 #[allow(type_alias_bounds)]
