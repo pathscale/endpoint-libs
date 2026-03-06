@@ -34,9 +34,13 @@ README="$REPO_ROOT/README.md"
 
 sed -i "s|deps.rs/crate/endpoint-libs/[^/]*/status.svg|deps.rs/crate/endpoint-libs/$VERSION/status.svg|g" "$README"
 sed -i "s|(https://deps.rs/crate/endpoint-libs/[^)]*))|(https://deps.rs/crate/endpoint-libs/$VERSION)|g" "$README"
-git -C "$REPO_ROOT" add "$README"
-git -C "$REPO_ROOT" commit -m "chore: update deps.rs badge to $TAG"
-echo "Updated deps.rs badge in README to $TAG"
+if ! git -C "$REPO_ROOT" diff --quiet "$README"; then
+    git -C "$REPO_ROOT" add "$README"
+    git -C "$REPO_ROOT" commit -m "chore: update deps.rs badge to $TAG"
+    echo "Updated deps.rs badge in README to $TAG"
+else
+    echo "deps.rs badge already at $TAG, skipping commit"
+fi
 
 git -C "$REPO_ROOT" tag "$TAG"
 echo "Created tag $TAG"
