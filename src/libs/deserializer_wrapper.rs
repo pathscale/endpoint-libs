@@ -243,6 +243,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(deprecated)]
     use super::*;
     use serde::{Deserialize, Serialize};
 
@@ -250,7 +251,6 @@ mod tests {
     struct Test {
         name: String,
     }
-
     #[test]
     fn test_wrapper() {
         let data = r#"

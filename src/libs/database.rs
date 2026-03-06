@@ -1,3 +1,4 @@
+#![expect(deprecated)]
 use deadpool_postgres::*;
 use eyre::*;
 use postgres_from_row::FromRow;
