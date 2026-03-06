@@ -10,10 +10,6 @@ pre-release-hook = ["git", "cliff", "--tag", "v{{version}}", "--output", "CHANGE
 
 [[pre-release-replacements]]
 file = "README.md"
-search = 'deps\.rs/crate/endpoint-libs/[^/]+/status\.svg'
-replace = "deps.rs/crate/endpoint-libs/{{version}}/status.svg"
-
-[[pre-release-replacements]]
-file = "README.md"
-search = '\]\(https://deps\.rs/crate/endpoint-libs/[^\)]+\)'
-replace = "](https://deps.rs/crate/endpoint-libs/{{version}})"
+search = 'deps\.rs/crate/endpoint-libs/[0-9][^/)]+'
+replace = "deps.rs/crate/endpoint-libs/{{version}}"
+replace_all = true
