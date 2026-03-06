@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./scripts/release.sh [--skip-bump] <patch|minor|major>
+# Usage: ./scripts/release.sh [--skip-bump] [--no-tag] <patch|minor|major|release>
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO_TOML="$REPO_ROOT/Cargo.toml"
+CRATE_NAME=$(grep '^name' "$CARGO_TOML" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 
 SKIP_BUMP=false
-if [[ "${1:-}" == "--skip-bump" ]]; then
-    SKIP_BUMP=true
+NO_TAG=false
+while [[ "${1:-}" == --* ]]; do
+    case "${1}" in
+        --skip-bump) SKIP_BUMP=true ;;
+        --no-tag)    NO_TAG=true ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
     shift
-fi
+done
 
 LEVEL="${1:-}"
-if [[ "$LEVEL" != "patch" && "$LEVEL" != "minor" && "$LEVEL" != "major" ]]; then
-    echo "Usage: $0 [--skip-bump] <patch|minor|major>" >&2
+if [[ "$LEVEL" != "patch" && "$LEVEL" != "minor" && "$LEVEL" != "major" && "$LEVEL" != "release" ]]; then
+    echo "Usage: $0 [--skip-bump] [--no-tag] <patch|minor|major|release>" >&2
     exit 1
 fi
 
@@ -29,13 +35,6 @@ done
 # Ensure working tree is clean
 if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
     echo "Error: working tree has uncommitted changes. Please commit or stash them first." >&2
-    exit 1
-fi
-
-# Ensure we are on main
-CURRENT_BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT_BRANCH" != "main" ]]; then
-    echo "Error: must be on branch 'main' (currently on '$CURRENT_BRANCH')." >&2
     exit 1
 fi
 
@@ -54,48 +53,54 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-echo "Preparing tag notes for $TAG..."
+if [ "$NO_TAG" = false ]; then
+    echo "Preparing tag notes for $TAG..."
 
-# Generate tag notes with git-cliff, open in editor for review
-TMPFILE=$(mktemp /tmp/release_notes.XXXXXX)
-git -C "$REPO_ROOT" cliff --latest --strip all > "$TMPFILE"
+    # Generate tag notes with git-cliff, open in editor for review
+    TMPFILE=$(mktemp /tmp/release_notes.XXXXXX)
+    git -C "$REPO_ROOT" cliff --latest --strip all > "$TMPFILE"
 
-EDITOR_CMD="${VISUAL:-${EDITOR:-}}"
-if [ -z "$EDITOR_CMD" ]; then
-    for e in nano vim vi; do
-        if command -v "$e" &>/dev/null; then
-            EDITOR_CMD="$e"
-            break
-        fi
-    done
-fi
-if [ -z "$EDITOR_CMD" ]; then
-    echo "Error: no editor found. Set \$VISUAL or \$EDITOR." >&2
+    EDITOR_CMD="${VISUAL:-${EDITOR:-}}"
+    if [ -z "$EDITOR_CMD" ]; then
+        for e in nano vim vi; do
+            if command -v "$e" &>/dev/null; then
+                EDITOR_CMD="$e"
+                break
+            fi
+        done
+    fi
+    if [ -z "$EDITOR_CMD" ]; then
+        echo "Error: no editor found. Set \$VISUAL or \$EDITOR." >&2
+        rm -f "$TMPFILE"
+        exit 1
+    fi
+    $EDITOR_CMD "$TMPFILE"
+
+    TAG_MESSAGE=$(cat "$TMPFILE")
     rm -f "$TMPFILE"
-    exit 1
+
+    if [ -z "$TAG_MESSAGE" ]; then
+        echo "Error: tag message is empty, aborting." >&2
+        exit 1
+    fi
+
+    # Create annotated tag with cliff-generated notes
+    echo "Tagging $TAG ..."
+    git -C "$REPO_ROOT" tag -a "$TAG" -m "$TAG_MESSAGE"
+
+    # Push commit and tag
+    echo "Pushing commit and tag..."
+    git -C "$REPO_ROOT" push origin HEAD "$TAG"
+else
+    # Push commit only
+    echo "Pushing commit..."
+    git -C "$REPO_ROOT" push origin HEAD
 fi
-$EDITOR_CMD "$TMPFILE"
-
-TAG_MESSAGE=$(cat "$TMPFILE")
-rm -f "$TMPFILE"
-
-if [ -z "$TAG_MESSAGE" ]; then
-    echo "Error: tag message is empty, aborting." >&2
-    exit 1
-fi
-
-# Create annotated tag with cliff-generated notes
-echo "Tagging $TAG ..."
-git -C "$REPO_ROOT" tag -a "$TAG" -m "$TAG_MESSAGE"
-
-# Push commit and tag
-echo "Pushing commit and tag..."
-git -C "$REPO_ROOT" push origin HEAD "$TAG"
 
 echo ""
 
 # Optionally publish to crates.io
-CRATES_IO_STATUS=$(curl -sf "https://crates.io/api/v1/crates/endpoint-libs/$VERSION" -o /dev/null -w "%{http_code}" || true)
+CRATES_IO_STATUS=$(curl -sf "https://crates.io/api/v1/crates/$CRATE_NAME/$VERSION" -o /dev/null -w "%{http_code}" || true)
 if [ "$CRATES_IO_STATUS" = "200" ]; then
     echo "Version $VERSION is already published to crates.io, skipping."
 else
