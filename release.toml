@@ -1,0 +1,19 @@
+allow-branch = ["main"]
+sign-commit = false
+sign-tag = false
+push = false        # script handles push (tag message must be set first)
+tag = false         # script handles tag (uses git-cliff content as body)
+publish = false     # script handles publish (interactive prompt)
+pre-release-commit-message = "chore(release): v{{version}}"
+
+pre-release-hook = ["git", "cliff", "--tag", "{{tag_name}}", "--output", "CHANGELOG.md"]
+
+[[pre-release-replacements]]
+file = "README.md"
+search = 'deps\.rs/crate/endpoint-libs/[^/]+/status\.svg'
+replace = "deps.rs/crate/endpoint-libs/{{version}}/status.svg"
+
+[[pre-release-replacements]]
+file = "README.md"
+search = '\]\(https://deps\.rs/crate/endpoint-libs/[^\)]+\)'
+replace = "](https://deps.rs/crate/endpoint-libs/{{version}})"

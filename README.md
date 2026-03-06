@@ -8,6 +8,33 @@
 
 Common library used across Pathscale projects. Contains generic utilities and shared types that are not specific to any single service, including a WebSocket server implementation, endpoint schema types for use with [endpoint-gen](https://github.com/pathscale/endpoint-gen), structured logging setup, and more.
 
+## Releasing
+
+Releases are managed with [`cargo-release`](https://github.com/crate-ci/cargo-release) and [`git-cliff`](https://github.com/orhun/git-cliff). Both must be installed:
+
+```sh
+cargo install cargo-release git-cliff
+```
+
+To cut a release:
+
+```sh
+./scripts/release.sh <patch|minor|major>
+```
+
+The script will:
+1. Run `cargo release --execute <level>` — bumps the version in `Cargo.toml`, updates the deps.rs badge in this README, regenerates `CHANGELOG.md`, and commits everything as `chore(release): vX.Y.Z`.
+2. Open your `$EDITOR` with the auto-generated tag notes (from `git-cliff`) for review.
+3. Create an annotated tag using the edited notes as the tag body (shown as GitHub Release notes).
+4. Push the commit and tag.
+5. Prompt whether to publish to crates.io.
+
+To preview what `cargo-release` would do without making changes:
+
+```sh
+cargo release patch  # omit --execute for a dry run
+```
+
 ## Version Compatibility
 
 When using `endpoint-libs` alongside `endpoint-gen` or `honey_id-types` in the same project, **minor versions must match** between all of them. Patch versions are stable across these crates but should ideally be kept in sync as well.
