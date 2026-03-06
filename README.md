@@ -19,7 +19,7 @@ cargo install cargo-release git-cliff
 To cut a release:
 
 ```sh
-./scripts/release.sh <patch|minor|major>
+./scripts/release.sh [--skip-bump] <patch|minor|major>
 ```
 
 The script will:

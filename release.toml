@@ -6,7 +6,7 @@ tag = false         # script handles tag (uses git-cliff content as body)
 publish = false     # script handles publish (interactive prompt)
 pre-release-commit-message = "chore(release): v{{version}}"
 
-pre-release-hook = ["git", "cliff", "--tag", "{{tag_name}}", "--output", "CHANGELOG.md"]
+pre-release-hook = ["git", "cliff", "--tag", "v{{version}}", "--output", "CHANGELOG.md"]
 
 [[pre-release-replacements]]
 file = "README.md"

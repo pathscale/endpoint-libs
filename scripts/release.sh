@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./scripts/release.sh <patch|minor|major>
+# Usage: ./scripts/release.sh [--skip-bump] <patch|minor|major>
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO_TOML="$REPO_ROOT/Cargo.toml"
 
+SKIP_BUMP=false
+if [[ "${1:-}" == "--skip-bump" ]]; then
+    SKIP_BUMP=true
+    shift
+fi
+
 LEVEL="${1:-}"
 if [[ "$LEVEL" != "patch" && "$LEVEL" != "minor" && "$LEVEL" != "major" ]]; then
-    echo "Usage: $0 <patch|minor|major>" >&2
+    echo "Usage: $0 [--skip-bump] <patch|minor|major>" >&2
     exit 1
 fi
 
@@ -33,26 +39,42 @@ if [[ "$CURRENT_BRANCH" != "main" ]]; then
     exit 1
 fi
 
-echo "Running cargo-release $LEVEL ..."
-cargo release --manifest-path "$CARGO_TOML" --execute --no-confirm "$LEVEL"
+if [ "$SKIP_BUMP" = false ]; then
+    echo "Running cargo-release $LEVEL ..."
+    cargo release --manifest-path "$CARGO_TOML" --execute --no-confirm "$LEVEL"
+    echo ""
+fi
 
-# Read the now-bumped version
+# Read version (current if --skip-bump, bumped if not)
 VERSION=$(grep '^version' "$CARGO_TOML" | head -1 | sed 's/.*"\(.*\)".*/\1/')
 TAG="v$VERSION"
 
 if [ -z "$VERSION" ]; then
-    echo "Error: could not read version from Cargo.toml after release" >&2
+    echo "Error: could not read version from Cargo.toml" >&2
     exit 1
 fi
 
-echo ""
-echo "cargo-release committed version $TAG. Preparing tag notes..."
+echo "Preparing tag notes for $TAG..."
 
 # Generate tag notes with git-cliff, open in editor for review
 TMPFILE=$(mktemp /tmp/release_notes.XXXXXX)
 git -C "$REPO_ROOT" cliff --latest --strip all > "$TMPFILE"
 
-${VISUAL:-${EDITOR:-vi}} "$TMPFILE"
+EDITOR_CMD="${VISUAL:-${EDITOR:-}"
+if [ -z "$EDITOR_CMD" ]; then
+    for e in nano vim vi; do
+        if command -v "$e" &>/dev/null; then
+            EDITOR_CMD="$e"
+            break
+        fi
+    done
+fi
+if [ -z "$EDITOR_CMD" ]; then
+    echo "Error: no editor found. Set \$VISUAL or \$EDITOR." >&2
+    rm -f "$TMPFILE"
+    exit 1
+fi
+$EDITOR_CMD "$TMPFILE"
 
 TAG_MESSAGE=$(cat "$TMPFILE")
 rm -f "$TMPFILE"
