@@ -423,11 +423,11 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
 
     #[cfg(not(feature = "error_aggregation"))]
     {
-        return Ok(LogSetupReturnTest {
+        Ok(LogSetupReturnTest {
             _guard: guard,
             reload_handle: parts.reload_handle,
             log_guards: parts.log_guards,
-        });
+        })
     }
 }
 
@@ -546,39 +546,39 @@ mod tests {
         assert!(filter.is_ok());
     }
 
-    /// Test that verifies the global EnvFilter short-circuits BEFORE the throttling
-    /// filter sees filtered-out events. This ensures DEBUG events don't consume
-    /// throttle budget when log level is INFO.
-    #[cfg(feature = "log_throttling")]
-    #[tokio::test]
-    async fn test_global_filter_prevents_throttle_seeing_filtered_events() {
-        // TODO: Setup
-        // 1. Create a logging config with level=INFO and throttling enabled
-        // 2. Configure throttling with a very aggressive limit (e.g., 1 event per minute)
-        //    so that if the throttler sees events, it will throttle after the first one
+    // Test that verifies the global EnvFilter short-circuits BEFORE the throttling
+    // filter sees filtered-out events. This ensures DEBUG events don't consume
+    // throttle budget when log level is INFO.
+    // #[cfg(feature = "log_throttling")]
+    // #[tokio::test]
+    // async fn test_global_filter_prevents_throttle_seeing_filtered_events() {
+    //     // TODO: Setup
+    //     // 1. Create a logging config with level=INFO and throttling enabled
+    //     // 2. Configure throttling with a very aggressive limit (e.g., 1 event per minute)
+    //     //    so that if the throttler sees events, it will throttle after the first one
 
-        // TODO: Emit filtered-out events
-        // 3. Emit many DEBUG events (these should be filtered by global EnvFilter)
-        //    e.g., 100 debug!("filtered event {}", i) in a loop
-        // 4. These events should NOT reach the throttling filter at all
+    //     // TODO: Emit filtered-out events
+    //     // 3. Emit many DEBUG events (these should be filtered by global EnvFilter)
+    //     //    e.g., 100 debug!("filtered event {}", i) in a loop
+    //     // 4. These events should NOT reach the throttling filter at all
 
-        // TODO: Emit events that should pass the filter
-        // 5. Emit INFO events that SHOULD pass the global filter
-        //    e.g., info!("should_appear_1"), info!("should_appear_2"), etc.
-        // 6. If global filter correctly short-circuits, the throttler's budget
-        //    should NOT have been consumed by the DEBUG events
+    //     // TODO: Emit events that should pass the filter
+    //     // 5. Emit INFO events that SHOULD pass the global filter
+    //     //    e.g., info!("should_appear_1"), info!("should_appear_2"), etc.
+    //     // 6. If global filter correctly short-circuits, the throttler's budget
+    //     //    should NOT have been consumed by the DEBUG events
 
-        // TODO: Verify behavior
-        // 7. Check the log file - all INFO events should appear (not throttled)
-        // 8. If the DEBUG events had reached the throttler, they would have
-        //    consumed the budget and caused INFO events to be throttled
-        //
-        // Expected: All INFO events appear because DEBUG events never hit throttler
-        // Failure mode: If DEBUG events reach throttler, they consume budget,
-        //               and subsequent INFO events get throttled
+    //     // TODO: Verify behavior
+    //     // 7. Check the log file - all INFO events should appear (not throttled)
+    //     // 8. If the DEBUG events had reached the throttler, they would have
+    //     //    consumed the budget and caused INFO events to be throttled
+    //     //
+    //     // Expected: All INFO events appear because DEBUG events never hit throttler
+    //     // Failure mode: If DEBUG events reach throttler, they consume budget,
+    //     //               and subsequent INFO events get throttled
 
-        assert!(true)
-    }
+    //     assert!(true)
+    // }
 
     // TODO: Test for log throttling
 

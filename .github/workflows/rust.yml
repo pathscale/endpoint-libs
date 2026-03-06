@@ -72,15 +72,15 @@ jobs:
             profile: minimal
             components: clippy
             override: true
-      - uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-targets --all-features -- -D warnings
+      - name: Install cargo-all-features
+        run: cargo install cargo-all-features
 
+      - name: Clippy check all feature combinations
+        run: cargo all-features clippy --all-targets --all-features -- -D warnings
 
   format_check:
+
     runs-on: buildjet-8vcpu-ubuntu-2204
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

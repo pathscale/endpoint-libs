@@ -284,11 +284,11 @@ mod tests {
         let filter_trace = build_env_filter(LogLevel::Trace).unwrap();
         let filter_detail = build_env_filter(LogLevel::Detail).unwrap();
         
-        println!("Debug level filter: {}", filter_debug.to_string());
-        println!("Info level filter: {}", filter_info.to_string());
-        println!("Error level filter: {}", filter_error.to_string());
-        println!("Trace level filter: {}", filter_trace.to_string());
-        println!("Detail level filter: {}", filter_detail.to_string());
+        println!("Debug level filter: {}", filter_debug);
+        println!("Info level filter: {}", filter_info);
+        println!("Error level filter: {}", filter_error);
+        println!("Trace level filter: {}", filter_trace);
+        println!("Detail level filter: {}", filter_detail);
         
         // At Debug level: should only have INFO directives (more restrictive than DEBUG)
         // Should have h2=info (more restrictive), but NOT tungstenite::protocol=debug

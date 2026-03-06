@@ -136,3 +136,41 @@ tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 tempfile = "3.19"
 tokio = { version = "1.39", features = ["full", "test-util"] }
 tracing-throttle = { version = "0.4", features = ["async", "test-helpers"] }
+
+[package.metadata.cargo-all-features]
+
+# Always include these features in combinations.
+# These features should not be included in `skip_feature_sets` or `denylist`, they get
+# added in later
+always_include_features = ["types"]
+
+# Exclude certain features from the build matrix
+denylist = [
+    "full",           # full is redundant to include in the matrix
+    "log_throttling", # log_throttling is currently not working
+]
+
+# Features "foo" and "bar" are incompatible, so skip permutations including them
+# skip_feature_sets = [
+#     ["foo", "bar"],
+# ]
+
+# If your crate has a large number of optional dependencies, skip them for speed
+# skip_optional_dependencies = true
+
+# Add back certain optional dependencies that you want to include in the permutations
+# extra_features = [
+#     "log",
+# ]
+
+# The maximum number of features to try at once. Does not count features from `always_include_features`.
+# This is useful for reducing the number of combinations run for a crate with a large amount of features,
+# since in most cases a bug just needs a small set of 2-3 features to reproduce.
+# max_combination_size = 4
+
+# Only include certain features in the build matrix
+#(incompatible with `denylist`, `skip_optional_dependencies`, and `extra_features`)
+# allowlist = ["foo", "bar"]
+
+# Disable the entire package from being tested (useful in a workspace)
+# skip_package = true
