@@ -18,7 +18,7 @@ fn is_more_restrictive(a: Level, b: Level) -> bool {
         Level::WARN => 3,
         Level::ERROR => 4,
     };
-    
+
     restrictiveness(a) > restrictiveness(b)
 }
 
@@ -37,7 +37,7 @@ pub enum LogLevel {
 
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     let level: Level = log_level.into();
-    
+
     // Start with the default env filter and add a base directive for all targets
     let mut filter = EnvFilter::from_default_env().add_directive(level.into());
 
@@ -65,7 +65,11 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
             // At Debug: only apply INFO directives (they're more restrictive)
             // At Trace: apply both DEBUG and INFO directives (both are more restrictive)
             if is_more_restrictive(*directive_level, level) {
-                let directive_string = format!("{}={}", crate_name, directive_level.to_string().to_lowercase());
+                let directive_string = format!(
+                    "{}={}",
+                    crate_name,
+                    directive_level.to_string().to_lowercase()
+                );
                 filter = filter.add_directive(directive_string.parse()?);
             }
         }
@@ -180,18 +184,23 @@ mod tests {
         let level = Level::ERROR;
         let crate_name = "test_crate";
         let capped_level = std::cmp::max(level, Level::INFO);
-        let directive_string = format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
-        
+        let directive_string =
+            format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
+
         // This should parse without error
         let result = directive_string.parse::<tracing_subscriber::filter::Directive>();
-        assert!(result.is_ok(), "Failed to parse directive: {}", directive_string);
+        assert!(
+            result.is_ok(),
+            "Failed to parse directive: {}",
+            directive_string
+        );
     }
 
     #[tokio::test]
     async fn test_min_logic_filters_verbose_crates() {
         // Import necessary items for logging test setup
         use crate::libs::log::{setup_logging_test, LoggingConfig};
-        use tracing::{debug, info, warn, error};
+        use tracing::{debug, error, info, warn};
 
         // Setup logging at Debug level (which is > Info, so directives apply)
         let config = LoggingConfig {
@@ -214,20 +223,20 @@ mod tests {
         info!("Global info log should appear");
         warn!("Global warn log should appear");
         error!("Global error log should appear");
-        
+
         // Emit logs from tungstenite::protocol (which has directive (Level::DEBUG, "tungstenite::protocol"))
         // With LogLevel::Debug, min(DEBUG, DEBUG) = DEBUG, so DEBUG logs should appear
         debug!(target: "tungstenite::protocol", "Targeted debug log from tungstenite::protocol should appear");
         info!(target: "tungstenite::protocol", "Targeted info log from tungstenite::protocol should appear");
-        
+
         // Emit logs from h2 (which has directive (Level::INFO, "h2"))
         // With LogLevel::Debug, h2 is capped at INFO, so DEBUG logs should NOT appear
         debug!(target: "h2", "Targeted debug log from h2 should NOT appear");
         info!(target: "h2", "Targeted info log from h2 should appear");
-        
+
         // Allow time for logs to be processed
         std::thread::sleep(std::time::Duration::from_millis(100));
-        
+
         // If we got here without panic, the filter logic worked correctly
         // The test passes if the logs are emitted without errors
     }
@@ -237,7 +246,7 @@ mod tests {
         // When log level is Info or above, directives should NOT be applied
         // because the global level is restrictive enough
         use crate::libs::log::{setup_logging_test, LoggingConfig};
-        use tracing::{debug, info, warn, error};
+        use tracing::{debug, error, info, warn};
 
         let config = LoggingConfig {
             level: LogLevel::Info,
@@ -259,19 +268,19 @@ mod tests {
         info!("Global info log should appear");
         warn!("Global warn log should appear");
         error!("Global error log should appear");
-        
+
         // At Info level, no crate directives are applied, so global level (info) applies
         // This means debug logs from anywhere should not appear
         debug!(target: "tungstenite::protocol", "Targeted debug from tungstenite::protocol should NOT appear");
         info!(target: "tungstenite::protocol", "Targeted info from tungstenite::protocol should appear");
-        
+
         // Similarly for h2 - debug should not appear, info and above should
         debug!(target: "h2", "Targeted debug from h2 should NOT appear");
         info!(target: "h2", "Targeted info from h2 should appear");
         warn!(target: "h2", "Targeted warn from h2 should appear");
-        
+
         std::thread::sleep(std::time::Duration::from_millis(100));
-        
+
         // Test passes if logs are processed without errors
     }
 
@@ -283,40 +292,88 @@ mod tests {
         let filter_error = build_env_filter(LogLevel::Error).unwrap();
         let filter_trace = build_env_filter(LogLevel::Trace).unwrap();
         let filter_detail = build_env_filter(LogLevel::Detail).unwrap();
-        
+
         println!("Debug level filter: {}", filter_debug);
         println!("Info level filter: {}", filter_info);
         println!("Error level filter: {}", filter_error);
         println!("Trace level filter: {}", filter_trace);
         println!("Detail level filter: {}", filter_detail);
-        
+
         // At Debug level: should only have INFO directives (more restrictive than DEBUG)
         // Should have h2=info (more restrictive), but NOT tungstenite::protocol=debug
         let debug_str = filter_debug.to_string();
-        assert!(debug_str.contains("h2=info"), "Debug filter should contain h2=info (INFO is more restrictive): {}", debug_str);
-        assert!(!debug_str.contains("tungstenite::protocol=debug"), "Debug filter should NOT contain tungstenite::protocol=debug: {}", debug_str);
-        assert!(debug_str.contains("debug"), "Debug filter should end with 'debug' as base level: {}", debug_str);
-        
+        assert!(
+            debug_str.contains("h2=info"),
+            "Debug filter should contain h2=info (INFO is more restrictive): {}",
+            debug_str
+        );
+        assert!(
+            !debug_str.contains("tungstenite::protocol=debug"),
+            "Debug filter should NOT contain tungstenite::protocol=debug: {}",
+            debug_str
+        );
+        assert!(
+            debug_str.contains("debug"),
+            "Debug filter should end with 'debug' as base level: {}",
+            debug_str
+        );
+
         // At Info level, should NOT have any crate-specific directives
         let info_str = filter_info.to_string();
-        assert!(info_str.starts_with("info"), "Info filter should start with 'info': {}", info_str);
-        assert!(!info_str.contains("h2="), "Info filter should not have h2 directive: {}", info_str);
-        
+        assert!(
+            info_str.starts_with("info"),
+            "Info filter should start with 'info': {}",
+            info_str
+        );
+        assert!(
+            !info_str.contains("h2="),
+            "Info filter should not have h2 directive: {}",
+            info_str
+        );
+
         // At Error level, should NOT have any crate-specific directives
         let error_str = filter_error.to_string();
-        assert!(error_str.starts_with("error"), "Error filter should start with 'error': {}", error_str);
-        assert!(!error_str.contains("h2="), "Error filter should not have h2 directive: {}", error_str);
-        
+        assert!(
+            error_str.starts_with("error"),
+            "Error filter should start with 'error': {}",
+            error_str
+        );
+        assert!(
+            !error_str.contains("h2="),
+            "Error filter should not have h2 directive: {}",
+            error_str
+        );
+
         // At Trace level: should have ALL directives (both DEBUG and INFO are more restrictive)
         let trace_str = filter_trace.to_string();
-        assert!(trace_str.contains("tungstenite::protocol=debug"), "Trace filter should contain tungstenite::protocol=debug: {}", trace_str);
-        assert!(trace_str.contains("h2=info"), "Trace filter should contain h2=info: {}", trace_str);
-        assert!(trace_str.contains("trace"), "Trace filter should end with 'trace' as base level: {}", trace_str);
-        
+        assert!(
+            trace_str.contains("tungstenite::protocol=debug"),
+            "Trace filter should contain tungstenite::protocol=debug: {}",
+            trace_str
+        );
+        assert!(
+            trace_str.contains("h2=info"),
+            "Trace filter should contain h2=info: {}",
+            trace_str
+        );
+        assert!(
+            trace_str.contains("trace"),
+            "Trace filter should end with 'trace' as base level: {}",
+            trace_str
+        );
+
         // At Detail level, should NOT have any crate-specific directives
         let detail_str = filter_detail.to_string();
-        assert!(detail_str.starts_with("trace"), "Detail filter should start with 'trace': {}", detail_str);
-        assert!(!detail_str.contains("h2="), "Detail filter should not have h2 directive: {}", detail_str);
+        assert!(
+            detail_str.starts_with("trace"),
+            "Detail filter should start with 'trace': {}",
+            detail_str
+        );
+        assert!(
+            !detail_str.contains("h2="),
+            "Detail filter should not have h2 directive: {}",
+            detail_str
+        );
     }
 
     #[test]
@@ -324,16 +381,40 @@ mod tests {
         // Verify that Level ordering matches our assumptions
         // This test ensures the filtering logic remains correct if tracing crate behavior changes
         // Ordering: TRACE (least restrictive) < DEBUG < INFO < WARN < ERROR (most restrictive)
-        
-        assert!(is_more_restrictive(Level::ERROR, Level::WARN), "ERROR should be more restrictive than WARN");
-        assert!(is_more_restrictive(Level::WARN, Level::INFO), "WARN should be more restrictive than INFO");
-        assert!(is_more_restrictive(Level::INFO, Level::DEBUG), "INFO should be more restrictive than DEBUG");
-        assert!(is_more_restrictive(Level::DEBUG, Level::TRACE), "DEBUG should be more restrictive than TRACE");
-        
+
+        assert!(
+            is_more_restrictive(Level::ERROR, Level::WARN),
+            "ERROR should be more restrictive than WARN"
+        );
+        assert!(
+            is_more_restrictive(Level::WARN, Level::INFO),
+            "WARN should be more restrictive than INFO"
+        );
+        assert!(
+            is_more_restrictive(Level::INFO, Level::DEBUG),
+            "INFO should be more restrictive than DEBUG"
+        );
+        assert!(
+            is_more_restrictive(Level::DEBUG, Level::TRACE),
+            "DEBUG should be more restrictive than TRACE"
+        );
+
         // Verify the inverse relationships
-        assert!(!is_more_restrictive(Level::TRACE, Level::DEBUG), "TRACE should NOT be more restrictive than DEBUG");
-        assert!(!is_more_restrictive(Level::DEBUG, Level::INFO), "DEBUG should NOT be more restrictive than INFO");
-        assert!(!is_more_restrictive(Level::INFO, Level::WARN), "INFO should NOT be more restrictive than WARN");
-        assert!(!is_more_restrictive(Level::WARN, Level::ERROR), "WARN should NOT be more restrictive than ERROR");
+        assert!(
+            !is_more_restrictive(Level::TRACE, Level::DEBUG),
+            "TRACE should NOT be more restrictive than DEBUG"
+        );
+        assert!(
+            !is_more_restrictive(Level::DEBUG, Level::INFO),
+            "DEBUG should NOT be more restrictive than INFO"
+        );
+        assert!(
+            !is_more_restrictive(Level::INFO, Level::WARN),
+            "INFO should NOT be more restrictive than WARN"
+        );
+        assert!(
+            !is_more_restrictive(Level::WARN, Level::ERROR),
+            "WARN should NOT be more restrictive than ERROR"
+        );
     }
 }

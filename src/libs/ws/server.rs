@@ -190,21 +190,21 @@ impl WebsocketServer {
                 .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
 
             error!(
-                error_code=?ErrorCode::BAD_REQUEST, 
+                error_code=?ErrorCode::BAD_REQUEST,
                 ip_addr=%raw_ctx.ip_addr,
-                user_id=raw_ctx.user_id, 
-                conn_id=raw_ctx.connection_id, 
-                roles=?raw_ctx.roles, 
-                error=%err, 
+                user_id=raw_ctx.user_id,
+                conn_id=raw_ctx.connection_id,
+                roles=?raw_ctx.roles,
+                error=%err,
                 "Error while handling connection");
             return Err(err);
         }
 
         info!(
             ip_addr=%raw_ctx.ip_addr,
-            user_id=raw_ctx.user_id, 
-            conn_id=raw_ctx.connection_id, 
-            roles=?raw_ctx.roles, 
+            user_id=raw_ctx.user_id,
+            conn_id=raw_ctx.connection_id,
+            roles=?raw_ctx.roles,
             "WS connection request valid, proceeding to initiate the session"
         );
         self.handle_session_connection(conn, states, stream, rx)
