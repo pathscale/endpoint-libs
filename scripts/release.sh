@@ -60,7 +60,7 @@ echo "Preparing tag notes for $TAG..."
 TMPFILE=$(mktemp /tmp/release_notes.XXXXXX)
 git -C "$REPO_ROOT" cliff --latest --strip all > "$TMPFILE"
 
-EDITOR_CMD="${VISUAL:-${EDITOR:-}"
+EDITOR_CMD="${VISUAL:-${EDITOR:-}}"
 if [ -z "$EDITOR_CMD" ]; then
     for e in nano vim vi; do
         if command -v "$e" &>/dev/null; then
