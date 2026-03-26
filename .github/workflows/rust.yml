@@ -11,7 +11,7 @@ env:
 
 jobs:
   build-test-all-features:
-    runs-on: buildjet-8vcpu-ubuntu-2204
+    runs-on: ubicloud-standard-8
     permissions:
       contents: write
       pull-requests: write
@@ -25,7 +25,6 @@ jobs:
 
     - uses: Swatinem/rust-cache@v2
       with:
-        cache-provider: buildjet
         cache-on-failure: "true"
         add-job-id-key: "false"
         add-rust-environment-hash-key: "false"
@@ -47,7 +46,7 @@ jobs:
 
   clippy_check:
 
-    runs-on: buildjet-8vcpu-ubuntu-2204
+    runs-on: ubicloud-standard-8
     permissions:
       contents: write
       pull-requests: write
@@ -60,8 +59,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-provider: buildjet
-          cache-on-failure: "true"
+            cache-on-failure: "true"
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
 
@@ -80,15 +78,14 @@ jobs:
 
   format_check:
 
-    runs-on: buildjet-8vcpu-ubuntu-2204
+    runs-on: ubicloud-standard-8
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-provider: buildjet
-          cache-on-failure: "true"
+            cache-on-failure: "true"
           add-job-id-key: "false"
           add-rust-environment-hash-key: "false"
 
@@ -104,7 +101,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   security_audit:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
