@@ -1,6 +1,13 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.3.5] - 2026-03-28
+
+### Miscellaneous Tasks
+
+- Add --no-tag option to release script
+- Migrate to ubicloud build machine
+
 ## [1.3.4] - 2026-03-06
 
 ### Miscellaneous Tasks
