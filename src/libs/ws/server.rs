@@ -1,20 +1,28 @@
 use eyre::{ContextCompat, Result, bail, eyre};
+use http_body_util::Empty;
+use hyper::body::{Bytes, Incoming};
+use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
@@ -23,7 +31,7 @@ use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
 use crate::libs::ws::client::WsRequest;
 use crate::libs::ws::{ConnectionListener, TcpListener, TlsListener};
-use crate::libs::ws::{VerifyProtocol, WsClientSession, WsConnection};
+use crate::libs::ws::{WsClientSession, WsConnection};
 use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
@@ -37,56 +45,6 @@ pub struct WebsocketServer {
     pub config: WsServerConfig,
 }
 
-// Helper to combine read bytes + original stream
-struct BufferedStream<S> {
-    buffer: Box<[u8]>,
-    stream: S,
-    pos: usize,
-}
-
-impl<S: AsyncRead + Unpin> AsyncRead for BufferedStream<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<tokio::io::Result<()>> {
-        if self.pos < self.buffer.len() {
-            // Serve from owned buffer
-            let remaining = self.buffer.len() - self.pos;
-            let len = std::cmp::min(remaining, buf.remaining());
-            buf.put_slice(&self.buffer[self.pos..self.pos + len]);
-            self.pos += len;
-            Poll::Ready(Ok(()))
-        } else {
-            // Delegate to underlying stream
-            Pin::new(&mut self.stream).poll_read(cx, buf)
-        }
-    }
-}
-
-impl<S: AsyncWrite + Unpin> AsyncWrite for BufferedStream<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        Pin::new(&mut self.stream).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        Pin::new(&mut self.stream).poll_shutdown(cx)
-    }
-}
 
 impl WebsocketServer {
     pub fn new(config: WsServerConfig) -> Self {
@@ -137,33 +95,132 @@ impl WebsocketServer {
         self: Arc<Self>,
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
-        mut stream: S,
+        stream: S,
     ) -> Result<()> {
-        let mut buffer = vec![0u8; 1024];
-        let n = stream.read(&mut buffer).await?; // Use AsyncReadExt::read
+        let io = TokioIo::new(stream);
 
-        tracing::debug!("Raw request bytes: {:?}", &buffer[..n]);
+        let service = service_fn(move |mut req: Request<Incoming>| {
+            let this = Arc::clone(&self);
+            let states = Arc::clone(&states);
+            async move {
+                let is_upgrade = req
+                    .headers()
+                    .get(UPGRADE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.eq_ignore_ascii_case("websocket"))
+                    .unwrap_or(false);
+                let key = req
+                    .headers()
+                    .get(SEC_WEBSOCKET_KEY)
+                    .map(|k| k.as_bytes().to_vec());
 
-        let stream = BufferedStream {
-            buffer: buffer[..n].to_vec().into_boxed_slice(),
-            stream,
-            pos: 0,
-        };
+                if !is_upgrade || key.is_none() {
+                    let mut resp = Response::new(Empty::<Bytes>::new());
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    return Ok::<_, Infallible>(resp);
+                }
+                let derived = derive_accept_key(&key.unwrap());
 
-        let (tx, mut rx) = mpsc::channel(1);
-        let hs = tokio_tungstenite::accept_hdr_async(
-            stream,
-            VerifyProtocol {
-                addr,
-                tx,
-                allow_cors_domains: &self.config.allow_cors_urls,
-            },
-        )
-        .await;
+                let protocol = req
+                    .headers()
+                    .get("Sec-WebSocket-Protocol")
+                    .or_else(|| req.headers().get("sec-websocket-protocol"))
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
 
-        tracing::debug!("handle new WS connection");
+                let origin = req
+                    .headers()
+                    .get("Origin")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
 
-        let stream = wrap_ws_error(hs)?;
+                let on_upgrade = hyper::upgrade::on(&mut req);
+
+                let toolbox = this.toolbox.clone();
+                let this_upgrade = Arc::clone(&this);
+                let protocol_upgrade = protocol.clone();
+                tokio::task::spawn_local(async move {
+                    match on_upgrade.await {
+                        Ok(upgraded) => {
+                            let ws_stream = WebSocketStream::from_raw_socket(
+                                TokioIo::new(upgraded),
+                                Role::Server,
+                                None,
+                            )
+                            .await;
+                            let _ = TOOLBOX
+                                .scope(
+                                    toolbox,
+                                    this_upgrade.post_upgrade_connection(
+                                        addr,
+                                        states,
+                                        ws_stream,
+                                        protocol_upgrade,
+                                    ),
+                                )
+                                .await;
+                        }
+                        Err(e) => error!(?addr, "WS upgrade error: {e}"),
+                    }
+                });
+
+                let mut resp = Response::new(Empty::<Bytes>::new());
+                *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                resp.headers_mut()
+                    .append(CONNECTION, "upgrade".parse().unwrap());
+                resp.headers_mut()
+                    .append(UPGRADE, "websocket".parse().unwrap());
+                resp.headers_mut()
+                    .append(SEC_WEBSOCKET_ACCEPT, derived.parse().unwrap());
+
+                if !protocol.is_empty() {
+                    let first = protocol.split(',').next().unwrap_or("").trim();
+                    if let Ok(val) = first.parse::<hyper::header::HeaderValue>() {
+                        resp.headers_mut().append("Sec-WebSocket-Protocol", val);
+                    }
+                }
+
+                if let Some(origin) = origin {
+                    let allow = match this.config.allow_cors_urls.as_ref() {
+                        Some(domains) => domains.iter().any(|d| d == &origin),
+                        None => true,
+                    };
+                    if allow {
+                        if let Ok(v) = origin.parse::<hyper::header::HeaderValue>() {
+                            resp.headers_mut()
+                                .append("Access-Control-Allow-Origin", v);
+                            resp.headers_mut().append(
+                                "Access-Control-Allow-Credentials",
+                                "true".parse().unwrap(),
+                            );
+                        }
+                    }
+                }
+
+                resp.headers_mut()
+                    .append("Date", chrono::Utc::now().to_rfc2822().parse().unwrap());
+                resp.headers_mut()
+                    .append("Server", "RustWebsocketServer/1.0".parse().unwrap());
+
+                Ok::<_, Infallible>(resp)
+            }
+        });
+
+        http1::Builder::new()
+            .serve_connection(io, service)
+            .with_upgrades()
+            .await
+            .map_err(|e| eyre!(e))
+    }
+
+    async fn post_upgrade_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        self: Arc<Self>,
+        addr: SocketAddr,
+        states: Arc<WebsocketStates>,
+        stream: WebSocketStream<S>,
+        protocol: String,
+    ) {
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
@@ -172,23 +229,17 @@ impl WebsocketServer {
             log_id: get_log_id(),
         });
         debug!(?addr, "New connection handshaken {:?}", conn);
-        let headers = rx
-            .recv()
-            .await
-            .ok_or_else(|| eyre!("Failed to receive ws headers"))?;
 
         let (tx, rx) = mpsc::channel(100);
-        let conn = Arc::clone(&conn);
         states.insert(conn.connection_id, tx, conn.clone());
 
         let auth_result = Arc::clone(&self.auth_controller)
-            .auth(&self.toolbox, headers, Arc::clone(&conn))
+            .auth(&self.toolbox, protocol, Arc::clone(&conn))
             .await;
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
             self.toolbox
                 .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
-
             error!(
                 error_code=?ErrorCode::BAD_REQUEST,
                 ip_addr=%raw_ctx.ip_addr,
@@ -196,8 +247,9 @@ impl WebsocketServer {
                 conn_id=raw_ctx.connection_id,
                 roles=?raw_ctx.roles,
                 error=%err,
-                "Error while handling connection");
-            return Err(err);
+                "Error while handling connection"
+            );
+            return;
         }
 
         info!(
@@ -209,8 +261,6 @@ impl WebsocketServer {
         );
         self.handle_session_connection(conn, states, stream, rx)
             .await;
-
-        Ok(())
     }
 
     pub async fn handle_session_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(

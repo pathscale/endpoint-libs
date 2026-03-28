@@ -1,0 +1,20 @@
+FROM rust:1.85 AS builder
+WORKDIR /app
+
+# Cache dependency compilation with stub sources
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY examples/ws-echo/Cargo.toml examples/ws-echo/Cargo.toml
+RUN mkdir -p examples/ws-echo/src && \
+    echo 'fn main() {}' > examples/ws-echo/src/main.rs && \
+    cargo build --release --manifest-path examples/ws-echo/Cargo.toml --target-dir /app/target
+
+# Build the real binary
+COPY examples/ws-echo/src ./examples/ws-echo/src
+RUN touch examples/ws-echo/src/main.rs && \
+    cargo build --release --manifest-path examples/ws-echo/Cargo.toml --target-dir /app/target
+
+FROM debian:bookworm-slim
+COPY --from=builder /app/target/release/ws-echo /app/ws-echo
+EXPOSE 8080
+CMD ["/app/ws-echo"]
