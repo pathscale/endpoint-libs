@@ -9,7 +9,10 @@ use endpoint_libs::libs::ws::{
 use eyre::Result;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
+use endpoint_libs::libs::error_code::ErrorCode;
+use endpoint_libs::libs::ws::toolbox::CustomError;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // --- Request / response types ---
 //
@@ -43,7 +46,46 @@ impl WsResponse for EchoResponse {
     type Request = EchoRequest;
 }
 
-// --- Handler ---
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct HoneyReceiveUserInfoRequest {
+    pub user_pub_id: Uuid,
+    pub username: String,
+    #[serde(default)]
+    pub app_pub_id: Option<Uuid>,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HoneyReceiveUserInfoResponse {}
+
+impl WsRequest for HoneyReceiveUserInfoRequest {
+    type Response = HoneyReceiveUserInfoResponse;
+    const METHOD_ID: u32 = 211;
+    const ROLES: &'static [u32] = &[1];
+    const SCHEMA: &'static str = r#"{
+  "name": "ReceiveUserInfo",
+  "code": 211,
+  "parameters": [
+    {"name": "userPubId", "ty": "UUID"},
+    {"name": "username", "ty": "String"},
+    {"name": "appPubId", "ty": {"Optional": "UUID"}},
+    {"name": "token", "ty": {"Optional": "String"}}
+  ],
+  "returns": [],
+  "stream_response": null,
+  "description": "Test endpoint mirroring ReceiveUserInfo (code 211)",
+  "json_schema": null,
+  "roles": []
+}"#;
+}
+
+impl WsResponse for HoneyReceiveUserInfoResponse {
+    type Request = HoneyReceiveUserInfoRequest;
+}
+
+// --- Handlers ---
 
 pub struct MethodEcho;
 
@@ -55,6 +97,33 @@ impl RequestHandler for MethodEcho {
         Ok(EchoResponse {
             message: format!("echo: {}", req.message),
         })
+    }
+}
+
+pub struct MethodReceiveUserInfo;
+
+#[async_trait(?Send)]
+impl RequestHandler for MethodReceiveUserInfo {
+    type Request = HoneyReceiveUserInfoRequest;
+
+    async fn handle(
+        &self,
+        _ctx: RequestContext,
+        req: HoneyReceiveUserInfoRequest,
+    ) -> Result<HoneyReceiveUserInfoResponse> {
+        Err(CustomError::new(
+            ErrorCode::BAD_REQUEST,
+            format!(
+                "Test passed: received ReceiveUserInfo for user '{}' (id: {}){} — \
+                 this is a test server and will not process the request",
+                req.username,
+                req.user_pub_id,
+                req.app_pub_id
+                    .map(|id| format!(", app: {id}"))
+                    .unwrap_or_default(),
+            ),
+        )
+        .into())
     }
 }
 
@@ -96,6 +165,7 @@ async fn main() -> Result<()> {
     let mut server = WebsocketServer::new(config);
     server.set_auth_controller(AllowAllAuthController);
     server.add_handler(MethodEcho);
+    server.add_handler(MethodReceiveUserInfo);
 
     tracing::info!("WebSocket echo server listening on 0.0.0.0:8080");
     server.listen().await
