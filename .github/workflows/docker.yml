@@ -1,0 +1,33 @@
+name: Docker
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-and-push:
+    runs-on: ubicloud-standard-8
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ws-echo image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ws-echo
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ws-echo:latest
+            ghcr.io/${{ github.repository_owner }}/ws-echo:${{ github.sha }}
