@@ -39,10 +39,12 @@ impl WsClient {
         headers: Option<Vec<(&'static str, &'static str)>>,
     ) -> Result<Self> {
         let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
-        req.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_str(protocol_header)?,
-        );
+        if !protocol_header.is_empty() {
+            req.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_str(protocol_header)?,
+            );
+        }
 
         if let Some(headers) = headers {
             for header in headers {
