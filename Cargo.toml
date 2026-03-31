@@ -142,6 +142,13 @@ tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 tempfile = "3.19"
 tokio = { version = "1.39", features = ["full", "test-util"] }
 tracing-throttle = { version = "0.4", features = ["async", "test-helpers"] }
+[[example]]
+name = "ws_echo_rustls"
+required-features = ["ws"]
+
+[[example]]
+name = "ws_echo_ws_client"
+required-features = ["ws"]
 
 [package.metadata.cargo-all-features]
 

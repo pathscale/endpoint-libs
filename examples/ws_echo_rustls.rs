@@ -1,0 +1,48 @@
+//! Connect to a WebSocket echo server using rustls — same TLS stack as the production handlers.
+//!
+//! Usage: cargo run --example ws_echo_rustls --features ws -- <server_url> [protocol]
+//! e.g.:  cargo run --example ws_echo_rustls --features ws -- wss://ws-echo.liftmap.pro
+
+use std::io::{self, BufRead};
+
+use futures::{SinkExt, StreamExt};
+use rustls::crypto::ring;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::connect_async;
+
+#[tokio::main]
+async fn main() -> eyre::Result<()> {
+    ring::default_provider()
+        .install_default()
+        .expect("Could not install default crypto provider");
+
+    let mut args = std::env::args().skip(1);
+    let server = args.next().expect("Usage: ws_echo_rustls <server_url> [protocol]");
+    let protocol = args.next().unwrap_or_default();
+
+    let mut req = server.as_str().into_client_request()?;
+    if !protocol.is_empty() {
+        req.headers_mut()
+            .insert("Sec-WebSocket-Protocol", protocol.parse()?);
+    }
+
+    eprintln!("Connecting to {server} via rustls...");
+    let (mut stream, _) = connect_async(req).await?;
+    eprintln!("Connected. Type a message and press Enter.");
+
+    for line in io::stdin().lock().lines() {
+        let message = line?;
+        if message.is_empty() {
+            continue;
+        }
+        eprintln!("-> {message}");
+        stream.send(Message::Text(message.into())).await?;
+
+        if let Some(msg) = stream.next().await {
+            println!("{}", msg?.to_text()?);
+        }
+    }
+
+    Ok(())
+}
