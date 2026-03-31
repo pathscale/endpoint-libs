@@ -104,6 +104,10 @@ impl<
 
         // Check roles
         let Some(allowed_roles) = self.server.allowed_roles.get(&req.method) else {
+            self.server.toolbox.send(
+                context.connection_id,
+                request_error_to_resp(&context, ErrorCode::NOT_IMPLEMENTED, Value::Null),
+            );
             return Ok(true);
         };
 
