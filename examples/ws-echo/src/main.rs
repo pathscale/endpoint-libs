@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use endpoint_libs::libs::error_code::ErrorCode;
 use endpoint_libs::libs::handler::RequestHandler;
+use endpoint_libs::libs::log::{LogLevel, LoggingConfig, setup_logging};
 use endpoint_libs::libs::toolbox::{ArcToolbox, RequestContext};
 use endpoint_libs::libs::ws::{
     AuthController, WsConnection, WsRequest, WsResponse, WsServerConfig, WebsocketServer,
 };
+use endpoint_libs::libs::ws::toolbox::CustomError;
 use eyre::Result;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
-use endpoint_libs::libs::error_code::ErrorCode;
-use endpoint_libs::libs::ws::toolbox::CustomError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -93,10 +94,21 @@ pub struct MethodEcho;
 impl RequestHandler for MethodEcho {
     type Request = EchoRequest;
 
-    async fn handle(&self, _ctx: RequestContext, req: EchoRequest) -> Result<EchoResponse> {
-        Ok(EchoResponse {
+    async fn handle(&self, ctx: RequestContext, req: EchoRequest) -> Result<EchoResponse> {
+        tracing::info!(
+            conn_id = %ctx.connection_id,
+            message = %req.message,
+            "Echo request received"
+        );
+        let response = EchoResponse {
             message: format!("echo: {}", req.message),
-        })
+        };
+        tracing::info!(
+            conn_id = %ctx.connection_id,
+            response_message = %response.message,
+            "Echo response sent"
+        );
+        Ok(response)
     }
 }
 
@@ -108,22 +120,32 @@ impl RequestHandler for MethodReceiveUserInfo {
 
     async fn handle(
         &self,
-        _ctx: RequestContext,
+        ctx: RequestContext,
         req: HoneyReceiveUserInfoRequest,
     ) -> Result<HoneyReceiveUserInfoResponse> {
-        Err(CustomError::new(
-            ErrorCode::BAD_REQUEST,
-            format!(
-                "Test passed: received ReceiveUserInfo for user '{}' (id: {}){} — \
-                 this is a test server and will not process the request",
-                req.username,
-                req.user_pub_id,
-                req.app_pub_id
-                    .map(|id| format!(", app: {id}"))
-                    .unwrap_or_default(),
-            ),
-        )
-        .into())
+        tracing::info!(
+            conn_id = %ctx.connection_id,
+            user_pub_id = %req.user_pub_id,
+            username = %req.username,
+            app_pub_id = ?req.app_pub_id,
+            has_token = req.token.is_some(),
+            "ReceiveUserInfo request received (test server — will reject)"
+        );
+        let msg = format!(
+            "Test passed: received ReceiveUserInfo for user '{}' (id: {}){} — \
+             this is a test server and will not process the request",
+            req.username,
+            req.user_pub_id,
+            req.app_pub_id
+                .map(|id| format!(", app: {id}"))
+                .unwrap_or_default(),
+        );
+        tracing::info!(
+            conn_id = %ctx.connection_id,
+            user_pub_id = %req.user_pub_id,
+            "Rejecting ReceiveUserInfo with BAD_REQUEST"
+        );
+        Err(CustomError::new(ErrorCode::BAD_REQUEST, msg).into())
     }
 }
 
@@ -138,11 +160,19 @@ impl AuthController for AllowAllAuthController {
     fn auth(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
-        _header: String,
+        header: String,
         conn: Arc<WsConnection>,
     ) -> LocalBoxFuture<'static, Result<()>> {
         async move {
+            let conn_id = conn.connection_id;
+            tracing::info!(
+                conn_id = %conn_id,
+                ip = %conn.address,
+                header_len = header.len(),
+                "New connection — granting role 1 (allow-all auth)"
+            );
             conn.set_roles(Arc::new(vec![1]));
+            tracing::info!(conn_id = %conn_id, "Roles set successfully");
             Ok(())
         }
         .boxed_local()
@@ -153,7 +183,12 @@ impl AuthController for AllowAllAuthController {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let _log = setup_logging(LoggingConfig {
+        level: LogLevel::Info,
+        file_config: None,
+    })?;
+
+    tracing::info!("Logging initialised at INFO level");
 
     let config = WsServerConfig {
         name: "ws-echo".to_string(),
@@ -162,11 +197,19 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
+    tracing::info!(
+        name = %config.name,
+        address = %config.address,
+        insecure = config.insecure,
+        "Configuring WebSocket server"
+    );
+
     let mut server = WebsocketServer::new(config);
     server.set_auth_controller(AllowAllAuthController);
     server.add_handler(MethodEcho);
     server.add_handler(MethodReceiveUserInfo);
 
+    tracing::info!("Registered handlers: Echo (method 1), ReceiveUserInfo (method 211)");
     tracing::info!("WebSocket echo server listening on 0.0.0.0:8080");
     server.listen().await
 }
