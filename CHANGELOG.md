@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.3.6] - 2026-03-31
+
+### Bug Fixes
+
+- Handle lack of protocol header gracefully in ws client
+
+### Features
+
+- Add a bunch of logging into the ws-echo example
+
+### Miscellaneous Tasks
+
+- Publish ws-echo example image
+- Add some ws CLI examples
+
+### Example
+
+- Expand ws-echo example to support HoneyReceiveUserInfo simulated endpoint
+
 ## [1.3.5] - 2026-03-28
 
 ### Miscellaneous Tasks
