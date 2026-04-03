@@ -37,7 +37,7 @@ impl WsClient {
         connect_addr: &str,
         protocol_header: &str,
         headers: Option<Vec<(&'static str, &'static str)>>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, tokio_tungstenite::tungstenite::http::Response<std::option::Option<Vec<u8>>>)> {
         let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
         if !protocol_header.is_empty() {
             req.headers_mut().insert(
@@ -53,13 +53,13 @@ impl WsClient {
             }
         }
 
-        let (ws_stream, _) = connect_async(req)
+        let (ws_stream, response) = connect_async(req)
             .await
             .context("Failed to connect to endpoint")?;
-        Ok(Self {
+        Ok((Self {
             stream: ws_stream,
             seq: 0,
-        })
+        }, response))
     }
     pub async fn send_req(&mut self, method: u32, params: impl Serialize) -> Result<()> {
         self.seq += 1;
@@ -70,6 +70,15 @@ impl WsClient {
         })?;
         debug!("send req: {}", req);
         self.stream.send(Message::Text(req.into())).await?;
+        Ok(())
+    }
+    /// Send a fully pre-serialized request message.
+    /// The caller is responsible for wrapping params in the request envelope
+    /// (method, seq, params) and serializing to bytes ahead of time.
+    /// This avoids any allocation or serialization in the hot path.
+    pub async fn send_raw(&mut self, request_bytes: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(request_bytes).context("Invalid UTF-8 in request bytes")?;
+        self.stream.send(Message::Text(text.into())).await?;
         Ok(())
     }
     pub async fn recv_raw(&mut self) -> Result<WsResponseValue> {
