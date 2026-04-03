@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.4.0] - 2026-04-03
+
+### Features
+
+- WsClient: Return initial response in connect request, and add send_raw fn for pre-serialized message
+
 ## [1.3.7] - 2026-03-31
 
 ### Bug Fixes
