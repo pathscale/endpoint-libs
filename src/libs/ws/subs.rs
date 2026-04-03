@@ -114,7 +114,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             return;
         };
 
-        let data = serde_json::to_value(msg).unwrap();
+        let data = serde_json::value::to_raw_value(msg).expect("Failed to serialize stream data");
 
         let msg = WsResponseGeneric::Stream(WsStreamResponseGeneric {
             original_seq: sub.ctx.seq,
@@ -174,7 +174,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             let Some(data) = filter(sub) else {
                 continue;
             };
-            let data = serde_json::to_value(&data).unwrap();
+            let data = serde_json::value::to_raw_value(&data).expect("Failed to serialize stream data");
             let msg = WsResponseGeneric::Stream(WsStreamResponseGeneric {
                 original_seq: sub.ctx.seq,
                 method: sub.ctx.method,

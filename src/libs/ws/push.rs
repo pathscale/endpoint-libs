@@ -73,7 +73,7 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
         filter: impl Fn(&RequestContext) -> bool,
     ) {
         if let Some(mut topic_2) = self.topics.get_mut(&topic) {
-            let data = serde_json::to_value(msg).unwrap();
+            let data = serde_json::value::to_raw_value(msg).expect("Failed to serialize stream data");
             let mut dead_connections = vec![];
             let stream_code = topic.into();
             for sub in topic_2.subscribers.values_mut() {

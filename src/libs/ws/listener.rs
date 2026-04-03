@@ -66,10 +66,11 @@ impl<T: ConnectionListener> TlsListener<T> {
         let key = load_private_key(&priv_cert)?;
 
         let tls_cfg = {
-            let cfg =
+            let mut cfg =
                 rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                     .with_no_client_auth()
                     .with_single_cert(certs, key)?;
+            cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             Arc::new(cfg)
         };
         let acceptor = TlsAcceptor::from(tls_cfg);
