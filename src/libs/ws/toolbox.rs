@@ -137,8 +137,14 @@ impl Toolbox {
         oneshot: bool,
     ) {
         let resp = serde_json::to_string(&resp).unwrap();
-        if let Err(err) = sender.try_send(resp.into()) {
-            warn!("Failed to send websocket message: {:?}", err)
+        match sender.try_send(resp.into()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                error!("WebSocket send buffer full — client is too slow or disconnected");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!("WebSocket send channel closed (client already disconnected)");
+            }
         }
         if oneshot {
             let _ = sender.try_send(Message::Close(None));

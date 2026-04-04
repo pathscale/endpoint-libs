@@ -135,6 +135,14 @@ impl<
     async fn run_loop(&mut self) -> Result<()> {
         let conn_id = self.conn_info.connection_id;
         loop {
+            // Drain all pending outbound messages before blocking on new events.
+            while let Ok(msg) = self.rx.try_recv() {
+                self.send_message(msg).await?;
+                if self.server.config.header_only {
+                    return Ok(());
+                }
+            }
+
             tokio::select! {
                 msg = self.rx.recv() => {
                     // info!(?conn_id, ?msg, "Received message to send");
