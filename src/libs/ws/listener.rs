@@ -1,21 +1,24 @@
-use std::fs::File;
 use std::net::SocketAddr;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
 
-use eyre::{Context, Result, ensure};
+use eyre::Result;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::PrivateKeyDer;
-use rustls::pki_types::pem::PemObject;
-use rustls_pemfile::certs;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
-use tokio_rustls::TlsAcceptor;
-use tokio_rustls::server::TlsStream;
+
+#[cfg(feature = "tls")]
+use {
+    eyre::{Context, ensure},
+    rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    rustls_pemfile::certs,
+    std::{
+        fs::File,
+        path::{Path, PathBuf},
+        sync::Arc,
+    },
+    tokio_rustls::{server::TlsStream, TlsAcceptor},
+};
 
 pub trait ConnectionListener: Send + Sync + Unpin {
     type Channel1: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
@@ -50,10 +53,12 @@ impl ConnectionListener for TcpListener {
     }
 }
 
+#[cfg(feature = "tls")]
 pub struct TlsListener<T> {
     tcp: T,
     acceptor: TlsAcceptor,
 }
+#[cfg(feature = "tls")]
 impl<T: ConnectionListener> TlsListener<T> {
     pub async fn bind(under: T, pub_certs: Vec<PathBuf>, priv_cert: PathBuf) -> Result<Self> {
         let certs = load_certs(&pub_certs)?;
@@ -79,6 +84,7 @@ impl<T: ConnectionListener> TlsListener<T> {
         })
     }
 }
+#[cfg(feature = "tls")]
 impl<T: ConnectionListener + 'static> ConnectionListener for TlsListener<T> {
     type Channel1 = T::Channel1;
     type Channel2 = TlsStream<T::Channel2>;
@@ -96,6 +102,7 @@ impl<T: ConnectionListener + 'static> ConnectionListener for TlsListener<T> {
 }
 
 // Load public certificates from files.
+#[cfg(feature = "tls")]
 pub fn load_certs<'a, T: AsRef<Path>>(
     path: impl IntoIterator<Item = T>,
 ) -> Result<Vec<CertificateDer<'a>>> {
@@ -115,6 +122,7 @@ pub fn load_certs<'a, T: AsRef<Path>>(
 }
 
 /// Load the first private key contained in the given file.
+#[cfg(feature = "tls")]
 pub fn load_private_key(path: &PathBuf) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
     let private_key =
         PrivateKeyDer::from_pem_file(path).wrap_err("Error loading private key from file.")?;

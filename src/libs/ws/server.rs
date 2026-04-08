@@ -30,7 +30,9 @@ use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
 use crate::libs::ws::client::WsRequest;
-use crate::libs::ws::{ConnectionListener, TcpListener, TlsListener};
+use crate::libs::ws::{ConnectionListener, TcpListener};
+#[cfg(feature = "tls")]
+use crate::libs::ws::TlsListener;
 use crate::libs::ws::{WsClientSession, WsConnection};
 use crate::model::EndpointSchema;
 
@@ -293,14 +295,19 @@ impl WebsocketServer {
         if self.config.insecure {
             self.listen_impl(Arc::new(listener)).await
         } else if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
-            // Proceed with binding the listener for secure mode
-            let listener = TlsListener::bind(
-                listener,
-                self.config.pub_certs.clone().unwrap(),
-                self.config.priv_key.clone().unwrap(),
-            )
-            .await?;
-            self.listen_impl(Arc::new(listener)).await
+            #[cfg(feature = "tls")]
+            {
+                // Proceed with binding the listener for secure mode
+                let listener = TlsListener::bind(
+                    listener,
+                    self.config.pub_certs.clone().unwrap(),
+                    self.config.priv_key.clone().unwrap(),
+                )
+                .await?;
+                return self.listen_impl(Arc::new(listener)).await;
+            }
+            #[cfg(not(feature = "tls"))]
+            bail!("TLS certs configured but binary was compiled without the 'tls' feature; recompile with --features tls")
         } else {
             bail!("pub_certs and priv_key should be set")
         }

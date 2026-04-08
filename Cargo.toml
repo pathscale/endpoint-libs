@@ -13,6 +13,7 @@ default = ["types"]
 full = [
     "types",
     "ws",
+    "tls",
     "database",
     "signal",
     "scheduler",
@@ -27,9 +28,6 @@ ws = [
     "signal",
     # Feature dependencies
     "dep:tokio-tungstenite",
-    "dep:tokio-rustls",
-    "dep:rustls",
-    "dep:rustls-pemfile",
     "dep:tokio",
     "dep:parking_lot",
     "dep:dashmap",
@@ -38,8 +36,16 @@ ws = [
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
+    "dep:httpdate",
+    "dep:webpki-roots",
     # "dep:",
 ]
+tls = [
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls",
+]
+ws-tls = ["ws", "tls"]
 database = [
     # Feature dependencies
     "dep:tokio",
