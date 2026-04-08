@@ -138,6 +138,16 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 
+# OpenTelemetry dependencies (default feature)
+opentelemetry = { version = "0.31", features = ["logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs"] }
+opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "grpc-tonic", "http-proto"] }
+opentelemetry-semantic-conventions = "0.31"
+tracing-opentelemetry = "0.32"
+opentelemetry-appender-tracing = "0.31"
+# Direct deps for header configuration
+tonic = "0.14"
+
 [dev-dependencies]
 tempfile = "3.19"
 tokio = { version = "1.39", features = ["full", "test-util"] }

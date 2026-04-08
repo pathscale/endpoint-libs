@@ -28,7 +28,7 @@ async fn main() -> eyre::Result<()> {
         .expect("Usage: ws_echo_ws_client <server_url>");
 
     eprintln!("Connecting to {server} via WsClient...");
-    let mut client = WsClient::new(&server, "", None).await?;
+    let (mut client, _) = WsClient::new(&server, "", None).await?;
     eprintln!("Connected. Type a message and press Enter.");
 
     for line in io::stdin().lock().lines() {

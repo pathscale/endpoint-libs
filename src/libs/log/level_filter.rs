@@ -58,6 +58,15 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
             (Level::INFO, "mio"),
             (Level::INFO, "want"),
             (Level::INFO, "sqlparser"),
+            // OpenTelemetry specific caps to prevent excessive verbosity and recursion
+            (Level::WARN, "opentelemetry"),
+            (Level::WARN, "opentelemetry_otlp"),
+            (Level::WARN, "opentelemetry_sdk"),
+            (Level::WARN, "tracing_opentelemetry"),
+            (Level::WARN, "h2"),
+            (Level::WARN, "tower"),
+            (Level::WARN, "hyper_util"),
+            (Level::WARN, "tonic"),
         ];
 
         for (directive_level, crate_name) in DIRECTIVES {
@@ -206,6 +215,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Debug,
             file_config: None,
+            otel_config: crate::libs::log::OtelConfig::default(),
             #[cfg(feature = "error_aggregation")]
             error_aggregation: crate::libs::log::ErrorAggregationConfig {
                 limit: 100,
@@ -251,6 +261,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
+            otel_config: crate::libs::log::OtelConfig::default(),
             #[cfg(feature = "error_aggregation")]
             error_aggregation: crate::libs::log::ErrorAggregationConfig {
                 limit: 100,
@@ -299,12 +310,13 @@ mod tests {
         println!("Trace level filter: {}", filter_trace);
         println!("Detail level filter: {}", filter_detail);
 
-        // At Debug level: should only have INFO directives (more restrictive than DEBUG)
-        // Should have h2=info (more restrictive), but NOT tungstenite::protocol=debug
+        // At Debug level: should only have WARN/INFO directives (more restrictive than DEBUG)
+        // OTel crates are capped at WARN to prevent recursive verbosity
+        // Should have h2=warn (OTel cap), but NOT tungstenite::protocol=debug
         let debug_str = filter_debug.to_string();
         assert!(
-            debug_str.contains("h2=info"),
-            "Debug filter should contain h2=info (INFO is more restrictive): {}",
+            debug_str.contains("h2=warn"),
+            "Debug filter should contain h2=warn (OTel cap): {}",
             debug_str
         );
         assert!(
@@ -344,7 +356,7 @@ mod tests {
             error_str
         );
 
-        // At Trace level: should have ALL directives (both DEBUG and INFO are more restrictive)
+        // At Trace level: should have ALL directives (WARN/INFO/DEBUG are more restrictive than TRACE)
         let trace_str = filter_trace.to_string();
         assert!(
             trace_str.contains("tungstenite::protocol=debug"),
@@ -352,8 +364,13 @@ mod tests {
             trace_str
         );
         assert!(
-            trace_str.contains("h2=info"),
-            "Trace filter should contain h2=info: {}",
+            trace_str.contains("h2=warn"),
+            "Trace filter should contain h2=warn (OTel cap): {}",
+            trace_str
+        );
+        assert!(
+            trace_str.contains("opentelemetry=warn"),
+            "Trace filter should contain opentelemetry=warn (OTel cap): {}",
             trace_str
         );
         assert!(
