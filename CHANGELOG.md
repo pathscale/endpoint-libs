@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.5.0] - 2026-04-08
+
+### Features
+
+- Implement otel log forwarding feature
+
 ## [1.4.1] - 2026-04-03
 
 ### Miscellaneous Tasks
