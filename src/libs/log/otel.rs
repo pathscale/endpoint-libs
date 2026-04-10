@@ -182,6 +182,14 @@ fn build_tracer_provider(
         .clone()
         .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok());
 
+    tracing::debug!(
+        target: "otel::setup",
+        "Building traces exporter: endpoint={:?}, headers_count={}, protocol={:?}",
+        endpoint,
+        config.headers.len(),
+        config.protocol
+    );
+
     let mut builder = SdkTracerProvider::builder().with_resource(resource.clone());
 
     match config.protocol {
@@ -233,6 +241,14 @@ fn build_logger_provider(
         .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").ok())
         .or_else(|| config.endpoint.clone())
         .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok());
+
+    tracing::debug!(
+        target: "otel::setup",
+        "Building logs exporter: endpoint={:?}, headers_count={}, protocol={:?}",
+        endpoint,
+        config.headers.len(),
+        config.protocol
+    );
 
     let mut builder = SdkLoggerProvider::builder().with_resource(resource.clone());
 
