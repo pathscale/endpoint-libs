@@ -73,6 +73,12 @@ pub struct OtelGuards {
     pub logger_provider: SdkLoggerProvider,
 }
 
+impl Drop for OtelGuards {
+    fn drop(&mut self) {
+        tracing::info!(target: "otel::setup", "OTel layer shutting down - flushing pending traces and logs");
+    }
+}
+
 /// Result of building the OTel layer
 pub struct OtelLayerResult {
     /// The guards that must be kept alive to ensure traces/logs are flushed on drop
@@ -98,6 +104,13 @@ pub fn build_otel_layer(config: &OtelConfig) -> OtelLayerResult {
                 service_name = result.service_name,
                 endpoint = ?config.endpoint,
                 "OTel layer initialized successfully (Traces + Logs)"
+            );
+            tracing::debug!(
+                target: "otel::setup",
+                protocol = ?config.protocol,
+                endpoint = config.endpoint.as_deref().unwrap_or("SDK default"),
+                header_keys = ?config.headers.keys().collect::<Vec<_>>(),
+                "OTel exporter config"
             );
             OtelLayerResult {
                 guards: Some(OtelGuards {
