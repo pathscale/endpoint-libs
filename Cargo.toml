@@ -30,7 +30,6 @@ ws = [
     "dep:tokio-rustls",
     "dep:rustls",
     "dep:rustls-pemfile",
-    "dep:tokio",
     "dep:parking_lot",
     "dep:dashmap",
     "dep:reqwest",
@@ -42,7 +41,6 @@ ws = [
 ]
 database = [
     # Feature dependencies
-    "dep:tokio",
     "dep:tokio-postgres",
     "dep:dashmap",
     "dep:secrecy",
@@ -52,20 +50,17 @@ database = [
 ]
 signal = [
     # Feature dependencies
-    "dep:tokio",
     "dep:tokio-util",
     "dep:lazy_static",
     # "dep:",
 ]
 scheduler = [
     # Feature dependencies
-    "dep:tokio",
     "dep:tokio-cron-scheduler",
     # "dep:",
 ]
 log_reader = [
     # Feature dependencies
-    "dep:tokio",
     "dep:tempfile",
     "dep:regex",
     "dep:rev_lines",
@@ -74,7 +69,6 @@ log_reader = [
 ]
 error_aggregation = [
     # Feature dependencies
-    "dep:tokio",
     "dep:regex",
     "dep:lazy_static",
     # "dep:",
@@ -113,7 +107,7 @@ tokio-tungstenite = { version = "0.28", features = [
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.1", optional = true }
 rustls = { version = "0.23", optional = true }
-tokio = { version = "1.39", features = ["full"], optional = true }
+tokio = { version = "1.39", features = ["full"] }
 tokio-util = { version = "0.7", optional = true }
 tokio-cron-scheduler = { version = "0.11", optional = true }
 tokio-postgres = { version = "0.7", optional = true }

@@ -173,6 +173,8 @@ fn build_tracer_provider(
 
     match config.protocol {
         OtelProtocol::Grpc => {
+            tokio::runtime::Handle::try_current()
+                .map_err(|_| "gRPC OTel exporter requires a running Tokio runtime; call setup_logging inside a tokio context or use OtelProtocol::HttpProtobuf")?;
             let mut exporter_builder = SpanExporter::builder().with_tonic();
             if let Some(ref ep) = endpoint {
                 exporter_builder = exporter_builder.with_endpoint(ep);
@@ -223,6 +225,8 @@ fn build_logger_provider(
 
     match config.protocol {
         OtelProtocol::Grpc => {
+            tokio::runtime::Handle::try_current()
+                .map_err(|_| "gRPC OTel exporter requires a running Tokio runtime; call setup_logging inside a tokio context or use OtelProtocol::HttpProtobuf")?;
             let mut exporter_builder = LogExporter::builder().with_tonic();
             if let Some(ref ep) = endpoint {
                 exporter_builder = exporter_builder.with_endpoint(ep);
