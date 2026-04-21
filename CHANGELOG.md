@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.6.0] - 2026-04-21
+
+### Miscellaneous Tasks
+
+- Remove OtelProtocol concept + grpc & tonic since we are only using http
+
 ## [1.5.1] - 2026-04-13
 
 ### Bug Fixes
