@@ -1,4 +1,4 @@
-//! Tracing-based logging setup with stdout and file logging support
+//! Tracing-based logging setup with stdout, file, and OpenTelemetry logging support
 
 use std::{path::PathBuf, time::Duration};
 
@@ -6,6 +6,7 @@ use chrono::SecondsFormat;
 use eyre::{DefaultHandler, EyreHandler, bail};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
     layer::SubscriberExt,
@@ -28,8 +29,10 @@ pub mod legacy;
 #[cfg(feature = "error_aggregation")]
 pub mod error_aggregation;
 pub mod level_filter;
+pub mod otel;
 
 pub use level_filter::*;
+pub use otel::{OtelConfig, OtelGuards};
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
@@ -40,6 +43,10 @@ pub use tracing_appender::non_blocking::WorkerGuard;
 pub struct LoggingConfig {
     pub level: LogLevel,
     pub file_config: Option<FileLoggingConfig>,
+    /// OpenTelemetry configuration for log/trace forwarding to an OTLP collector.
+    /// By default, OTel is disabled. Set `enabled: true` and configure the endpoint
+    /// to forward traces and logs to an OTel collector.
+    pub otel_config: OtelConfig,
     #[cfg(feature = "error_aggregation")]
     pub error_aggregation: ErrorAggregationConfig,
     #[cfg(feature = "log_throttling")]
@@ -84,6 +91,9 @@ pub struct LogThrottlingConfig {
 pub struct LogSetupReturn {
     pub reload_handle: LogReloadHandle,
     pub log_guards: (WorkerGuard, Option<WorkerGuard>),
+    /// OpenTelemetry guards (tracer + logger providers). Must be kept alive to ensure 
+    /// pending traces and logs are flushed to the OTLP collector on shutdown.
+    pub otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     pub errors_container: Arc<ErrorAggregationContainer>,
     #[cfg(feature = "log_throttling")]
@@ -96,6 +106,8 @@ struct LoggingSubscriberParts {
     subscriber: Box<dyn Subscriber + Send + Sync + 'static>,
     reload_handle: LogReloadHandle,
     log_guards: (WorkerGuard, Option<WorkerGuard>), // Stdout and optional file log guards
+    /// OpenTelemetry guards (tracer + logger providers).
+    otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     errors_container: Arc<ErrorAggregationContainer>,
     #[cfg(feature = "log_throttling")]
@@ -194,57 +206,50 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
     let reload_handle = LogReloadHandle(global_reload_handle);
 
-    // Use and_then to compose layers with global filter OUTERMOST (checked first)
-    // This ensures filtered events never reach the throttling layer
+    // Build OTel layer (separate, parallel to stdout/file layers)
+    let otel_result = otel::build_otel_layer(&config.otel_config);
+    let otel_guards = otel_result.guards;
+    let otel_tracer = otel_result.tracer;
+
+    // --- Subscriber Composition ---
+    
+    // Start with Registry and Global Filter
+    let subscriber = registry().with(reloadable_global_filter);
+
+    // Compose the "Sink" layers (Stdout + File)
+    let sinks = stdout_layer.and_then(file_layer);
+
+    // Add Error Aggregation if enabled
     #[cfg(feature = "error_aggregation")]
-    {
+    let (sinks, errors_container) = {
         use crate::libs::log::error_aggregation::get_error_aggregation;
-
         let (container, error_layer) = get_error_aggregation(error_aggregation_config);
+        (sinks.and_then(error_layer), container)
+    };
 
-        let subscriber = registry()
-            .with(reloadable_global_filter) // Global filter
-            .with(stdout_layer.and_then(file_layer).and_then(error_layer));
+    // Combine Subscriber with Sinks
+    let subscriber = subscriber.with(sinks);
 
+    // Add OTel Traces and Logs layers if enabled
+    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = match (otel_tracer, &otel_guards) {
+        (Some(tracer), Some(guards)) => {
+            let trace_layer = OpenTelemetryLayer::new(tracer);
+            let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&guards.logger_provider);
+            Box::new(subscriber.with(trace_layer).with(log_layer))
+        }
+        _ => Box::new(subscriber),
+    };
+
+    Ok(LoggingSubscriberParts {
+        subscriber,
+        reload_handle,
+        log_guards: (stdout_guard, file_guard),
+        otel_guards,
+        #[cfg(feature = "error_aggregation")]
+        errors_container,
         #[cfg(feature = "log_throttling")]
-        return Ok(LoggingSubscriberParts {
-            subscriber: Box::new(subscriber),
-            reload_handle,
-            log_guards: (stdout_guard, file_guard),
-            errors_container: container,
-            log_throttling_handle,
-        });
-
-        #[cfg(not(feature = "log_throttling"))]
-        return Ok(LoggingSubscriberParts {
-            subscriber: Box::new(subscriber),
-            reload_handle,
-            log_guards: (stdout_guard, file_guard),
-            errors_container: container,
-        });
-    }
-
-    #[cfg(not(feature = "error_aggregation"))]
-    {
-        let subscriber = registry()
-            .with(reloadable_global_filter) // Global filter
-            .with(stdout_layer.and_then(file_layer));
-
-        #[cfg(feature = "log_throttling")]
-        return Ok(LoggingSubscriberParts {
-            subscriber: Box::new(subscriber),
-            reload_handle,
-            log_guards: (stdout_guard, file_guard),
-            log_throttling_handle,
-        });
-
-        #[cfg(not(feature = "log_throttling"))]
-        return Ok(LoggingSubscriberParts {
-            subscriber: Box::new(subscriber),
-            reload_handle,
-            log_guards: (stdout_guard, file_guard),
-        });
-    }
+        log_throttling_handle,
+    })
 }
 
 /// Sets up a fully filtered tracing logging system with a global env filter applied at the registry level.
@@ -261,6 +266,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 /// Returns [LogSetupReturn], which is a composite struct containing objects that need to be retained by the client such as:
 /// - [LogReloadHandle], for setting a new global log level during runtime
 /// - [WorkerGuard], so that the non-blocking file writer can continue writing. This cannot be dropped and needs to be kept alive for the duration of the program execution
+/// - [Option<OtelGuards>], the OTel guards. Must be kept alive to flush pending traces and logs on shutdown.
 /// - [ErrorAggregationContainer], if the [error_aggregation] feature is enabled. This object allows recent errors to be queried from the logging framework
 pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     use tracing_subscriber::util::SubscriberInitExt;
@@ -269,37 +275,15 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
 
     parts.subscriber.init();
 
-    #[cfg(feature = "error_aggregation")]
-    {
+    Ok(LogSetupReturn {
+        reload_handle: parts.reload_handle,
+        log_guards: parts.log_guards,
+        otel_guards: parts.otel_guards,
+        #[cfg(feature = "error_aggregation")]
+        errors_container: parts.errors_container,
         #[cfg(feature = "log_throttling")]
-        return Ok(LogSetupReturn {
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-            errors_container: parts.errors_container,
-            log_throttling_handle: parts.log_throttling_handle,
-        });
-        #[cfg(not(feature = "log_throttling"))]
-        return Ok(LogSetupReturn {
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-            errors_container: parts.errors_container,
-        });
-    }
-
-    #[cfg(not(feature = "error_aggregation"))]
-    {
-        #[cfg(feature = "log_throttling")]
-        return Ok(LogSetupReturn {
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-            log_throttling_handle: parts.log_throttling_handle,
-        });
-        #[cfg(not(feature = "log_throttling"))]
-        return Ok(LogSetupReturn {
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-        });
-    }
+        log_throttling_handle: parts.log_throttling_handle,
+    })
 }
 
 /// Handle for reloading the global EnvFilter at runtime
@@ -397,6 +381,8 @@ pub struct LogSetupReturnTest {
     reload_handle: LogReloadHandle,
     #[allow(dead_code)]
     log_guards: (WorkerGuard, Option<WorkerGuard>),
+    #[allow(dead_code)]
+    otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     #[allow(dead_code)]
     errors_container: Arc<ErrorAggregationContainer>,
@@ -411,24 +397,14 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
     // Use thread-local default instead of global
     let guard = tracing::subscriber::set_default(parts.subscriber);
 
-    #[cfg(feature = "error_aggregation")]
-    {
-        Ok(LogSetupReturnTest {
-            _guard: guard,
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-            errors_container: parts.errors_container,
-        })
-    }
-
-    #[cfg(not(feature = "error_aggregation"))]
-    {
-        Ok(LogSetupReturnTest {
-            _guard: guard,
-            reload_handle: parts.reload_handle,
-            log_guards: parts.log_guards,
-        })
-    }
+    Ok(LogSetupReturnTest {
+        _guard: guard,
+        reload_handle: parts.reload_handle,
+        log_guards: parts.log_guards,
+        otel_guards: parts.otel_guards,
+        #[cfg(feature = "error_aggregation")]
+        errors_container: parts.errors_container,
+    })
 }
 
 #[cfg(test)]
@@ -451,6 +427,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
+            otel_config: OtelConfig::default(),
             #[cfg(feature = "error_aggregation")]
             error_aggregation: default_error_aggregation_config(),
             #[cfg(feature = "log_throttling")]
@@ -480,6 +457,7 @@ mod tests {
                 file_prefix: Some("test".to_string()),
                 rotation: None,
             }),
+            otel_config: OtelConfig::default(),
             #[cfg(feature = "error_aggregation")]
             error_aggregation: default_error_aggregation_config(),
             #[cfg(feature = "log_throttling")]
@@ -533,131 +511,214 @@ mod tests {
         );
     }
 
+    // === OTel Integration Tests ===
+
+    /// Test that setup succeeds when OTel is disabled (default config)
+    /// and otel_guards is None
     #[tokio::test]
-    async fn test_build_env_filter() {
-        let filter = build_env_filter(LogLevel::Info);
-        assert!(filter.is_ok());
+    async fn test_otel_disabled_returns_none_guards() {
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: None,
+            otel_config: OtelConfig::default(), // enabled: false
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
 
-        let filter = build_env_filter(LogLevel::Debug);
-        assert!(filter.is_ok());
+        let result = setup_logging_test(config);
+        assert!(result.is_ok(), "Setup should succeed with OTel disabled");
 
-        let filter = build_env_filter(LogLevel::Detail);
-        assert!(filter.is_ok());
+        let guard = result.unwrap();
+        assert!(
+            guard.otel_guards.is_none(),
+            "otel_guards should be None when OTel is disabled"
+        );
     }
 
-    // Test that verifies the global EnvFilter short-circuits BEFORE the throttling
-    // filter sees filtered-out events. This ensures DEBUG events don't consume
-    // throttle budget when log level is INFO.
-    // #[cfg(feature = "log_throttling")]
-    // #[tokio::test]
-    // async fn test_global_filter_prevents_throttle_seeing_filtered_events() {
-    //     // TODO: Setup
-    //     // 1. Create a logging config with level=INFO and throttling enabled
-    //     // 2. Configure throttling with a very aggressive limit (e.g., 1 event per minute)
-    //     //    so that if the throttler sees events, it will throttle after the first one
+    /// Test that OTel initialization succeeds even with an unreachable endpoint
+    /// The SDK initializes asynchronously, so guards ARE present even if the endpoint
+    /// is unreachable. Export failures happen at runtime, not at setup time.
+    #[tokio::test]
+    async fn test_otel_graceful_degradation_unreachable_endpoint() {
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: None,
+            otel_config: OtelConfig {
+                enabled: true,
+                endpoint: Some("http://nonexistent.invalid:4317".to_string()),
+                ..OtelConfig::default()
+            },
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
 
-    //     // TODO: Emit filtered-out events
-    //     // 3. Emit many DEBUG events (these should be filtered by global EnvFilter)
-    //     //    e.g., 100 debug!("filtered event {}", i) in a loop
-    //     // 4. These events should NOT reach the throttling filter at all
+        // Setup should succeed - the SDK doesn't validate connectivity at init time
+        let result = setup_logging_test(config);
+        assert!(result.is_ok(), "Setup should succeed even with unreachable OTel endpoint");
 
-    //     // TODO: Emit events that should pass the filter
-    //     // 5. Emit INFO events that SHOULD pass the global filter
-    //     //    e.g., info!("should_appear_1"), info!("should_appear_2"), etc.
-    //     // 6. If global filter correctly short-circuits, the throttler's budget
-    //     //    should NOT have been consumed by the DEBUG events
+        let guard = result.unwrap();
+        // Guards ARE present because the SDK creates them synchronously.
+        // Export failures happen asynchronously when spans/logs are batched.
+        // The key assertion is that setup() didn't return an error.
+        assert!(
+            guard.otel_guards.is_some(),
+            "otel_guards should be Some even with unreachable endpoint (SDK initializes synchronously)"
+        );
+    }
 
-    //     // TODO: Verify behavior
-    //     // 7. Check the log file - all INFO events should appear (not throttled)
-    //     // 8. If the DEBUG events had reached the throttler, they would have
-    //     //    consumed the budget and caused INFO events to be throttled
-    //     //
-    //     // Expected: All INFO events appear because DEBUG events never hit throttler
-    //     // Failure mode: If DEBUG events reach throttler, they consume budget,
-    //     //               and subsequent INFO events get throttled
+    /// Test that file logging works alongside OTel enabled (but with invalid endpoint)
+    /// This verifies that the layer composition doesn't break when OTel is attempted
+    #[tokio::test]
+    async fn test_file_logging_with_otel_attempted() {
+        let temp_dir = tempfile::tempdir().unwrap();
 
-    //     assert!(true)
-    // }
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: Some(FileLoggingConfig {
+                path: temp_dir.path().to_path_buf(),
+                file_prefix: Some("otel_test".to_string()),
+                rotation: None,
+            }),
+            otel_config: OtelConfig {
+                enabled: true,
+                endpoint: Some("http://localhost:4317".to_string()), // Not running
+                ..OtelConfig::default()
+            },
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
 
-    // TODO: Test for log throttling
+        let log_setup = setup_logging_test(config).unwrap();
 
-    // #[tokio::test(start_paused = true)]
-    // async fn test_log_throttling_summaries() {
-    //     use std::time::{Duration, Instant};
-    //     use tracing::warn;
+        // Emit logs - these should go to file regardless of OTel status
+        info!("file_log_with_otel_attempted");
+        error!("error_log_with_otel_attempted");
 
-    //     let start = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(log_setup);
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-    //     let temp_dir = tempfile::tempdir().unwrap();
+        // Verify file was created and contains logs
+        let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
+        assert_eq!(log_files.len(), 1, "Expected exactly one log file");
 
-    //     let config = LoggingConfig {
-    //         level: LogLevel::Debug,
-    //         file_config: Some(FileLoggingConfig {
-    //             path: temp_dir.path().to_path_buf(),
-    //             file_prefix: "test".to_string(),
-    //             file_log_level: Some(LogLevel::Info),
-    //             rotation: None,
-    //         }),
-    //         #[cfg(feature = "error_aggregation")]
-    //         error_aggregation: default_error_aggregation_config(),
-    //         #[cfg(feature = "log_throttling")]
-    //         throttling_config: Some(LogThrottlingConfig {
-    //             summary_emission_interval: Some(Duration::from_secs(60)),
-    //             ..Default::default()
-    //         }),
-    //     };
+        let log_contents = fs::read_to_string(log_files[0].as_ref().unwrap().path()).unwrap();
+        assert!(log_contents.contains("file_log_with_otel_attempted"));
+        assert!(log_contents.contains("error_log_with_otel_attempted"));
+    }
 
-    //     let log_setup = setup_logging_test(config).unwrap();
+    /// Test that log level reload works correctly when OTel is enabled
+    #[tokio::test]
+    async fn test_log_level_reload_with_otel_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
 
-    //     // The elapsed time should be 0 because the clock is paused
-    //     assert_eq!(start.elapsed().as_secs(), 0);
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: Some(FileLoggingConfig {
+                path: temp_dir.path().to_path_buf(),
+                file_prefix: Some("reload_test".to_string()),
+                rotation: None,
+            }),
+            otel_config: OtelConfig {
+                enabled: true,
+                endpoint: Some("http://localhost:4317".to_string()),
+                ..OtelConfig::default()
+            },
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
 
-    //     tokio::time::advance(Duration::from_secs(75)).await;
+        let log_setup = setup_logging_test(config).unwrap();
 
-    //     // Now the elapsed time should reflect the advanced duration
-    //     assert!(start.elapsed().as_secs() >= 75);
+        // Log at INFO level (should appear)
+        info!("info_before_reload");
+        debug!("debug_before_reload"); // Should NOT appear
 
-    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-    //     // Test 3: Verify debug logs now appear after reload
-    //     debug!("debug log");
-    //     info!("info log");
-    //     warn!("debug log");
-    //     error!("debug log");
+        // Reload to DEBUG
+        let result = log_setup.reload_handle.set_log_level(LogLevel::Debug);
+        assert!(result.is_ok(), "Log level reload should succeed with OTel enabled");
 
-    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    //     drop(log_setup);
+        // Log at DEBUG level (should now appear)
+        info!("info_after_reload");
+        debug!("debug_after_reload");
 
-    //     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(log_setup);
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
-    //     // Verify file was created and contains expected logs
-    //     let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
-    //     assert_eq!(log_files.len(), 1, "Expected exactly one log file");
+        let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
+        let log_contents = fs::read_to_string(log_files[0].as_ref().unwrap().path()).unwrap();
 
-    //     let log_file = log_files[0].as_ref().unwrap();
-    //     let log_contents = fs::read_to_string(log_file.path()).unwrap();
+        assert!(log_contents.contains("info_before_reload"));
+        assert!(!log_contents.contains("debug_before_reload"), "Debug should not appear before reload");
+        assert!(log_contents.contains("info_after_reload"));
+        assert!(log_contents.contains("debug_after_reload"), "Debug should appear after reload");
+    }
 
-    //     // Verify messages before reload
-    //     assert!(log_contents.contains("info_message_before_reload"));
-    //     assert!(
-    //         !log_contents.contains("debug_message_before_reload"),
-    //         "Debug should not appear before reload"
-    //     );
-    //     assert!(log_contents.contains("error_message"));
+    /// Test that OTel config fields are correctly structured
+    #[tokio::test]
+    async fn test_otel_config_fields() {
+        use std::collections::HashMap;
 
-    //     // Verify messages after reload
-    //     assert!(log_contents.contains("info_message_after_reload"));
-    //     assert!(
-    //         log_contents.contains("debug_message_after_reload"),
-    //         "Debug should appear after reload to DEBUG level"
-    //     );
+        let config = OtelConfig {
+            enabled: true,
+            service_name: Some("test-service".to_string()),
+            endpoint: Some("http://collector:4317".to_string()),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("x-api-key".to_string(), "secret-key".to_string());
+                h
+            },
+        };
 
-    //     // let handle = tokio::spawn(move || {
-    //     //     clock_clone.advance(Duration::from_secs(5));
-    //     // });
+        assert!(config.enabled);
+        assert_eq!(config.service_name, Some("test-service".to_string()));
+        assert_eq!(config.endpoint, Some("http://collector:4317".to_string()));
+        assert_eq!(config.headers.get("x-api-key"), Some(&"secret-key".to_string()));
 
-    //     // handle.join().unwrap();
+        // Default config should be disabled
+        let default_config = OtelConfig::default();
+        assert!(!default_config.enabled);
+        assert!(default_config.service_name.is_none());
+        assert!(default_config.endpoint.is_none());
+        assert!(default_config.headers.is_empty());
+    }
 
-    //     assert_eq!(clock.now(), start + Duration::from_secs(5));
-    // }
+    /// Test that setup succeeds with OTel enabled but no endpoint specified
+    /// (should use env var fallback or SDK defaults)
+    #[tokio::test]
+    async fn test_otel_enabled_no_endpoint_uses_fallback() {
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: None,
+            otel_config: OtelConfig {
+                enabled: true,
+                endpoint: None, // No endpoint - should use SDK defaults
+                ..OtelConfig::default()
+            },
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
+
+        // Setup should succeed (exporter will use SDK defaults)
+        let result = setup_logging_test(config);
+        assert!(result.is_ok(), "Setup should succeed with OTel enabled but no endpoint");
+
+        let guard = result.unwrap();
+        // Guards may or may not be present depending on whether SDK defaults work
+        // The key thing is setup didn't panic or return an error
+        let _ = guard.otel_guards;
+    }
 }

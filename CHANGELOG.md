@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.5.1] - 2026-04-13
+
+### Bug Fixes
+
+- Fix rustls deps to explicitly use ring, to remove implicit aws-lc-sys dep
+
+### Features
+
+- Add better logging when user inits logging outside of tokio runtime
+
+### Miscellaneous Tasks
+
+- Add some more otel layer debug logging
+- Add some more logging
+
+## [1.5.0] - 2026-04-08
+
+### Features
+
+- Implement otel log forwarding feature
+
 ## [1.4.1] - 2026-04-03
 
 ### Miscellaneous Tasks

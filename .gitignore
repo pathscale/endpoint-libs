@@ -4,3 +4,12 @@ node_modules/
 examples/ws-echo/target/
 examples/ws-echo/.wrangler/
 examples/ws-echo/target/
+
+/.claude
+/.gemini
+/.qwen
+/.opencode
+/.serena
+/.kiro
+CLAUDE*.md
+AGENTS.md

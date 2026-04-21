@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/1.4.1/status.svg)](https://deps.rs/crate/endpoint-libs/1.4.1)
+[![Security audit](https://deps.rs/crate/endpoint-libs/1.5.1/status.svg)](https://deps.rs/crate/endpoint-libs/1.5.1)
 
 Common library used across Pathscale projects. Contains generic utilities and shared types that are not specific to any single service, including a WebSocket server implementation, endpoint schema types for use with [endpoint-gen](https://github.com/pathscale/endpoint-gen), structured logging setup, and more.
 
@@ -94,6 +94,52 @@ The `setup_logging` function (available without any optional features) provides 
 - Optional file logging with configurable rotation
 - Runtime log level reloading via `LogReloadHandle`
 - Optional `error_aggregation` layer (requires `error_aggregation` feature)
+
+## OpenTelemetry (OTel) Integration
+
+The logging framework supports forwarding all `tracing` spans and log events to an OpenTelemetry (OTLP) collector as primary signals (**Traces** and **Logs**). This operates as a parallel layer and does not affect stdout or file logging.
+
+### Enabling OTel
+
+To enable OTLP forwarding, configure `OtelConfig` in your `LoggingConfig`:
+
+```rust
+use std::collections::HashMap;
+use endpoint_libs::libs::log::{LoggingConfig, OtelConfig, OtelProtocol};
+
+let mut headers = HashMap::new();
+headers.insert("x-api-key".to_string(), "your-token".to_string());
+
+let config = LoggingConfig {
+    otel_config: OtelConfig {
+        enabled: true,
+        service_name: Some("my-service".into()),
+        endpoint: Some("http://localhost:4317".into()), // OTLP collector endpoint
+        protocol: OtelProtocol::Grpc,
+        headers,
+    },
+    ..Default::default()
+};
+
+let setup = setup_logging(config)?;
+// CRITICAL: Keep `setup.otel_guards` alive for the duration of the program.
+// It flushes pending traces and logs to the collector on drop.
+```
+
+### Environment Variables
+
+OTel can also be configured via standard environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `OTEL_SERVICE_NAME` | Name of the service |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Collector endpoint for traces |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Collector endpoint for logs (falls back to traces endpoint) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` or `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Key-value pairs for auth (e.g. `api-key=val,other=val`) |
+| `OTEL_PROPAGATORS` | Context propagators (default: `tracecontext,baggage`) |
+
+Note: Values in `OtelConfig` override environment variables. To prevent recursive logging, OTel internal crates are capped at the `WARN` level when global logging is set to `DEBUG` or `TRACE`.
 
 ## Config Loading
 
