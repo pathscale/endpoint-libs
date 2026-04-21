@@ -9,7 +9,6 @@
 //! - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` - OTLP collector endpoint for traces
 //! - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` - OTLP collector endpoint for logs
 //! - `OTEL_SERVICE_NAME` - Service name for traces
-//! - `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` - Protocol (grpc/http)
 //! - `OTEL_EXPORTER_OTLP_HEADERS` - Additional headers (e.g., auth tokens)
 //!
 //! # Graceful Degradation
@@ -19,7 +18,7 @@
 use std::collections::HashMap;
 
 use opentelemetry::propagation::{TextMapCompositePropagator, TextMapPropagator};
-use opentelemetry_otlp::{WithHttpConfig, WithTonicConfig};
+use opentelemetry_otlp::WithHttpConfig;
 use opentelemetry_sdk::{
     Resource,
     logs::SdkLoggerProvider,
@@ -27,16 +26,6 @@ use opentelemetry_sdk::{
     trace::{SdkTracerProvider, Tracer},
 };
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
-
-/// Protocol for OTLP exporter
-#[derive(Debug, Clone, Default)]
-pub enum OtelProtocol {
-    /// gRPC protocol (recommended)
-    #[default]
-    Grpc,
-    /// HTTP with protobuf encoding
-    HttpProtobuf,
-}
 
 /// Configuration for OpenTelemetry integration
 #[derive(Debug, Clone)]
@@ -47,8 +36,6 @@ pub struct OtelConfig {
     pub service_name: Option<String>,
     /// OTLP collector endpoint (e.g., "http://localhost:4317")
     pub endpoint: Option<String>,
-    /// Protocol to use for OTLP export
-    pub protocol: OtelProtocol,
     /// Additional headers to include in OTLP requests (e.g., authentication)
     pub headers: HashMap<String, String>,
 }
@@ -59,7 +46,6 @@ impl Default for OtelConfig {
             enabled: false,
             service_name: None,
             endpoint: None,
-            protocol: OtelProtocol::default(),
             headers: HashMap::new(),
         }
     }
@@ -107,7 +93,6 @@ pub fn build_otel_layer(config: &OtelConfig) -> OtelLayerResult {
             );
             tracing::debug!(
                 target: "otel::setup",
-                protocol = ?config.protocol,
                 endpoint = config.endpoint.as_deref().unwrap_or("SDK default"),
                 header_keys = ?config.headers.keys().collect::<Vec<_>>(),
                 "OTel exporter config"
@@ -141,7 +126,9 @@ struct OtelLayerBuild {
     service_name: String,
 }
 
-fn build_otel_layer_inner(config: &OtelConfig) -> Result<OtelLayerBuild, Box<dyn std::error::Error + Send + Sync>> {
+fn build_otel_layer_inner(
+    config: &OtelConfig,
+) -> Result<OtelLayerBuild, Box<dyn std::error::Error + Send + Sync>> {
     let service_name = config
         .service_name
         .clone()
@@ -161,7 +148,8 @@ fn build_otel_layer_inner(config: &OtelConfig) -> Result<OtelLayerBuild, Box<dyn
 
     init_propagator();
 
-    let tracer = opentelemetry::trace::TracerProvider::tracer(&tracer_provider, service_name.clone());
+    let tracer =
+        opentelemetry::trace::TracerProvider::tracer(&tracer_provider, service_name.clone());
 
     Ok(OtelLayerBuild {
         tracer_provider,
@@ -184,47 +172,21 @@ fn build_tracer_provider(
 
     tracing::debug!(
         target: "otel::setup",
-        "Building traces exporter: endpoint={:?}, headers_count={}, protocol={:?}",
+        "Building traces exporter: endpoint={:?}, headers_count={}",
         endpoint,
         config.headers.len(),
-        config.protocol
     );
 
     let mut builder = SdkTracerProvider::builder().with_resource(resource.clone());
 
-    match config.protocol {
-        OtelProtocol::Grpc => {
-            tokio::runtime::Handle::try_current()
-                .map_err(|_| "gRPC OTel exporter requires a running Tokio runtime; call setup_logging inside a tokio context or use OtelProtocol::HttpProtobuf")?;
-            let mut exporter_builder = SpanExporter::builder().with_tonic();
-            if let Some(ref ep) = endpoint {
-                exporter_builder = exporter_builder.with_endpoint(ep);
-            }
-            if !config.headers.is_empty() {
-                let mut metadata = tonic::metadata::MetadataMap::new();
-                for (key, value) in &config.headers {
-                    if let (Ok(meta_key), Ok(meta_value)) = (
-                        tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
-                        value.parse(),
-                    ) {
-                        metadata.insert(meta_key, meta_value);
-                    }
-                }
-                exporter_builder = exporter_builder.with_metadata(metadata);
-            }
-            builder = builder.with_batch_exporter(exporter_builder.build()?);
-        }
-        OtelProtocol::HttpProtobuf => {
-            let mut exporter_builder = SpanExporter::builder().with_http();
-            if let Some(ref ep) = endpoint {
-                exporter_builder = exporter_builder.with_endpoint(ep);
-            }
-            if !config.headers.is_empty() {
-                exporter_builder = exporter_builder.with_headers(config.headers.clone());
-            }
-            builder = builder.with_batch_exporter(exporter_builder.build()?);
-        }
+    let mut exporter_builder = SpanExporter::builder().with_http();
+    if let Some(ref ep) = endpoint {
+        exporter_builder = exporter_builder.with_endpoint(ep);
     }
+    if !config.headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(config.headers.clone());
+    }
+    builder = builder.with_batch_exporter(exporter_builder.build()?);
 
     Ok(builder.build())
 }
@@ -244,53 +206,28 @@ fn build_logger_provider(
 
     tracing::debug!(
         target: "otel::setup",
-        "Building logs exporter: endpoint={:?}, headers_count={}, protocol={:?}",
+        "Building logs exporter: endpoint={:?}, headers_count={}",
         endpoint,
         config.headers.len(),
-        config.protocol
     );
 
     let mut builder = SdkLoggerProvider::builder().with_resource(resource.clone());
 
-    match config.protocol {
-        OtelProtocol::Grpc => {
-            tokio::runtime::Handle::try_current()
-                .map_err(|_| "gRPC OTel exporter requires a running Tokio runtime; call setup_logging inside a tokio context or use OtelProtocol::HttpProtobuf")?;
-            let mut exporter_builder = LogExporter::builder().with_tonic();
-            if let Some(ref ep) = endpoint {
-                exporter_builder = exporter_builder.with_endpoint(ep);
-            }
-            if !config.headers.is_empty() {
-                let mut metadata = tonic::metadata::MetadataMap::new();
-                for (key, value) in &config.headers {
-                    if let (Ok(meta_key), Ok(meta_value)) = (
-                        tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
-                        value.parse(),
-                    ) {
-                        metadata.insert(meta_key, meta_value);
-                    }
-                }
-                exporter_builder = exporter_builder.with_metadata(metadata);
-            }
-            builder = builder.with_batch_exporter(exporter_builder.build()?);
-        }
-        OtelProtocol::HttpProtobuf => {
-            let mut exporter_builder = LogExporter::builder().with_http();
-            if let Some(ref ep) = endpoint {
-                exporter_builder = exporter_builder.with_endpoint(ep);
-            }
-            if !config.headers.is_empty() {
-                exporter_builder = exporter_builder.with_headers(config.headers.clone());
-            }
-            builder = builder.with_batch_exporter(exporter_builder.build()?);
-        }
+    let mut exporter_builder = LogExporter::builder().with_http();
+    if let Some(ref ep) = endpoint {
+        exporter_builder = exporter_builder.with_endpoint(ep);
     }
+    if !config.headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(config.headers.clone());
+    }
+    builder = builder.with_batch_exporter(exporter_builder.build()?);
 
     Ok(builder.build())
 }
 
 fn init_propagator() {
-    let value = std::env::var("OTEL_PROPAGATORS").unwrap_or_else(|_| "tracecontext,baggage".to_string());
+    let value =
+        std::env::var("OTEL_PROPAGATORS").unwrap_or_else(|_| "tracecontext,baggage".to_string());
     let mut propagators: Vec<(Box<dyn TextMapPropagator + Send + Sync>, String)> = Vec::new();
 
     for name in value.split(',').map(|s| s.trim().to_lowercase()) {
@@ -303,6 +240,8 @@ fn init_propagator() {
 
     if !propagators.is_empty() {
         let (propagators_impl, _): (Vec<_>, Vec<_>) = propagators.into_iter().unzip();
-        opentelemetry::global::set_text_map_propagator(TextMapCompositePropagator::new(propagators_impl));
+        opentelemetry::global::set_text_map_propagator(TextMapCompositePropagator::new(
+            propagators_impl,
+        ));
     }
 }

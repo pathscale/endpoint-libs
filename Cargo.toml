@@ -135,7 +135,7 @@ tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 # OpenTelemetry dependencies (default feature)
 opentelemetry = { version = "0.31", features = ["logs"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs"] }
-opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "grpc-tonic", "http-proto"] }
+opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "http-proto"] }
 opentelemetry-semantic-conventions = "0.31"
 tracing-opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.31"

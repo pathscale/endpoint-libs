@@ -32,7 +32,7 @@ pub mod level_filter;
 pub mod otel;
 
 pub use level_filter::*;
-pub use otel::{OtelConfig, OtelGuards, OtelProtocol};
+pub use otel::{OtelConfig, OtelGuards};
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
@@ -674,7 +674,6 @@ mod tests {
             enabled: true,
             service_name: Some("test-service".to_string()),
             endpoint: Some("http://collector:4317".to_string()),
-            protocol: otel::OtelProtocol::HttpProtobuf,
             headers: {
                 let mut h = HashMap::new();
                 h.insert("x-api-key".to_string(), "secret-key".to_string());
@@ -685,7 +684,6 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.service_name, Some("test-service".to_string()));
         assert_eq!(config.endpoint, Some("http://collector:4317".to_string()));
-        assert!(matches!(config.protocol, otel::OtelProtocol::HttpProtobuf));
         assert_eq!(config.headers.get("x-api-key"), Some(&"secret-key".to_string()));
 
         // Default config should be disabled
@@ -693,7 +691,6 @@ mod tests {
         assert!(!default_config.enabled);
         assert!(default_config.service_name.is_none());
         assert!(default_config.endpoint.is_none());
-        assert!(matches!(default_config.protocol, otel::OtelProtocol::Grpc));
         assert!(default_config.headers.is_empty());
     }
 
