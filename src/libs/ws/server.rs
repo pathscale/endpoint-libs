@@ -2,10 +2,10 @@ use eyre::{ContextCompat, Result, bail, eyre};
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
-use hyper::server::conn::http1;
+use hyper::header::HeaderValue;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper::{Method, Request, Response, StatusCode, Version};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -36,13 +36,18 @@ use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
+static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
+static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
+static HDR_SERVER: HeaderValue = HeaderValue::from_static("RustWebsocketServer/1.0");
+static HDR_CREDENTIALS_TRUE: HeaderValue = HeaderValue::from_static("true");
+
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
     pub handlers: HashMap<u32, WsEndpoint>,
-    pub allowed_roles: HashMap<u32, HashSet<u32>>,
-    pub message_receiver: Option<mpsc::Receiver<ConnectionId>>,
+    pub message_receiver: parking_lot::Mutex<Option<mpsc::Receiver<ConnectionId>>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
+    pub cached_date: RwLock<HeaderValue>,
 }
 
 
@@ -53,10 +58,14 @@ impl WebsocketServer {
         }
         Self {
             auth_controller: Arc::new(SimpleAuthController),
-            allowed_roles: HashMap::new(),
             handlers: Default::default(),
-            message_receiver: None,
+            message_receiver: parking_lot::Mutex::new(None),
             toolbox: Toolbox::new(),
+            cached_date: RwLock::new(
+                httpdate::fmt_http_date(std::time::SystemTime::now())
+                    .parse()
+                    .unwrap(),
+            ),
             config,
         }
     }
@@ -77,11 +86,9 @@ impl WebsocketServer {
     ) {
         let roles_set = roles.iter().cloned().collect::<HashSet<u32>>();
 
-        let _old_roles = self.allowed_roles.insert(schema.code, roles_set);
-
         let old = self
             .handlers
-            .insert(schema.code, WsEndpoint { schema, handler });
+            .insert(schema.code, WsEndpoint { schema, handler, allowed_roles: roles_set });
         if let Some(old) = old {
             panic!(
                 "Overwriting handler for endpoint {} {}",
@@ -103,28 +110,50 @@ impl WebsocketServer {
             let this = Arc::clone(&self);
             let states = Arc::clone(&states);
             async move {
-                let is_upgrade = req
-                    .headers()
-                    .get(UPGRADE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.eq_ignore_ascii_case("websocket"))
-                    .unwrap_or(false);
-                let key = req
-                    .headers()
-                    .get(SEC_WEBSOCKET_KEY)
-                    .map(|k| k.as_bytes().to_vec());
+                let is_http2 = req.version() == Version::HTTP_2;
 
-                if !is_upgrade || key.is_none() {
-                    let mut resp = Response::new(Empty::<Bytes>::new());
-                    *resp.status_mut() = StatusCode::BAD_REQUEST;
-                    return Ok::<_, Infallible>(resp);
-                }
-                let derived = derive_accept_key(&key.unwrap());
+                // Validate the upgrade request based on HTTP version.
+                // HTTP/1.1: GET + Upgrade: websocket + Sec-WebSocket-Key
+                // HTTP/2:   CONNECT + :protocol = websocket (RFC 8441 / RFC 9113 §8.5)
+                let derived = if is_http2 {
+                    if req.method() != Method::CONNECT {
+                        let mut resp = Response::new(Empty::<Bytes>::new());
+                        *resp.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+                        return Ok::<_, Infallible>(resp);
+                    }
+                    let proto_ok = req
+                        .extensions()
+                        .get::<hyper::ext::Protocol>()
+                        .map_or(false, |p| p.as_str() == "websocket");
+                    if !proto_ok {
+                        let mut resp = Response::new(Empty::<Bytes>::new());
+                        *resp.status_mut() = StatusCode::BAD_REQUEST;
+                        return Ok::<_, Infallible>(resp);
+                    }
+                    None
+                } else {
+                    let is_upgrade = req
+                        .headers()
+                        .get(UPGRADE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| v.eq_ignore_ascii_case("websocket"))
+                        .unwrap_or(false);
+                    if !is_upgrade {
+                        let mut resp = Response::new(Empty::<Bytes>::new());
+                        *resp.status_mut() = StatusCode::BAD_REQUEST;
+                        return Ok::<_, Infallible>(resp);
+                    }
+                    let Some(key) = req.headers().get(SEC_WEBSOCKET_KEY) else {
+                        let mut resp = Response::new(Empty::<Bytes>::new());
+                        *resp.status_mut() = StatusCode::BAD_REQUEST;
+                        return Ok::<_, Infallible>(resp);
+                    };
+                    Some(derive_accept_key(key.as_bytes()))
+                };
 
                 let protocol = req
                     .headers()
                     .get("Sec-WebSocket-Protocol")
-                    .or_else(|| req.headers().get("sec-websocket-protocol"))
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
@@ -165,14 +194,16 @@ impl WebsocketServer {
                     }
                 });
 
+                // HTTP/2: respond 200 OK (RFC 9113 §8.5); no 101 or Sec-WebSocket-Accept.
+                // HTTP/1.1: respond 101 Switching Protocols with the derived accept key.
                 let mut resp = Response::new(Empty::<Bytes>::new());
-                *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-                resp.headers_mut()
-                    .append(CONNECTION, "upgrade".parse().unwrap());
-                resp.headers_mut()
-                    .append(UPGRADE, "websocket".parse().unwrap());
-                resp.headers_mut()
-                    .append(SEC_WEBSOCKET_ACCEPT, derived.parse().unwrap());
+                if let Some(derived) = derived {
+                    *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                    resp.headers_mut().append(CONNECTION, HDR_UPGRADE.clone());
+                    resp.headers_mut().append(UPGRADE, HDR_WEBSOCKET.clone());
+                    resp.headers_mut()
+                        .append(SEC_WEBSOCKET_ACCEPT, derived.parse().unwrap());
+                }
 
                 if !protocol.is_empty() {
                     let first = protocol.split(',').next().unwrap_or("").trim();
@@ -190,26 +221,23 @@ impl WebsocketServer {
                         if let Ok(v) = origin.parse::<hyper::header::HeaderValue>() {
                             resp.headers_mut()
                                 .append("Access-Control-Allow-Origin", v);
-                            resp.headers_mut().append(
-                                "Access-Control-Allow-Credentials",
-                                "true".parse().unwrap(),
-                            );
+                            resp.headers_mut()
+                                .append("Access-Control-Allow-Credentials", HDR_CREDENTIALS_TRUE.clone());
                         }
                     }
                 }
 
-                resp.headers_mut()
-                    .append("Date", chrono::Utc::now().to_rfc2822().parse().unwrap());
-                resp.headers_mut()
-                    .append("Server", "RustWebsocketServer/1.0".parse().unwrap());
+                resp.headers_mut().append("Date", this.cached_date.read().clone());
+                resp.headers_mut().append("Server", HDR_SERVER.clone());
 
                 Ok::<_, Infallible>(resp)
             }
         });
 
-        http1::Builder::new()
-            .serve_connection(io, service)
-            .with_upgrades()
+        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        builder.http2().enable_connect_protocol();
+        builder
+            .serve_connection_with_upgrades(io, service)
             .await
             .map_err(|e| eyre!(e))
     }
@@ -308,47 +336,100 @@ impl WebsocketServer {
 
     async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {
         let states = Arc::new(WebsocketStates::new());
-        self.toolbox
-            .set_ws_states(states.clone_states(), self.config.header_only);
         let this = Arc::new(self);
-        let local_set = LocalSet::new();
-        let (mut sigterm, mut sigint) = crate::libs::signal::init_signals()?;
-        local_set
-            .run_until(async {
-                loop {
-                    tokio::select! {
-                        _ = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint) => break,
-                        accepted = listener.accept() => {
-                            let (stream, addr) = match accepted {
-                                Ok(x) => x,
-                                Err(err) => {
-                                    error!("Error while accepting stream: {:?}", err);
-                                    continue;
-                                }
-                            };
-                            let listener = Arc::clone(&listener);
-                            let this = Arc::clone(&this);
-                            let states = Arc::clone(&states);
-                            local_set.spawn_local(async move {
-                                let stream = match listener.handshake(stream).await {
-                                    Ok(channel) => {
-                                        debug!("Accepted stream from {}", addr);
-                                        channel
-                                    }
-                                    Err(err) => {
-                                        error!("Error while handshaking stream: {:?}", err);
-                                        return;
-                                    }
-                                };
+        this.toolbox
+            .set_ws_states(states.clone_states(), this.config.header_only);
 
-                                let _ = TOOLBOX.scope(this.toolbox.clone(), this.handle_ws_handshake_and_connection(addr, states, stream)).await;
-                            });
+        let num_shards = shard_count();
+        info!("Starting {} WebSocket shards", num_shards);
+
+        let mut shard_senders = Vec::with_capacity(num_shards);
+        for _ in 0..num_shards {
+            let (tx, rx) = mpsc::channel::<(T::Channel1, SocketAddr)>(256);
+            let this = Arc::clone(&this);
+            let states = Arc::clone(&states);
+            let listener = Arc::clone(&listener);
+            std::thread::spawn(move || {
+                WebsocketServer::run_shard(this, states, listener, rx);
+            });
+            shard_senders.push(tx);
+        }
+
+        // Date cache updater — runs on the multi-thread scheduler, no LocalSet needed.
+        tokio::spawn({
+            let this = Arc::clone(&this);
+            async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    *this.cached_date.write() =
+                        httpdate::fmt_http_date(std::time::SystemTime::now())
+                            .parse()
+                            .unwrap();
+                }
+            }
+        });
+
+        let (mut sigterm, mut sigint) = crate::libs::signal::init_signals()?;
+        let mut shard_idx: usize = 0;
+        loop {
+            tokio::select! {
+                _ = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint) => break,
+                accepted = listener.accept() => {
+                    let (stream, addr) = match accepted {
+                        Ok(x) => x,
+                        Err(err) => {
+                            error!("Error while accepting stream: {:?}", err);
+                            continue;
                         }
+                    };
+                    let shard = &shard_senders[shard_idx % num_shards];
+                    shard_idx = shard_idx.wrapping_add(1);
+                    if shard.send((stream, addr)).await.is_err() {
+                        error!("Shard channel closed unexpectedly for addr {}", addr);
                     }
                 }
-                Ok(())
-            })
-            .await
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_shard<T: ConnectionListener + 'static>(
+        this: Arc<Self>,
+        states: Arc<WebsocketStates>,
+        listener: Arc<T>,
+        mut rx: mpsc::Receiver<(T::Channel1, SocketAddr)>,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build shard runtime");
+        let local_set = LocalSet::new();
+        rt.block_on(local_set.run_until(async move {
+            while let Some((stream, addr)) = rx.recv().await {
+                let this = Arc::clone(&this);
+                let states = Arc::clone(&states);
+                let listener = Arc::clone(&listener);
+                tokio::task::spawn_local(async move {
+                    let stream = match listener.handshake(stream).await {
+                        Ok(channel) => {
+                            debug!("Accepted stream from {}", addr);
+                            channel
+                        }
+                        Err(err) => {
+                            error!("Error while handshaking stream: {:?}", err);
+                            return;
+                        }
+                    };
+                    let _ = TOOLBOX
+                        .scope(
+                            this.toolbox.clone(),
+                            this.handle_ws_handshake_and_connection(addr, states, stream),
+                        )
+                        .await;
+                });
+            }
+        }));
     }
 
     pub fn dump_schemas(&self) -> Result<()> {
@@ -368,6 +449,61 @@ impl WebsocketServer {
         serde_json::to_writer_pretty(File::create(file)?, &available_schemas)?;
         Ok(())
     }
+}
+
+/// Determine the number of WebSocket shards to spawn.
+///
+/// Resolution order (first match wins):
+/// 1. `WS_SHARDS` environment variable — explicit operator override.
+/// 2. cgroup v1 CPU quota — handles older Docker/k8s deployments that set
+///    `cpu.cfs_quota_us` / `cpu.cfs_period_us` but do not use cgroup v2.
+/// 3. `std::thread::available_parallelism` — reads cgroup v2 `cpu.max` and
+///    `sched_getaffinity` on Linux (Rust 1.74+), logical CPU count elsewhere.
+/// 4. Hard fallback of 1 if all detection fails.
+fn shard_count() -> usize {
+    // 1. Explicit override.
+    if let Ok(val) = std::env::var("WS_SHARDS") {
+        if let Ok(n) = val.trim().parse::<usize>() {
+            if n > 0 {
+                return n;
+            }
+        }
+        warn!("WS_SHARDS env var set but invalid, ignoring: {:?}", val);
+    }
+
+    // 2. cgroup v1 quota (common in older Docker / k8s).
+    if let Some(n) = read_cgroup_v1_quota() {
+        return n.max(1);
+    }
+
+    // 3. stdlib — cgroup v2 + affinity-aware on Linux (Rust 1.74+).
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// Read the cgroup v1 CPU quota and convert it to a thread count.
+/// Returns `None` if the files are absent, unparseable, or the quota is
+/// unlimited (quota == -1).
+fn read_cgroup_v1_quota() -> Option<usize> {
+    let quota: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if quota <= 0 {
+        return None; // -1 means no limit
+    }
+    let period: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if period <= 0 {
+        return None;
+    }
+    // Ceiling division: round up so a 1.5-CPU quota gives 2 shards.
+    Some(((quota + period - 1) / period) as usize)
 }
 
 pub fn wrap_ws_error<T>(err: Result<T, WsError>) -> Result<T> {

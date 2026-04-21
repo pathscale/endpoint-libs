@@ -100,10 +100,10 @@ impl<
         context.seq = req.seq;
         context.method = req.method;
         context.user_id = self.conn_info.get_user_id();
-        context.roles = Arc::new(self.conn_info.get_roles());
+        context.roles = self.conn_info.get_roles();
 
         // Check roles
-        let Some(allowed_roles) = self.server.allowed_roles.get(&req.method) else {
+        let Some(endpoint) = self.server.handlers.get(&req.method) else {
             self.server.toolbox.send(
                 context.connection_id,
                 request_error_to_resp(&context, ErrorCode::NOT_IMPLEMENTED, Value::Null),
@@ -111,8 +111,7 @@ impl<
             return Ok(true);
         };
 
-        let allowed = check_roles(&context.roles, allowed_roles);
-        if !allowed {
+        if !check_roles(&context.roles, &endpoint.allowed_roles) {
             self.server.toolbox.send(
                 context.connection_id,
                 request_error_to_resp(&context, ErrorCode::FORBIDDEN, "Forbidden"),
@@ -120,18 +119,7 @@ impl<
             return Ok(true);
         }
 
-        let handler = self.server.handlers.get(&req.method);
-        let handler = match handler {
-            Some(handler) => handler,
-            None => {
-                self.server.toolbox.send(
-                    context.connection_id,
-                    request_error_to_resp(&context, ErrorCode::NOT_IMPLEMENTED, Value::Null),
-                );
-                return Ok(true);
-            }
-        };
-        let handler = handler.handler.clone();
+        let handler = endpoint.handler.clone();
         let toolbox = self.server.toolbox.clone();
         tokio::task::spawn_local(async move {
             TOOLBOX
@@ -147,6 +135,14 @@ impl<
     async fn run_loop(&mut self) -> Result<()> {
         let conn_id = self.conn_info.connection_id;
         loop {
+            // Drain all pending outbound messages before blocking on new events.
+            while let Ok(msg) = self.rx.try_recv() {
+                self.send_message(msg).await?;
+                if self.server.config.header_only {
+                    return Ok(());
+                }
+            }
+
             tokio::select! {
                 msg = self.rx.recv() => {
                     // info!(?conn_id, ?msg, "Received message to send");
@@ -185,15 +181,10 @@ impl<
 }
 
 fn check_roles(actual_roles: &[u32], allowed_roles: &HashSet<u32>) -> bool {
-    if allowed_roles.is_empty() {
-        return false; // No roles are allowed
+    if allowed_roles.is_empty() || actual_roles.is_empty() {
+        return false;
     }
-    for role in actual_roles.iter() {
-        if allowed_roles.contains(role) {
-            return true; // At least one role is allowed
-        }
-    }
-    false // No roles matched
+    actual_roles.iter().any(|role| allowed_roles.contains(role))
 }
 
 #[cfg(test)]

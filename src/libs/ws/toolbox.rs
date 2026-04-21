@@ -1,11 +1,10 @@
 use dashmap::DashMap;
 use eyre::{Context, Result};
-use parking_lot::RwLock;
 use serde::*;
 use serde_json::Value;
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
 
@@ -99,14 +98,17 @@ impl RequestContext {
     }
 }
 
+type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
+type SendFnArc = Arc<SendFn>;
+
 pub struct Toolbox {
-    pub send_msg: RwLock<Arc<dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync>>,
+    pub send_msg: OnceLock<SendFnArc>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
 impl Toolbox {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            send_msg: RwLock::new(Arc::new(|_conn_id, _msg| false)),
+            send_msg: OnceLock::new(),
         })
     }
 
@@ -115,7 +117,7 @@ impl Toolbox {
         states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
         oneshot: bool,
     ) {
-        *self.send_msg.write() = Arc::new(move |conn_id, msg| {
+        let send_fn: SendFnArc = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
             } else {
@@ -124,6 +126,9 @@ impl Toolbox {
             Self::send_ws_msg(&state.message_queue, msg, oneshot);
             true
         });
+        if self.send_msg.set(send_fn).is_err() {
+            panic!("set_ws_states called twice");
+        }
     }
 
     pub fn send_ws_msg(
@@ -132,15 +137,24 @@ impl Toolbox {
         oneshot: bool,
     ) {
         let resp = serde_json::to_string(&resp).unwrap();
-        if let Err(err) = sender.try_send(resp.into()) {
-            warn!("Failed to send websocket message: {:?}", err)
+        match sender.try_send(resp.into()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                error!("WebSocket send buffer full — client is too slow or disconnected");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!("WebSocket send channel closed (client already disconnected)");
+            }
         }
         if oneshot {
             let _ = sender.try_send(Message::Close(None));
         }
     }
     pub fn send(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
-        self.send_msg.read()(conn_id, resp)
+        match self.send_msg.get() {
+            Some(f) => f(conn_id, resp),
+            None => false,
+        }
     }
     pub fn send_response(&self, ctx: &RequestContext, resp: impl Serialize) {
         self.send(
@@ -148,7 +162,7 @@ impl Toolbox {
             WsResponseValue::Immediate(WsSuccessResponse {
                 method: ctx.method,
                 seq: ctx.seq,
-                params: serde_json::to_value(&resp).unwrap(),
+                params: serde_json::value::to_raw_value(&resp).expect("Failed to serialize response"),
             }),
         );
     }
@@ -186,7 +200,7 @@ impl Toolbox {
             Ok(ok) => WsResponseValue::Immediate(WsSuccessResponse {
                 method,
                 seq,
-                params: serde_json::to_value(ok).expect("Failed to serialize response"),
+                params: serde_json::value::to_raw_value(&ok).expect("Failed to serialize response"),
             }),
             Err(err) if err.is::<NoResponseError>() => {
                 return None;

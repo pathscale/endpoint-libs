@@ -1078,6 +1078,7 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "itertools 0.12.1",
@@ -1113,6 +1114,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-throttle",
  "urlencoding",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

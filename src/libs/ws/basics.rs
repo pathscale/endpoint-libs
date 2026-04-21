@@ -1,6 +1,8 @@
 use parking_lot::RwLock;
 use serde::*;
 use serde_json::Value;
+use serde_json::value::RawValue;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -43,9 +45,8 @@ impl WsConnection {
         self.user_id.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn get_roles(&self) -> Vec<u32> {
-        let roles = self.roles.read();
-        roles.as_ref().clone()
+    pub fn get_roles(&self) -> Arc<Vec<u32>> {
+        self.roles.read().clone()
     }
 
     pub fn set_user_id(&self, user_id: u64) {
@@ -59,8 +60,8 @@ impl WsConnection {
     }
 }
 
-pub type WsSuccessResponse = WsSuccessResponseGeneric<Value>;
-pub type WsStreamResponse = WsStreamResponseGeneric<Value>;
+pub type WsSuccessResponse = WsSuccessResponseGeneric<Box<RawValue>>;
+pub type WsStreamResponse = WsStreamResponseGeneric<Box<RawValue>>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WsForwardedResponse {
@@ -101,11 +102,12 @@ pub enum WsResponseGeneric<Resp> {
     Close,
 }
 
-pub type WsResponseValue = WsResponseGeneric<Value>;
+pub type WsResponseValue = WsResponseGeneric<Box<RawValue>>;
 
 pub struct WsEndpoint {
     pub schema: EndpointSchema,
     pub handler: Arc<dyn RequestHandlerErased>,
+    pub allowed_roles: HashSet<u32>,
 }
 
 pub fn internal_error_to_resp(
