@@ -36,6 +36,18 @@ use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
+/// Carries the data needed to complete an H2 WebSocket upgrade inside a shard's LocalSet.
+/// All fields are `Send` so this can be transmitted across the tokio thread pool boundary
+/// that hyper's TokioExecutor creates when dispatching H2 stream service calls.
+struct H2UpgradeMsg {
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    toolbox: ArcToolbox,
+    server: Arc<WebsocketServer>,
+    addr: SocketAddr,
+    states: Arc<WebsocketStates>,
+    protocol: String,
+}
+
 static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
 static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
 static HDR_SERVER: HeaderValue = HeaderValue::from_static("RustWebsocketServer/1.0");
@@ -103,33 +115,50 @@ impl WebsocketServer {
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
         stream: S,
+        h2_tx: mpsc::Sender<H2UpgradeMsg>,
     ) -> Result<()> {
         let io = TokioIo::new(stream);
 
-        let service = service_fn(move |mut req: Request<Incoming>| {
+        let service = service_fn({
+            let h2_tx = h2_tx.clone();
+            move |mut req: Request<Incoming>| {
             let this = Arc::clone(&self);
             let states = Arc::clone(&states);
+            let h2_tx = h2_tx.clone();
             async move {
                 let is_http2 = req.version() == Version::HTTP_2;
+                debug!(
+                    ?addr,
+                    method=%req.method(),
+                    uri=%req.uri(),
+                    version=?req.version(),
+                    is_http2,
+                    "WS handshake request received"
+                );
 
                 // Validate the upgrade request based on HTTP version.
                 // HTTP/1.1: GET + Upgrade: websocket + Sec-WebSocket-Key
                 // HTTP/2:   CONNECT + :protocol = websocket (RFC 8441 / RFC 9113 §8.5)
                 let derived = if is_http2 {
                     if req.method() != Method::CONNECT {
+                        debug!(?addr, method=%req.method(), "H2: rejected — expected CONNECT method");
                         let mut resp = Response::new(Empty::<Bytes>::new());
                         *resp.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
                         return Ok::<_, Infallible>(resp);
                     }
-                    let proto_ok = req
+                    let protocol_ext = req
                         .extensions()
                         .get::<hyper::ext::Protocol>()
-                        .map_or(false, |p| p.as_str() == "websocket");
+                        .map(|p| p.as_str().to_owned());
+                    let proto_ok = protocol_ext.as_deref() == Some("websocket");
+                    debug!(?addr, ?protocol_ext, proto_ok, "H2: checking :protocol extension");
                     if !proto_ok {
+                        debug!(?addr, "H2: rejected — :protocol != websocket");
                         let mut resp = Response::new(Empty::<Bytes>::new());
                         *resp.status_mut() = StatusCode::BAD_REQUEST;
                         return Ok::<_, Infallible>(resp);
                     }
+                    debug!(?addr, "H2: CONNECT upgrade valid, responding 200 OK");
                     None
                 } else {
                     let is_upgrade = req
@@ -139,15 +168,18 @@ impl WebsocketServer {
                         .map(|v| v.eq_ignore_ascii_case("websocket"))
                         .unwrap_or(false);
                     if !is_upgrade {
+                        debug!(?addr, "H1: rejected — missing or invalid Upgrade: websocket header");
                         let mut resp = Response::new(Empty::<Bytes>::new());
                         *resp.status_mut() = StatusCode::BAD_REQUEST;
                         return Ok::<_, Infallible>(resp);
                     }
                     let Some(key) = req.headers().get(SEC_WEBSOCKET_KEY) else {
+                        debug!(?addr, "H1: rejected — missing Sec-WebSocket-Key");
                         let mut resp = Response::new(Empty::<Bytes>::new());
                         *resp.status_mut() = StatusCode::BAD_REQUEST;
                         return Ok::<_, Infallible>(resp);
                     };
+                    debug!(?addr, "H1: upgrade valid, responding 101 Switching Protocols");
                     Some(derive_accept_key(key.as_bytes()))
                 };
 
@@ -169,30 +201,49 @@ impl WebsocketServer {
                 let toolbox = this.toolbox.clone();
                 let this_upgrade = Arc::clone(&this);
                 let protocol_upgrade = protocol.clone();
-                tokio::task::spawn_local(async move {
-                    match on_upgrade.await {
-                        Ok(upgraded) => {
-                            let ws_stream = WebSocketStream::from_raw_socket(
-                                TokioIo::new(upgraded),
-                                Role::Server,
-                                None,
-                            )
-                            .await;
-                            let _ = TOOLBOX
-                                .scope(
-                                    toolbox,
-                                    this_upgrade.post_upgrade_connection(
-                                        addr,
-                                        states,
-                                        ws_stream,
-                                        protocol_upgrade,
-                                    ),
+
+                if is_http2 {
+                    // H2 stream service calls are dispatched by hyper via TokioExecutor
+                    // (tokio::spawn), which breaks out of the shard's LocalSet. Route the
+                    // upgrade back into the shard's LocalSet via the H2 channel so the
+                    // !Send session future runs in the correct context.
+                    if h2_tx.send(H2UpgradeMsg {
+                        on_upgrade,
+                        toolbox,
+                        server: this_upgrade,
+                        addr,
+                        states,
+                        protocol: protocol_upgrade,
+                    }).await.is_err() {
+                        error!(?addr, "H2: upgrade channel closed, dropping connection");
+                    }
+                } else {
+                    tokio::task::spawn_local(async move {
+                        match on_upgrade.await {
+                            Ok(upgraded) => {
+                                debug!(?addr, "WS upgrade succeeded, building WebSocket stream");
+                                let ws_stream = WebSocketStream::from_raw_socket(
+                                    TokioIo::new(upgraded),
+                                    Role::Server,
+                                    None,
                                 )
                                 .await;
+                                let _ = TOOLBOX
+                                    .scope(
+                                        toolbox,
+                                        this_upgrade.post_upgrade_connection(
+                                            addr,
+                                            states,
+                                            ws_stream,
+                                            protocol_upgrade,
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            Err(e) => error!(?addr, "WS upgrade error: {e}"),
                         }
-                        Err(e) => error!(?addr, "WS upgrade error: {e}"),
-                    }
-                });
+                    });
+                }
 
                 // HTTP/2: respond 200 OK (RFC 9113 §8.5); no 101 or Sec-WebSocket-Accept.
                 // HTTP/1.1: respond 101 Switching Protocols with the derived accept key.
@@ -232,6 +283,7 @@ impl WebsocketServer {
 
                 Ok::<_, Infallible>(resp)
             }
+        }
         });
 
         let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
@@ -405,29 +457,60 @@ impl WebsocketServer {
             .build()
             .expect("Failed to build shard runtime");
         let local_set = LocalSet::new();
+        // H2 upgrades arrive from hyper's TokioExecutor context (outside the LocalSet).
+        // The channel re-routes them back into this shard's LocalSet for !Send session handling.
+        let (h2_tx, mut h2_rx) = mpsc::channel::<H2UpgradeMsg>(256);
         rt.block_on(local_set.run_until(async move {
-            while let Some((stream, addr)) = rx.recv().await {
-                let this = Arc::clone(&this);
-                let states = Arc::clone(&states);
-                let listener = Arc::clone(&listener);
-                tokio::task::spawn_local(async move {
-                    let stream = match listener.handshake(stream).await {
-                        Ok(channel) => {
-                            debug!("Accepted stream from {}", addr);
-                            channel
-                        }
-                        Err(err) => {
-                            error!("Error while handshaking stream: {:?}", err);
-                            return;
-                        }
-                    };
-                    let _ = TOOLBOX
-                        .scope(
-                            this.toolbox.clone(),
-                            this.handle_ws_handshake_and_connection(addr, states, stream),
-                        )
-                        .await;
-                });
+            loop {
+                tokio::select! {
+                    msg = rx.recv() => {
+                        let Some((stream, addr)) = msg else { break };
+                        let this = Arc::clone(&this);
+                        let states = Arc::clone(&states);
+                        let listener = Arc::clone(&listener);
+                        let h2_tx = h2_tx.clone();
+                        tokio::task::spawn_local(async move {
+                            let stream = match listener.handshake(stream).await {
+                                Ok(channel) => {
+                                    debug!("Accepted stream from {}", addr);
+                                    channel
+                                }
+                                Err(err) => {
+                                    error!("Error while handshaking stream: {:?}", err);
+                                    return;
+                                }
+                            };
+                            let _ = TOOLBOX
+                                .scope(
+                                    this.toolbox.clone(),
+                                    this.handle_ws_handshake_and_connection(addr, states, stream, h2_tx),
+                                )
+                                .await;
+                        });
+                    }
+                    msg = h2_rx.recv() => {
+                        let Some(H2UpgradeMsg { on_upgrade, toolbox, server, addr, states, protocol }) = msg else { continue };
+                        tokio::task::spawn_local(async move {
+                            match on_upgrade.await {
+                                Ok(upgraded) => {
+                                    debug!(?addr, "H2: upgrade resolved, starting WebSocket session");
+                                    let ws_stream = WebSocketStream::from_raw_socket(
+                                        TokioIo::new(upgraded),
+                                        Role::Server,
+                                        None,
+                                    ).await;
+                                    let _ = TOOLBOX
+                                        .scope(
+                                            toolbox,
+                                            server.post_upgrade_connection(addr, states, ws_stream, protocol),
+                                        )
+                                        .await;
+                                }
+                                Err(e) => error!(?addr, "H2 upgrade error: {e}"),
+                            }
+                        });
+                    }
+                }
             }
         }));
     }

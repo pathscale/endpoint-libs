@@ -28,8 +28,6 @@ use crate::libs::ws::WsLogResponse;
 use crate::libs::ws::WsRequestGeneric;
 use crate::libs::ws::WsResponseGeneric;
 
-use super::WsResponseValue;
-
 pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Response: WsResponse;
     const METHOD_ID: u32;
@@ -155,12 +153,17 @@ impl WsClient {
         self.stream_send(Message::Text(text.into())).await
     }
 
-    pub async fn recv_raw(&mut self) -> Result<WsResponseValue> {
+    pub async fn recv_raw(&mut self) -> Result<serde_json::Value> {
         let msg = self
             .stream_next()
             .await
             .ok_or(eyre!("Connection closed"))??;
-        let resp: WsResponseValue = serde_json::from_str(&msg.to_string())?;
+        let text = match msg {
+            Message::Text(text) => text,
+            other => bail!("Expected text message, got: {:?}", other),
+        };
+        debug!("recv raw: {}", text);
+        let resp: serde_json::Value = serde_json::from_str(&text)?;
         Ok(resp)
     }
 
@@ -279,7 +282,7 @@ impl WsClientBuilder {
                 match connect_h2(connect_addr, &self.protocol_header, &self.headers).await {
                     Ok(result) => Ok(result),
                     Err(h2_err) => {
-                        debug!("H2 connection failed ({}), falling back to HTTP/1.1", h2_err);
+                        info!("H2 connection failed ({}), falling back to HTTP/1.1", h2_err);
                         connect_h1(connect_addr, &self.protocol_header, &self.headers).await
                     }
                 }
@@ -370,21 +373,43 @@ async fn connect_h2(
 ) -> Result<(WsClient, WsConnectResponse)> {
     let ParsedUrl { tls, host, port, path } = parse_ws_url(addr)?;
 
-    let sock_addr: SocketAddr = tokio::net::lookup_host(format!("{}:{}", host, port))
+    debug!(host, port, path, tls, "H2: resolving host");
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
         .await
         .context("DNS resolution failed")?
-        .next()
-        .ok_or_else(|| eyre!("No addresses returned for {}:{}", host, port))?;
+        .collect();
 
-    let tcp = TcpStream::connect(sock_addr)
-        .await
-        .context("TCP connect failed")?;
+    if addrs.is_empty() {
+        return Err(eyre!("No addresses returned for {}:{}", host, port));
+    }
+    debug!(?addrs, "H2: resolved addresses");
+
+    let mut tcp = None;
+    let mut last_err = None;
+    for addr in &addrs {
+        debug!(%addr, "H2: attempting TCP connect");
+        match TcpStream::connect(addr).await {
+            Ok(stream) => {
+                debug!(%addr, "H2: TCP connected");
+                tcp = Some(stream);
+                break;
+            }
+            Err(e) => {
+                debug!(%addr, err=%e, "H2: TCP connect failed, trying next address");
+                last_err = Some(e);
+            }
+        }
+    }
+    let tcp = tcp.ok_or_else(|| eyre!("TCP connect failed for all addresses {:?}: {}", addrs, last_err.unwrap()))?;
     tcp.set_nodelay(true)?;
 
     if tls {
+        debug!(host, "H2: starting TLS handshake");
         let tls_stream = make_tls_stream(tcp, &host).await?;
+        debug!(host, "H2: TLS handshake complete, starting H2 upgrade");
         h2_upgrade(TokioIo::new(tls_stream), &host, &path, tls, protocol_header, headers).await
     } else {
+        debug!(host, "H2: plain TCP, starting H2 upgrade (h2c)");
         h2_upgrade(TokioIo::new(tcp), &host, &path, tls, protocol_header, headers).await
     }
 }
@@ -404,6 +429,7 @@ where
         .handshake(io)
         .await
         .context("HTTP/2 handshake failed")?;
+    debug!(host, "H2: HTTP/2 connection handshake complete");
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             debug!("H2 connection driver exited: {}", e);
@@ -411,9 +437,11 @@ where
     });
 
     let scheme = if tls { "https" } else { "http" };
+    let uri = format!("{}://{}{}", scheme, host, path);
+    debug!(uri, protocol_header, "H2: sending CONNECT upgrade request");
     let mut builder = hyper::Request::builder()
         .method(hyper::Method::CONNECT)
-        .uri(format!("{}://{}{}", scheme, host, path))
+        .uri(&uri)
         .header("sec-websocket-version", "13");
     if !protocol_header.is_empty() {
         builder = builder.header("sec-websocket-protocol", protocol_header);
@@ -430,14 +458,12 @@ where
         .extensions_mut()
         .insert(hyper::ext::Protocol::from_static("websocket"));
 
-    // Capture the upgrade future BEFORE sending (stores the oneshot sender in request extensions)
-    let on_upgrade = hyper::upgrade::on(&mut request);
-
-    let response = sender
+    let mut response = sender
         .send_request(request)
         .await
         .context("Failed to send H2 upgrade request")?;
 
+    debug!(status=%response.status(), "H2: received upgrade response");
     ensure!(
         response.status() == StatusCode::OK,
         "H2 WebSocket upgrade rejected: {}",
@@ -453,7 +479,10 @@ where
             .collect(),
     };
 
-    let upgraded = on_upgrade.await.context("H2 upgrade failed")?;
+    // For H2 CONNECT the tunnel is the response stream itself — upgrade::on must be
+    // called on the response (not the request) to obtain the bidirectional tunnel.
+    let upgraded = hyper::upgrade::on(&mut response).await.context("H2 upgrade failed")?;
+    debug!(host, "H2: upgrade completed, WebSocket stream ready");
     let ws =
         WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
 

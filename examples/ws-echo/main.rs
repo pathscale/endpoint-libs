@@ -3,7 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use endpoint_libs::libs::error_code::ErrorCode;
 use endpoint_libs::libs::handler::RequestHandler;
-use endpoint_libs::libs::log::{LogLevel, LoggingConfig, setup_logging};
+use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
+#[cfg(feature = "error_aggregation")]
+use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
 use endpoint_libs::libs::toolbox::{ArcToolbox, RequestContext};
 use endpoint_libs::libs::ws::{
     AuthController, WsConnection, WsRequest, WsResponse, WsServerConfig, WebsocketServer,
@@ -184,8 +186,16 @@ impl AuthController for AllowAllAuthController {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _log = setup_logging(LoggingConfig {
-        level: LogLevel::Info,
+        level: LogLevel::Debug,
+        otel_config: OtelConfig::default(),
         file_config: None,
+        #[cfg(feature = "error_aggregation")]
+        error_aggregation: ErrorAggregationConfig {
+            limit: 100,
+            normalize: true,
+        },
+        #[cfg(feature = "log_throttling")]
+        throttling_config: None,
     })?;
 
     tracing::info!("Logging initialised at INFO level");

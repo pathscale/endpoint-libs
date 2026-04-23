@@ -37,12 +37,12 @@ The optional fields `appPubId` and `token` can also be included:
 {"method": 211, "seq": 3, "params": {"userPubId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "username": "alice", "appPubId": "deadbeef-0000-0000-0000-000000000001", "token": "my-token"}}
 ```
 
-## Run locally (no Cloudflare)
+## Run locally
 
 From the repo root:
 
 ```sh
-cargo run --manifest-path examples/ws-echo/Cargo.toml
+cargo run --example ws_echo_server --features ws
 ```
 
 Test with `websocat`:

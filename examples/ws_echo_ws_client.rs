@@ -6,7 +6,13 @@
 
 use std::io::{self, BufRead};
 
+#[cfg(feature = "error_aggregation")]
+use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
 use endpoint_libs::libs::ws::WsClient;
+use endpoint_libs::libs::{
+    log::{LogLevel, LoggingConfig, OtelConfig, setup_logging},
+    ws::WsClientBuilder,
+};
 use rustls::crypto::ring;
 use serde::Serialize;
 
@@ -19,6 +25,19 @@ struct EchoRequest<'a> {
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    let _log = setup_logging(LoggingConfig {
+        level: LogLevel::Debug,
+        otel_config: OtelConfig::default(),
+        file_config: None,
+        #[cfg(feature = "error_aggregation")]
+        error_aggregation: ErrorAggregationConfig {
+            limit: 100,
+            normalize: true,
+        },
+        #[cfg(feature = "log_throttling")]
+        throttling_config: None,
+    })?;
+
     ring::default_provider()
         .install_default()
         .expect("Could not install default crypto provider");
@@ -27,16 +46,22 @@ async fn main() -> eyre::Result<()> {
         .nth(1)
         .expect("Usage: ws_echo_ws_client <server_url>");
 
-    eprintln!("Connecting to {server} via WsClient...");
-    let (mut client, _) = WsClient::new(&server, "", None).await?;
-    eprintln!("Connected. Type a message and press Enter.");
+    tracing::info!("Connecting to {server} via WsClient...");
+    let (mut client, _) = WsClientBuilder::new()
+        .mode(endpoint_libs::libs::ws::WsVersionMode::Auto)
+        .build(&server)
+        .await?;
+    // let (mut client, _) = WsClient::new(&server, "", None).await?;
+    tracing::info!("Connected. Type a message and press Enter.");
 
     for line in io::stdin().lock().lines() {
         let message = line?;
         if message.is_empty() {
             continue;
         }
-        client.send_req(METHOD_ECHO, &EchoRequest { message: &message }).await?;
+        client
+            .send_req(METHOD_ECHO, &EchoRequest { message: &message })
+            .await?;
 
         let raw = client.recv_raw().await?;
         println!("{}", serde_json::to_string(&raw)?);
