@@ -343,28 +343,23 @@ impl WebsocketServer {
         let num_shards = shard_count();
         info!("Starting {} WebSocket shards", num_shards);
 
-        let available_cores = if this.config.core_affinity {
-            let mut cores = vec![];
-            match get_available_cores() {
-                Ok(c) if !c.is_empty() => {
-                    info!(
+        let mut cores = vec![];
+        match get_available_cores() {
+            Ok(c) if !c.is_empty() => {
+                info!(
                         core_count = c.len(),
                         "Core affinity enabled, {} cores available",
                         c.len()
                     );
-                    cores.extend(c);
-                }
-                Ok(_) => {
-                    warn!("Core affinity enabled but no cores reported; affinity disabled");
-                }
-                Err(e) => {
-                    warn!("Core affinity enabled but get_core_ids() returned {}; affinity disabled", e);
-                }
+                cores.extend(c);
             }
-            cores
-        } else {
-            vec![]
-        };
+            Ok(_) => {
+                warn!("Core affinity enabled but no cores reported; affinity disabled");
+            }
+            Err(e) => {
+                warn!("Core affinity enabled but get_core_ids() returned {}; affinity disabled", e);
+            }
+        }
 
         let mut shard_senders = Vec::with_capacity(num_shards);
         for shard_index in 0..num_shards {
@@ -372,7 +367,7 @@ impl WebsocketServer {
             let this = Arc::clone(&this);
             let states = Arc::clone(&states);
             let listener = Arc::clone(&listener);
-            let cores_for_thread = available_cores.clone();
+            let cores_for_thread = cores.clone();
             std::thread::spawn(move || {
                 if !set_shard_affinity(shard_index, &cores_for_thread) {
                     debug!(shard_index, "Shard running without CPU affinity");
@@ -621,8 +616,4 @@ pub struct WsServerConfig {
     pub header_only: bool,
     #[serde(skip)]
     pub allow_cors_urls: Arc<Option<Vec<String>>>,
-    /// Enable CPU core affinity for shard threads.
-    /// When true, each shard thread is pinned to a specific CPU core.
-    #[serde(default)]
-    pub core_affinity: bool,
 }
