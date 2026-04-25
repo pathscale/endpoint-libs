@@ -3,21 +3,21 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cert_provider::CertProvider;
-use cert_provider::provider::dns01::{BunnyDns, DnsAcmeProvider};
 #[cfg(feature = "s3-sync")]
 use cert_provider::S3CertProvider;
+use cert_provider::provider::dns01::{BunnyDns, DnsAcmeProvider};
 #[cfg(feature = "s3-sync")]
 use cert_provider::s3_sync::{S3CertSync, S3Config};
 use endpoint_libs::libs::error_code::ErrorCode;
 use endpoint_libs::libs::handler::RequestHandler;
-use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
 #[cfg(feature = "error_aggregation")]
 use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
+use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
 use endpoint_libs::libs::toolbox::{ArcToolbox, RequestContext};
-use endpoint_libs::libs::ws::{
-    AuthController, WsConnection, WsRequest, WsResponse, WsServerConfig, WebsocketServer,
-};
 use endpoint_libs::libs::ws::toolbox::CustomError;
+use endpoint_libs::libs::ws::{
+    AuthController, WebsocketServer, WsConnection, WsRequest, WsResponse, WsServerConfig,
+};
 use eyre::Result;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
@@ -226,24 +226,19 @@ async fn main() -> Result<()> {
     // Remove .production() during local testing to use the LE staging environment.
     // Enable the `s3-sync` feature in Cargo.toml to sync certs to S3/R2.
 
-    let acme_email = std::env::var("ACME_EMAIL")
-        .unwrap_or_else(|_| "admin@example.com".to_string());
-    let cert_dir = PathBuf::from(
-        std::env::var("CERT_DIR").unwrap_or_else(|_| "/certs".to_string()),
-    );
-    let domains = vec![
-        std::env::var("DOMAIN").unwrap_or_else(|_| "ws-echo.example.com".to_string()),
-    ];
-    let bunny_api_key = std::env::var("BUNNY_API_KEY")
-        .expect("BUNNY_API_KEY must be set");
+    let acme_email =
+        std::env::var("ACME_EMAIL").unwrap_or_else(|_| "admin@example.com".to_string());
+    let cert_dir =
+        PathBuf::from(std::env::var("CERT_DIR").unwrap_or_else(|_| "/certs".to_string()));
+    let domains =
+        vec![std::env::var("DOMAIN").unwrap_or_else(|_| "ws-echo.example.com".to_string())];
+    let bunny_api_key = std::env::var("BUNNY_API_KEY").expect("BUNNY_API_KEY must be set");
 
     let dns = BunnyDns::new(bunny_api_key);
 
     #[cfg(not(feature = "s3-sync"))]
-    let mut provider: Box<dyn CertProvider> = Box::new(
-        DnsAcmeProvider::new(acme_email, dns)
-            .production()
-    );
+    let mut provider: Box<dyn CertProvider> =
+        Box::new(DnsAcmeProvider::new(acme_email, dns).production());
 
     #[cfg(feature = "s3-sync")]
     let mut provider: Box<dyn CertProvider> = {
@@ -273,7 +268,7 @@ async fn main() -> Result<()> {
     // ── WebSocket server ──────────────────────────────────────────────────────
 
     let cert_path = cert_dir.join("fullchain.pem");
-    let key_path  = cert_dir.join("privkey.pem");
+    let key_path = cert_dir.join("privkey.pem");
 
     let config = WsServerConfig {
         name: "ws-echo".to_string(),

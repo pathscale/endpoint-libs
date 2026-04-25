@@ -162,7 +162,8 @@ impl Toolbox {
             WsResponseValue::Immediate(WsSuccessResponse {
                 method: ctx.method,
                 seq: ctx.seq,
-                params: serde_json::value::to_raw_value(&resp).expect("Failed to serialize response"),
+                params: serde_json::value::to_raw_value(&resp)
+                    .expect("Failed to serialize response"),
             }),
         );
     }

@@ -84,7 +84,10 @@ impl WsClient {
         connect_addr: &str,
         protocol_header: &str,
         headers: Option<Vec<(&'static str, &'static str)>>,
-    ) -> Result<(Self, tokio_tungstenite::tungstenite::http::Response<std::option::Option<Vec<u8>>>)> {
+    ) -> Result<(
+        Self,
+        tokio_tungstenite::tungstenite::http::Response<std::option::Option<Vec<u8>>>,
+    )> {
         let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
         if !protocol_header.is_empty() {
             req.headers_mut().insert(
@@ -103,10 +106,13 @@ impl WsClient {
         let (ws_stream, response) = connect_async(req)
             .await
             .context("Failed to connect to endpoint")?;
-        Ok((Self {
-            stream: WsStream::H1(ws_stream),
-            seq: 0,
-        }, response))
+        Ok((
+            Self {
+                stream: WsStream::H1(ws_stream),
+                seq: 0,
+            },
+            response,
+        ))
     }
 
     // --- Private stream helpers -------------------------------------------
@@ -119,7 +125,9 @@ impl WsClient {
         Ok(())
     }
 
-    async fn stream_next(&mut self) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+    async fn stream_next(
+        &mut self,
+    ) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
         match &mut self.stream {
             WsStream::H1(s) => s.next().await,
             WsStream::H2(s) => s.next().await,
@@ -282,7 +290,10 @@ impl WsClientBuilder {
                 match connect_h2(connect_addr, &self.protocol_header, &self.headers).await {
                     Ok(result) => Ok(result),
                     Err(h2_err) => {
-                        info!("H2 connection failed ({}), falling back to HTTP/1.1", h2_err);
+                        info!(
+                            "H2 connection failed ({}), falling back to HTTP/1.1",
+                            h2_err
+                        );
                         connect_h1(connect_addr, &self.protocol_header, &self.headers).await
                     }
                 }
@@ -331,7 +342,12 @@ fn parse_ws_url(url: &str) -> Result<ParsedUrl> {
         None => (authority.to_owned(), if tls { 443 } else { 80 }),
     };
 
-    Ok(ParsedUrl { tls, host, port, path })
+    Ok(ParsedUrl {
+        tls,
+        host,
+        port,
+        path,
+    })
 }
 
 async fn connect_h1(
@@ -363,7 +379,13 @@ async fn connect_h1(
             .collect(),
     };
 
-    Ok((WsClient { stream: WsStream::H1(ws_stream), seq: 0 }, conn_resp))
+    Ok((
+        WsClient {
+            stream: WsStream::H1(ws_stream),
+            seq: 0,
+        },
+        conn_resp,
+    ))
 }
 
 async fn connect_h2(
@@ -371,7 +393,12 @@ async fn connect_h2(
     protocol_header: &str,
     headers: &[(&'static str, &'static str)],
 ) -> Result<(WsClient, WsConnectResponse)> {
-    let ParsedUrl { tls, host, port, path } = parse_ws_url(addr)?;
+    let ParsedUrl {
+        tls,
+        host,
+        port,
+        path,
+    } = parse_ws_url(addr)?;
 
     debug!(host, port, path, tls, "H2: resolving host");
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
@@ -400,17 +427,39 @@ async fn connect_h2(
             }
         }
     }
-    let tcp = tcp.ok_or_else(|| eyre!("TCP connect failed for all addresses {:?}: {}", addrs, last_err.unwrap()))?;
+    let tcp = tcp.ok_or_else(|| {
+        eyre!(
+            "TCP connect failed for all addresses {:?}: {}",
+            addrs,
+            last_err.unwrap()
+        )
+    })?;
     tcp.set_nodelay(true)?;
 
     if tls {
         debug!(host, "H2: starting TLS handshake");
         let tls_stream = make_tls_stream(tcp, &host).await?;
         debug!(host, "H2: TLS handshake complete, starting H2 upgrade");
-        h2_upgrade(TokioIo::new(tls_stream), &host, &path, tls, protocol_header, headers).await
+        h2_upgrade(
+            TokioIo::new(tls_stream),
+            &host,
+            &path,
+            tls,
+            protocol_header,
+            headers,
+        )
+        .await
     } else {
         debug!(host, "H2: plain TCP, starting H2 upgrade (h2c)");
-        h2_upgrade(TokioIo::new(tcp), &host, &path, tls, protocol_header, headers).await
+        h2_upgrade(
+            TokioIo::new(tcp),
+            &host,
+            &path,
+            tls,
+            protocol_header,
+            headers,
+        )
+        .await
     }
 }
 
@@ -481,12 +530,19 @@ where
 
     // For H2 CONNECT the tunnel is the response stream itself — upgrade::on must be
     // called on the response (not the request) to obtain the bidirectional tunnel.
-    let upgraded = hyper::upgrade::on(&mut response).await.context("H2 upgrade failed")?;
+    let upgraded = hyper::upgrade::on(&mut response)
+        .await
+        .context("H2 upgrade failed")?;
     debug!(host, "H2: upgrade completed, WebSocket stream ready");
-    let ws =
-        WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
+    let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
 
-    Ok((WsClient { stream: WsStream::H2(ws), seq: 0 }, conn_resp))
+    Ok((
+        WsClient {
+            stream: WsStream::H2(ws),
+            seq: 0,
+        },
+        conn_resp,
+    ))
 }
 
 async fn make_tls_stream(
@@ -502,8 +558,7 @@ async fn make_tls_stream(
     tls_config.alpn_protocols = vec![b"h2".to_vec()];
 
     let connector = TlsConnector::from(Arc::new(tls_config));
-    let server_name =
-        ServerName::try_from(host.to_owned()).context("Invalid TLS server name")?;
+    let server_name = ServerName::try_from(host.to_owned()).context("Invalid TLS server name")?;
     connector
         .connect(server_name, tcp)
         .await

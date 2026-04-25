@@ -5,14 +5,14 @@
 
 use std::io::{self, BufRead};
 
-use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
 #[cfg(feature = "error_aggregation")]
 use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
+use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
 use futures::{SinkExt, StreamExt};
 use rustls::crypto::ring;
+use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::connect_async;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -34,7 +34,9 @@ async fn main() -> eyre::Result<()> {
         .expect("Could not install default crypto provider");
 
     let mut args = std::env::args().skip(1);
-    let server = args.next().expect("Usage: ws_echo_rustls <server_url> [protocol]");
+    let server = args
+        .next()
+        .expect("Usage: ws_echo_rustls <server_url> [protocol]");
     let protocol = args.next().unwrap_or_default();
 
     let mut req = server.as_str().into_client_request()?;

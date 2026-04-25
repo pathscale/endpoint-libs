@@ -91,7 +91,7 @@ pub struct LogThrottlingConfig {
 pub struct LogSetupReturn {
     pub reload_handle: LogReloadHandle,
     pub log_guards: (WorkerGuard, Option<WorkerGuard>),
-    /// OpenTelemetry guards (tracer + logger providers). Must be kept alive to ensure 
+    /// OpenTelemetry guards (tracer + logger providers). Must be kept alive to ensure
     /// pending traces and logs are flushed to the OTLP collector on shutdown.
     pub otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
@@ -212,7 +212,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let otel_tracer = otel_result.tracer;
 
     // --- Subscriber Composition ---
-    
+
     // Start with Registry and Global Filter
     let subscriber = registry().with(reloadable_global_filter);
 
@@ -231,10 +231,13 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let subscriber = subscriber.with(sinks);
 
     // Add OTel Traces and Logs layers if enabled
-    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = match (otel_tracer, &otel_guards) {
+    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = match (otel_tracer, &otel_guards)
+    {
         (Some(tracer), Some(guards)) => {
             let trace_layer = OpenTelemetryLayer::new(tracer);
-            let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(&guards.logger_provider);
+            let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                &guards.logger_provider,
+            );
             Box::new(subscriber.with(trace_layer).with(log_layer))
         }
         _ => Box::new(subscriber),
@@ -558,7 +561,10 @@ mod tests {
 
         // Setup should succeed - the SDK doesn't validate connectivity at init time
         let result = setup_logging_test(config);
-        assert!(result.is_ok(), "Setup should succeed even with unreachable OTel endpoint");
+        assert!(
+            result.is_ok(),
+            "Setup should succeed even with unreachable OTel endpoint"
+        );
 
         let guard = result.unwrap();
         // Guards ARE present because the SDK creates them synchronously.
@@ -646,7 +652,10 @@ mod tests {
 
         // Reload to DEBUG
         let result = log_setup.reload_handle.set_log_level(LogLevel::Debug);
-        assert!(result.is_ok(), "Log level reload should succeed with OTel enabled");
+        assert!(
+            result.is_ok(),
+            "Log level reload should succeed with OTel enabled"
+        );
 
         // Log at DEBUG level (should now appear)
         info!("info_after_reload");
@@ -660,9 +669,15 @@ mod tests {
         let log_contents = fs::read_to_string(log_files[0].as_ref().unwrap().path()).unwrap();
 
         assert!(log_contents.contains("info_before_reload"));
-        assert!(!log_contents.contains("debug_before_reload"), "Debug should not appear before reload");
+        assert!(
+            !log_contents.contains("debug_before_reload"),
+            "Debug should not appear before reload"
+        );
         assert!(log_contents.contains("info_after_reload"));
-        assert!(log_contents.contains("debug_after_reload"), "Debug should appear after reload");
+        assert!(
+            log_contents.contains("debug_after_reload"),
+            "Debug should appear after reload"
+        );
     }
 
     /// Test that OTel config fields are correctly structured
@@ -684,7 +699,10 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.service_name, Some("test-service".to_string()));
         assert_eq!(config.endpoint, Some("http://collector:4317".to_string()));
-        assert_eq!(config.headers.get("x-api-key"), Some(&"secret-key".to_string()));
+        assert_eq!(
+            config.headers.get("x-api-key"),
+            Some(&"secret-key".to_string())
+        );
 
         // Default config should be disabled
         let default_config = OtelConfig::default();
@@ -714,7 +732,10 @@ mod tests {
 
         // Setup should succeed (exporter will use SDK defaults)
         let result = setup_logging_test(config);
-        assert!(result.is_ok(), "Setup should succeed with OTel enabled but no endpoint");
+        assert!(
+            result.is_ok(),
+            "Setup should succeed with OTel enabled but no endpoint"
+        );
 
         let guard = result.unwrap();
         // Guards may or may not be present depending on whether SDK defaults work
