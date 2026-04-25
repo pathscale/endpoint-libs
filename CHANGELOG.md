@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.7.0] - 2026-04-25
+
+### Bug Fixes
+
+- Fix panic during H2 handler init
+
+### Features
+
+- Make h2 + TLSv1.3 the default, with anything lower explicit opt-in
+
 ## [1.6.0] - 2026-04-21
 
 ### Miscellaneous Tasks
