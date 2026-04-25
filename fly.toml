@@ -1,0 +1,54 @@
+# fly.toml — ws-echo WebSocket server with cert-provider DNS-01
+#
+# DNS-01 ACME validation via bunny.net DNS API — no inbound ACME port needed.
+# The WebSocket server terminates TLS directly using cert files from /certs.
+#
+# Before deploying:
+#   fly ips allocate-v4          # dedicated IPv4 required for Let's Encrypt
+#   fly secrets set BUNNY_API_KEY=your-bunny-net-api-key
+#   # Optional: S3/R2 cert sync (enables the s3-sync feature)
+#   fly secrets set CERT_S3_BUCKET=my-bucket
+#   fly secrets set CERT_S3_ENDPOINT=https://account.r2.cloudflarestorage.com
+#   fly secrets set CERT_S3_ACCESS_KEY=your-access-key
+#   fly secrets set CERT_S3_SECRET_KEY=your-secret-key
+#   fly secrets set CERT_S3_PREFIX=ws-echo
+#   fly secrets set CERT_S3_REGION=
+#   fly volumes create certs --size 1 --region jnb
+#
+# Edit ACME_EMAIL and DOMAIN below for your domain before deploying.
+
+app            = 'endpoint-libs'
+primary_region = 'jnb'
+
+[build]
+  dockerfile = "Dockerfile.ws-echo"
+
+[env]
+  CERT_DIR = "/certs"
+  ACME_EMAIL = "sylvanbloch@gmail.com"
+  DOMAIN = "ws-echo.sylvan-b.com"
+  # BUNNY_API_KEY is set via `fly secrets set`
+  # CERT_S3_* vars are set via `fly secrets set`
+
+[mounts]
+  source      = "certs"
+  destination = "/certs"
+
+[[vm]]
+  memory   = '1gb'
+  cpu_kind = 'shared'
+  cpus     = 1
+
+# ── WebSocket server (with TLS from /certs/fullchain.pem) ──────────────────
+# handlers = [] means raw TCP — Fly passes the TLS stream through to the app.
+# min_machines_running = 1 keeps the cert renewal loop alive between requests.
+[[services]]
+  internal_port        = 443
+  protocol             = "tcp"
+  auto_stop_machines   = "stop"
+  auto_start_machines  = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port     = 443
+    handlers = []

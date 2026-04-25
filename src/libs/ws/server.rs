@@ -203,10 +203,10 @@ impl WebsocketServer {
                 let protocol_upgrade = protocol.clone();
 
                 if is_http2 {
-                    // H2 stream service calls are dispatched by hyper via TokioExecutor
-                    // (tokio::spawn), which breaks out of the shard's LocalSet. Route the
-                    // upgrade back into the shard's LocalSet via the H2 channel so the
-                    // !Send session future runs in the correct context.
+                    // Both H1 and H2 stream service calls are dispatched by hyper via
+                    // TokioExecutor (tokio::spawn), which breaks out of the shard's
+                    // LocalSet. Route back via the channel so the !Send session future
+                    // runs in the correct context.
                     if h2_tx.send(H2UpgradeMsg {
                         on_upgrade,
                         toolbox,
@@ -218,31 +218,21 @@ impl WebsocketServer {
                         error!(?addr, "H2: upgrade channel closed, dropping connection");
                     }
                 } else {
-                    tokio::task::spawn_local(async move {
-                        match on_upgrade.await {
-                            Ok(upgraded) => {
-                                debug!(?addr, "WS upgrade succeeded, building WebSocket stream");
-                                let ws_stream = WebSocketStream::from_raw_socket(
-                                    TokioIo::new(upgraded),
-                                    Role::Server,
-                                    None,
-                                )
-                                .await;
-                                let _ = TOOLBOX
-                                    .scope(
-                                        toolbox,
-                                        this_upgrade.post_upgrade_connection(
-                                            addr,
-                                            states,
-                                            ws_stream,
-                                            protocol_upgrade,
-                                        ),
-                                    )
-                                    .await;
-                            }
-                            Err(e) => error!(?addr, "WS upgrade error: {e}"),
-                        }
-                    });
+                    // H1 stream service calls are also dispatched by hyper via
+                    // TokioExecutor (tokio::spawn), which breaks out of the
+                    // shard's LocalSet. Route the upgrade back into the shard
+                    // via the same H2 channel so the !Send session future runs
+                    // in the correct context.
+                    if h2_tx.send(H2UpgradeMsg {
+                        on_upgrade,
+                        toolbox,
+                        server: this_upgrade,
+                        addr,
+                        states,
+                        protocol: protocol_upgrade,
+                    }).await.is_err() {
+                        error!(?addr, "H1: upgrade channel closed, dropping connection");
+                    }
                 }
 
                 // HTTP/2: respond 200 OK (RFC 9113 §8.5); no 101 or Sec-WebSocket-Accept.

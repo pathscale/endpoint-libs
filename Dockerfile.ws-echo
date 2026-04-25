@@ -1,20 +1,16 @@
-FROM rust:1.85 AS builder
+FROM rust:1.95 AS builder
 WORKDIR /app
 
-# Cache dependency compilation with stub sources
+# Cache dependency compilation
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY examples/ws-echo/Cargo.toml examples/ws-echo/Cargo.toml
-RUN mkdir -p examples/ws-echo/src && \
-    echo 'fn main() {}' > examples/ws-echo/src/main.rs && \
-    cargo build --release --manifest-path examples/ws-echo/Cargo.toml --target-dir /app/target
+RUN cargo build --release --example ws_echo_server --features ws,s3-sync 2>&1 | tail -1
 
-# Build the real binary
-COPY examples/ws-echo/src ./examples/ws-echo/src
-RUN touch examples/ws-echo/src/main.rs && \
-    cargo build --release --manifest-path examples/ws-echo/Cargo.toml --target-dir /app/target
+# Build the ws_echo_server example
+COPY examples ./examples
+RUN cargo build --release --example ws_echo_server --features ws,s3-sync
 
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/ws-echo /app/ws-echo
-EXPOSE 8080
-CMD ["/app/ws-echo"]
+FROM debian:trixie-slim
+COPY --from=builder /app/target/release/examples/ws_echo_server /app/ws_echo_server
+EXPOSE 443
+CMD ["/app/ws_echo_server"]

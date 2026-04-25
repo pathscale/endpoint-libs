@@ -1,0 +1,14 @@
+services:
+  ws-echo:
+    build:
+      dockerfile: Dockerfile.ws-echo
+    ports:
+      - "8080:8080"
+    volumes:
+      - certs:/certs
+    env_file:
+      - .env
+    restart: unless-stopped
+
+volumes:
+  certs:

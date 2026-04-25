@@ -71,7 +71,7 @@ impl<T: ConnectionListener> TlsListener<T> {
 
         let key = load_private_key(&priv_cert)?;
 
-        let protocol_versions: &[&rustls::ProtocolVersion] = if enable_tls12 {
+        let protocol_versions: &[&rustls::SupportedProtocolVersion] = if enable_tls12 {
             &[&rustls::version::TLS13, &rustls::version::TLS12]
         } else {
             &[&rustls::version::TLS13]
