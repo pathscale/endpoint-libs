@@ -144,6 +144,10 @@ impl WebsocketServer {
                     // HTTP/1.1: GET + Upgrade: websocket + Sec-WebSocket-Key
                     // HTTP/2:   CONNECT + :protocol = websocket (RFC 8441 / RFC 9113 §8.5)
                     let derived = if is_http2 {
+                        if req.method() == Method::GET {
+                            let resp = Response::new(Empty::<Bytes>::new());
+                            return Ok::<_, Infallible>(resp);
+                        }
                         if req.method() != Method::CONNECT {
                             debug!(?addr, method=%req.method(), "H2: rejected — expected CONNECT method");
                             let mut resp = Response::new(Empty::<Bytes>::new());
