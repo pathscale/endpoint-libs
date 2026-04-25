@@ -55,7 +55,13 @@ pub struct TlsListener<T> {
     acceptor: TlsAcceptor,
 }
 impl<T: ConnectionListener> TlsListener<T> {
-    pub async fn bind(under: T, pub_certs: Vec<PathBuf>, priv_cert: PathBuf) -> Result<Self> {
+    pub async fn bind(
+        under: T,
+        pub_certs: Vec<PathBuf>,
+        priv_cert: PathBuf,
+        enable_http1: bool,
+        enable_tls12: bool,
+    ) -> Result<Self> {
         let certs = load_certs(&pub_certs)?;
         ensure!(
             !certs.is_empty(),
@@ -65,12 +71,24 @@ impl<T: ConnectionListener> TlsListener<T> {
 
         let key = load_private_key(&priv_cert)?;
 
+        let protocol_versions: &[&rustls::ProtocolVersion] = if enable_tls12 {
+            &[&rustls::version::TLS13, &rustls::version::TLS12]
+        } else {
+            &[&rustls::version::TLS13]
+        };
+
+        let alpn_protocols = if enable_http1 {
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        } else {
+            vec![b"h2".to_vec()]
+        };
+
         let tls_cfg = {
             let mut cfg =
-                rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                rustls::ServerConfig::builder_with_protocol_versions(protocol_versions)
                     .with_no_client_auth()
                     .with_single_cert(certs, key)?;
-            cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            cfg.alpn_protocols = alpn_protocols;
             Arc::new(cfg)
         };
         let acceptor = TlsAcceptor::from(tls_cfg);

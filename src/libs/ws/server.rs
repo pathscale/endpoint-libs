@@ -378,6 +378,8 @@ impl WebsocketServer {
                 listener,
                 self.config.pub_certs.clone().unwrap(),
                 self.config.priv_key.clone().unwrap(),
+                self.config.enable_http1,
+                self.config.enable_tls12,
             )
             .await?;
             self.listen_impl(Arc::new(listener)).await
@@ -625,6 +627,10 @@ pub struct WsServerConfig {
     pub insecure: bool,
     #[serde(default)]
     pub debug: bool,
+    #[serde(default)]
+    pub enable_http1: bool,
+    #[serde(default)]
+    pub enable_tls12: bool,
     #[serde(skip)]
     pub header_only: bool,
     #[serde(skip)]
