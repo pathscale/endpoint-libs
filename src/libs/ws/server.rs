@@ -351,13 +351,13 @@ impl WebsocketServer {
             return;
         }
 
-        debug!(
-            ip_addr=%raw_ctx.ip_addr,
-            user_id=raw_ctx.user_id,
-            conn_id=raw_ctx.connection_id,
-            roles=?raw_ctx.roles,
-            "WS connection request valid, proceeding to initiate the session"
-        );
+        // debug!(
+        //     ip_addr=%raw_ctx.ip_addr,
+        //     user_id=raw_ctx.user_id,
+        //     conn_id=raw_ctx.connection_id,
+        //     roles=?raw_ctx.roles,
+        //     "WS connection request valid, proceeding to initiate the session"
+        // );
         self.handle_session_connection(conn, states, stream, rx)
             .await;
     }
