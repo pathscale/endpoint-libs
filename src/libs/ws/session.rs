@@ -79,7 +79,7 @@ impl<
                 return Ok(true);
             }
             Message::Close(_) => {
-                info!(?addr, "Receive side terminated");
+                debug!(?addr, "Receive side terminated");
                 return Ok(false);
             }
             _ => {
@@ -152,7 +152,7 @@ impl<
                             break;
                         }
                     } else {
-                        info!(?conn_id, "Receive side terminated");
+                        debug!(?conn_id, "Receive side terminated");
                         break;
                     }
                 }
@@ -164,7 +164,7 @@ impl<
                             break;
                         }
                     } else {
-                        info!(?conn_id, "Send side terminated");
+                        debug!(?conn_id, "Send side terminated");
                         break;
                     }
                 }

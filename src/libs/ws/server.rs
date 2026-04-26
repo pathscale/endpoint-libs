@@ -351,7 +351,7 @@ impl WebsocketServer {
             return;
         }
 
-        info!(
+        debug!(
             ip_addr=%raw_ctx.ip_addr,
             user_id=raw_ctx.user_id,
             conn_id=raw_ctx.connection_id,
@@ -380,7 +380,7 @@ impl WebsocketServer {
     }
 
     pub async fn listen(self) -> Result<()> {
-        info!("Listening on {}", self.config.address);
+        debug!("Listening on {}", self.config.address);
 
         // Resolve the address and get the socket address
         let addr = tokio::net::lookup_host(&self.config.address)
@@ -412,7 +412,7 @@ impl WebsocketServer {
             .set_ws_states(states.clone_states(), this.config.header_only);
 
         let num_shards = shard_count();
-        info!("Starting {} WebSocket shards", num_shards);
+        debug!("Starting {} WebSocket shards", num_shards);
 
         let mut shard_senders = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
@@ -543,7 +543,7 @@ impl WebsocketServer {
             .map(|x| x.schema.name.clone())
             .sorted()
             .collect();
-        info!(
+        debug!(
             "Dumping {} endpoint names to {}",
             available_schemas.len(),
             file

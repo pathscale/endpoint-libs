@@ -290,7 +290,7 @@ impl WsClientBuilder {
                 match connect_h2(connect_addr, &self.protocol_header, &self.headers).await {
                     Ok(result) => Ok(result),
                     Err(h2_err) => {
-                        info!(
+                        debug!(
                             "H2 connection failed ({}), falling back to HTTP/1.1",
                             h2_err
                         );

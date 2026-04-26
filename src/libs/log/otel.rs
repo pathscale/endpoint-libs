@@ -61,7 +61,7 @@ pub struct OtelGuards {
 
 impl Drop for OtelGuards {
     fn drop(&mut self) {
-        tracing::info!(target: "otel::setup", "OTel layer shutting down - flushing pending traces and logs");
+        tracing::debug!(target: "otel::setup", "OTel layer shutting down - flushing pending traces and logs");
     }
 }
 
@@ -85,7 +85,7 @@ pub fn build_otel_layer(config: &OtelConfig) -> OtelLayerResult {
 
     match build_otel_layer_inner(config) {
         Ok(result) => {
-            tracing::info!(
+            tracing::debug!(
                 target: "otel::setup",
                 service_name = result.service_name,
                 endpoint = ?config.endpoint,
