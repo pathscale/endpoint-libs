@@ -239,8 +239,20 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                     // return None if tx was dropped before conn completes, which is
                     // structurally impossible in this single-upgrade loop.
                     let UpgradeEvent { on_upgrade, protocol } = event.unwrap();
-                    debug!(ws_server = true, ?addr, "Upgrade resolved, creating WebSocket stream");
-                    let upgraded = on_upgrade.await?;
+                    debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
+                    // Keep polling the connection driver concurrently with on_upgrade
+                    // so hyper can complete the internal upgrade handshake.
+                    tokio::pin!(on_upgrade);
+                    let upgraded = loop {
+                        tokio::select! {
+                            result = &mut conn => {
+                                let _ = result.map_err(|e| eyre!(e))?;
+                            }
+                            upgraded = &mut on_upgrade => {
+                                break upgraded?;
+                            }
+                        }
+                    };
                     let ws = WebSocketStream::from_raw_socket(
                         TokioIo::new(upgraded),
                         Role::Server,
