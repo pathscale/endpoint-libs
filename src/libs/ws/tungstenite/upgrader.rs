@@ -228,62 +228,75 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
             let conn = builder.serve_connection_with_upgrades(io, service);
             tokio::pin!(conn);
 
-            // biased: rx.recv() is checked before conn so that if both are ready
-            // simultaneously (H1: service buffers the event then conn completes in the
-            // same poll cycle), the upgrade event always wins over the conn-done arm.
-            tokio::select! {
-                biased;
+            // The upgrade event is sent from inside the service_fn, which runs within
+            // conn's poll. This means rx.recv() cannot be Ready before conn is polled,
+            // so biased select cannot help — the event is buffered only after conn runs.
+            //
+            // Two cases:
+            //   rx arm: conn is still running (H2 always; H1 when network write is async).
+            //           conn_done = false → drive conn in inner loop, keep alive after.
+            //   conn arm: H1 with synchronous TLS write — conn completes in a single poll.
+            //             The service already buffered the event; retrieve with try_recv.
+            //             conn_done = true → await on_upgrade directly, skip conn.await.
+            let (event, mut conn_done) = tokio::select! {
                 event = rx.recv() => {
-                    // tx lives inside service_fn owned by conn; rx.recv() returns None
-                    // only if tx is dropped before conn completes — structurally impossible.
-                    let UpgradeEvent { on_upgrade, protocol } = event.unwrap();
-                    debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
-
-                    tokio::pin!(on_upgrade);
-                    // conn_done: H1 conn resolves Ok(()) after the 101 is sent and the
-                    // socket transitions. We must not re-poll a completed future.
-                    let mut conn_done = false;
-                    let upgraded_result = loop {
-                        tokio::select! {
-                            biased;
-                            result = &mut on_upgrade => {
-                                break result.map_err(|e| eyre!(e));
-                            }
-                            result = &mut conn, if !conn_done => {
-                                match result {
-                                    // H1: conn finishes after the 101; on_upgrade resolves
-                                    // next. Mark done and keep waiting — do not break.
-                                    Ok(()) => conn_done = true,
-                                    Err(e) => break Err(eyre!(e)),
-                                }
-                            }
-                        }
-                    };
-                    let upgraded = match upgraded_result {
-                        Ok(u) => u,
-                        Err(e) => { result_tx.send(Err(e)).ok(); return; }
-                    };
-                    let ws = WebSocketStream::from_raw_socket(
-                        TokioIo::new(upgraded),
-                        Role::Server,
-                        None,
-                    ).await;
-                    let stream: Box<dyn WsStream + 'static> = Box::new(HyperWsStream { inner: ws });
-                    result_tx.send(Ok((stream, protocol))).ok();
-                    // H2: conn drives the framing layer for the logical WS stream — dropping
-                    // it tears down the H2 connection and causes an immediate broken pipe.
-                    // H1: conn is already done; skip to avoid polling a completed future.
-                    if !conn_done {
-                        let _ = conn.await;
-                    }
+                    // tx lives inside service_fn owned by conn; None only if tx dropped
+                    // before conn completes — structurally impossible here.
+                    (event.unwrap(), false)
                 }
                 result = &mut conn => {
-                    // conn completed with no upgrade event: plain HTTP request (CORS
-                    // preflight, health check, or rejected upgrade).
-                    let e = result.map_err(|e| eyre!(e))
-                        .and(Err(eyre!("not a websocket upgrade: connection closed without upgrade event")));
-                    result_tx.send(e).ok();
+                    match rx.try_recv() {
+                        Ok(event) => (event, true),
+                        Err(_) => {
+                            // No event buffered: truly a non-WS request (CORS preflight,
+                            // health check, rejected upgrade).
+                            let e = result.map_err(|e| eyre!(e))
+                                .and(Err(eyre!("not a websocket upgrade: connection closed without upgrade event")));
+                            result_tx.send(e).ok();
+                            return;
+                        }
+                    }
                 }
+            };
+
+            let UpgradeEvent { on_upgrade, protocol } = event;
+            debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
+            tokio::pin!(on_upgrade);
+
+            // Resolve on_upgrade. For H1 sync path (conn_done=true), hyper has already
+            // resolved on_upgrade internally before conn returned Ready — await directly.
+            // For H2 / slow H1 (conn_done=false), drive conn concurrently so hyper can
+            // complete the upgrade handshake; track if conn finishes mid-loop.
+            let upgraded_result = if conn_done {
+                on_upgrade.await.map_err(|e| eyre!(e))
+            } else {
+                loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut on_upgrade => break result.map_err(|e| eyre!(e)),
+                        result = &mut conn, if !conn_done => match result {
+                            Ok(()) => conn_done = true,
+                            Err(e) => break Err(eyre!(e)),
+                        }
+                    }
+                }
+            };
+
+            let upgraded = match upgraded_result {
+                Ok(u) => u,
+                Err(e) => { result_tx.send(Err(e)).ok(); return; }
+            };
+            let ws = WebSocketStream::from_raw_socket(
+                TokioIo::new(upgraded),
+                Role::Server,
+                None,
+            ).await;
+            let stream: Box<dyn WsStream + 'static> = Box::new(HyperWsStream { inner: ws });
+            result_tx.send(Ok((stream, protocol))).ok();
+            // H2: conn drives H2 framing for the logical WS stream — must keep running.
+            // H1: conn is already done (conn_done=true); do not re-poll a completed future.
+            if !conn_done {
+                let _ = conn.await;
             }
         });
 
