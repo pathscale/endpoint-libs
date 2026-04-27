@@ -228,58 +228,61 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
             let conn = builder.serve_connection_with_upgrades(io, service);
             tokio::pin!(conn);
 
-            // Non-upgrade HTTP requests (CORS preflights, health checks) cause conn to
-            // complete cleanly without sending an upgrade event — detected via the outer arm.
-            loop {
-                tokio::select! {
-                    result = &mut conn => {
-                        let e = result.map_err(|e| eyre!(e))
-                            .and(Err(eyre!("not a websocket upgrade: connection closed without upgrade event")));
-                        result_tx.send(e).ok();
-                        return;
-                    }
-                    event = rx.recv() => {
-                        // tx lives inside service_fn, which is owned by conn. rx can only
-                        // return None if tx was dropped before conn completes, which is
-                        // structurally impossible in this single-upgrade loop.
-                        let UpgradeEvent { on_upgrade, protocol } = event.unwrap();
-                        debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
-                        // Keep polling conn concurrently with on_upgrade so hyper can
-                        // complete the internal H2 upgrade handshake.
-                        tokio::pin!(on_upgrade);
-                        let upgraded_result = loop {
-                            tokio::select! {
-                                result = &mut conn => {
-                                    // conn closed before upgrade finished
-                                    break result.map_err(|e| eyre!(e))
-                                        .and(Err(eyre!("conn completed before upgrade finished")));
-                                }
-                                result = &mut on_upgrade => {
-                                    break result.map_err(|e| eyre!(e));
+            // biased: rx.recv() is checked before conn so that if both are ready
+            // simultaneously (H1: service buffers the event then conn completes in the
+            // same poll cycle), the upgrade event always wins over the conn-done arm.
+            tokio::select! {
+                biased;
+                event = rx.recv() => {
+                    // tx lives inside service_fn owned by conn; rx.recv() returns None
+                    // only if tx is dropped before conn completes — structurally impossible.
+                    let UpgradeEvent { on_upgrade, protocol } = event.unwrap();
+                    debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
+
+                    tokio::pin!(on_upgrade);
+                    // conn_done: H1 conn resolves Ok(()) after the 101 is sent and the
+                    // socket transitions. We must not re-poll a completed future.
+                    let mut conn_done = false;
+                    let upgraded_result = loop {
+                        tokio::select! {
+                            biased;
+                            result = &mut on_upgrade => {
+                                break result.map_err(|e| eyre!(e));
+                            }
+                            result = &mut conn, if !conn_done => {
+                                match result {
+                                    // H1: conn finishes after the 101; on_upgrade resolves
+                                    // next. Mark done and keep waiting — do not break.
+                                    Ok(()) => conn_done = true,
+                                    Err(e) => break Err(eyre!(e)),
                                 }
                             }
-                        };
-                        let upgraded = match upgraded_result {
-                            Ok(u) => u,
-                            Err(e) => {
-                                result_tx.send(Err(e)).ok();
-                                return;
-                            }
-                        };
-                        let ws = WebSocketStream::from_raw_socket(
-                            TokioIo::new(upgraded),
-                            Role::Server,
-                            None,
-                        ).await;
-                        let stream: Box<dyn WsStream + 'static> = Box::new(HyperWsStream { inner: ws });
-                        result_tx.send(Ok((stream, protocol))).ok();
-                        // H2: the upgraded WS stream is a logical stream inside the H2
-                        // connection. The conn future drives H2 framing (flow control,
-                        // multiplexing) — dropping it tears down the connection and causes
-                        // an immediate broken pipe on the first recv(). Keep it alive.
+                        }
+                    };
+                    let upgraded = match upgraded_result {
+                        Ok(u) => u,
+                        Err(e) => { result_tx.send(Err(e)).ok(); return; }
+                    };
+                    let ws = WebSocketStream::from_raw_socket(
+                        TokioIo::new(upgraded),
+                        Role::Server,
+                        None,
+                    ).await;
+                    let stream: Box<dyn WsStream + 'static> = Box::new(HyperWsStream { inner: ws });
+                    result_tx.send(Ok((stream, protocol))).ok();
+                    // H2: conn drives the framing layer for the logical WS stream — dropping
+                    // it tears down the H2 connection and causes an immediate broken pipe.
+                    // H1: conn is already done; skip to avoid polling a completed future.
+                    if !conn_done {
                         let _ = conn.await;
-                        return;
                     }
+                }
+                result = &mut conn => {
+                    // conn completed with no upgrade event: plain HTTP request (CORS
+                    // preflight, health check, or rejected upgrade).
+                    let e = result.map_err(|e| eyre!(e))
+                        .and(Err(eyre!("not a websocket upgrade: connection closed without upgrade event")));
+                    result_tx.send(e).ok();
                 }
             }
         });
