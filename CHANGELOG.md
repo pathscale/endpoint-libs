@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.7.6] - 2026-04-27
+
+### Refactor
+
+- Abstract server logic away from underlying lib backend implementation
+
 ## [1.7.0] - 2026-04-25
 
 ### Bug Fixes
