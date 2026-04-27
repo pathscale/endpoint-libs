@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
 
@@ -45,7 +46,7 @@ impl<
         let addr = self.conn_info.address;
         let conn_id = self.conn_info.connection_id;
         if let Err(err) = self.run_loop().await {
-            error!(?err, ?addr, ?conn_id, "Failed to run websocket session");
+            error!(ws_server=true, ?err, ?addr, ?conn_id, "Failed to run websocket session");
         }
 
         // if let Err(err) = self.handler.handle_drop().await {
@@ -64,12 +65,12 @@ impl<
 
         let obj: Result<WsRequestValue, _> = match msg {
             Message::Text(t) => {
-                debug!(?addr, "Handling request {}", t);
+                debug!(ws_server=true, ?addr, "Handling request {}", t);
 
                 serde_json::from_str(&t)
             }
             Message::Binary(b) => {
-                debug!(?addr, "Handling request <BIN>");
+                debug!(ws_server=true, ?addr, "Handling request <BIN>");
                 serde_json::from_slice(&b)
             }
             Message::Ping(_) => {
@@ -79,11 +80,11 @@ impl<
                 return Ok(true);
             }
             Message::Close(_) => {
-                debug!(?addr, "Receive side terminated");
+                debug!(ws_server=true, ?addr, "Receive side terminated");
                 return Ok(false);
             }
             _ => {
-                warn!(?addr, "Strange pattern {:?}", msg);
+                warn!(ws_server=true, ?addr, "Strange pattern {:?}", msg);
                 return Ok(true);
             }
         };
@@ -137,7 +138,9 @@ impl<
         loop {
             // Drain all pending outbound messages before blocking on new events.
             while let Ok(msg) = self.rx.try_recv() {
-                self.send_message(msg).await?;
+                if !self.send_message(msg).await {
+                    return Ok(());
+                }
                 if self.server.config.header_only {
                     return Ok(());
                 }
@@ -145,26 +148,44 @@ impl<
 
             tokio::select! {
                 msg = self.rx.recv() => {
-                    // info!(?conn_id, ?msg, "Received message to send");
                     if let Some(msg) = msg {
-                        self.send_message(msg).await?;
+                        if !self.send_message(msg).await {
+                            break;
+                        }
                         if self.server.config.header_only {
                             break;
                         }
                     } else {
-                        debug!(?conn_id, "Receive side terminated");
+                        debug!(ws_server=true, ?conn_id, "Outbound channel closed");
                         break;
                     }
                 }
                 msg = self.conn.next() => {
-                    if let Some(msg) = msg {
-                        let msg = msg?;
-                        // info!(?conn_id, ?msg, "Received message");
+                    if let Some(msg_result) = msg {
+                        let msg = match msg_result {
+                            Ok(m) => m,
+                            Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => {
+                                debug!(ws_server=true, ?conn_id, "WS receive: connection closed");
+                                break;
+                            }
+                            Err(WsError::Protocol(e)) => {
+                                warn!(ws_server=true, ?conn_id, err=%e, "WS protocol error on receive");
+                                break;
+                            }
+                            Err(WsError::WriteBufferFull(_)) => {
+                                warn!(ws_server=true, ?conn_id, "WS write buffer full on receive");
+                                break;
+                            }
+                            Err(e) => {
+                                error!(ws_server=true, ?conn_id, err=%e, "WS receive error");
+                                break;
+                            }
+                        };
                         if !self.handle_message(msg)? {
                             break;
                         }
                     } else {
-                        debug!(?conn_id, "Send side terminated");
+                        debug!(ws_server=true, ?conn_id, "Inbound stream ended");
                         break;
                     }
                 }
@@ -173,10 +194,27 @@ impl<
 
         Ok(())
     }
-    async fn send_message(&mut self, msg: Message) -> Result<()> {
-        // info!(?msg, "Sending message");
-        self.conn.send(msg).await?;
-        Ok(())
+    async fn send_message(&mut self, msg: Message) -> bool {
+        let conn_id = self.conn_info.connection_id;
+        match self.conn.send(msg).await {
+            Ok(()) => true,
+            Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => {
+                debug!(ws_server=true, ?conn_id, "WS send: connection already closed");
+                false
+            }
+            Err(WsError::WriteBufferFull(_)) => {
+                warn!(ws_server=true, ?conn_id, "WS send: write buffer full");
+                false
+            }
+            Err(WsError::Protocol(e)) => {
+                warn!(ws_server=true, ?conn_id, err=%e, "WS send: protocol error");
+                false
+            }
+            Err(e) => {
+                error!(ws_server=true, ?conn_id, err=%e, "WS send error");
+                false
+            }
+        }
     }
 }
 

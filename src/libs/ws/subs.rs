@@ -3,6 +3,7 @@ use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU32, Ordering};
+use tracing::error;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext};
 
@@ -114,7 +115,13 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             return;
         };
 
-        let data = serde_json::value::to_raw_value(msg).expect("Failed to serialize stream data");
+        let data = match serde_json::value::to_raw_value(msg) {
+            Ok(d) => d,
+            Err(e) => {
+                error!(ws_server=true, conn_id=connection_id, err=%e, "Failed to serialize stream data — skipping publish");
+                return;
+            }
+        };
 
         let msg = WsResponseGeneric::Stream(WsStreamResponseGeneric {
             original_seq: sub.ctx.seq,
@@ -174,8 +181,13 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             let Some(data) = filter(sub) else {
                 continue;
             };
-            let data =
-                serde_json::value::to_raw_value(&data).expect("Failed to serialize stream data");
+            let data = match serde_json::value::to_raw_value(&data) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!(ws_server=true, err=%e, "Failed to serialize stream data — skipping subscriber");
+                    continue;
+                }
+            };
             let msg = WsResponseGeneric::Stream(WsStreamResponseGeneric {
                 original_seq: sub.ctx.seq,
                 method: sub.ctx.method,

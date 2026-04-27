@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use eyre::{Context, Result};
+use eyre::Result;
 use serde::*;
 use serde_json::Value;
 use std::fmt::{Debug, Display, Formatter};
@@ -11,8 +11,8 @@ use tracing::*;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::log::LogLevel;
 use crate::libs::ws::{
-    ConnectionId, WsConnection, WsLogResponse, WsResponseValue, WsStreamState, WsSuccessResponse,
-    internal_error_to_resp, request_error_to_resp,
+    ConnectionId, WsConnection, WsLogResponse, WsResponseError, WsResponseValue, WsStreamState,
+    WsSuccessResponse, internal_error_to_resp, request_error_to_resp,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,9 +36,7 @@ impl CustomError {
     pub fn new(code: impl Into<ErrorCode>, reason: impl Serialize) -> Self {
         Self {
             code: code.into(),
-            params: serde_json::to_value(reason)
-                .context("Failed to serialize error reason")
-                .unwrap(),
+            params: serde_json::to_value(reason).unwrap_or(Value::Null),
         }
     }
     pub fn from_sql_error(err: &str, msg: impl Display) -> Result<Self> {
@@ -116,6 +114,7 @@ impl Toolbox {
         &self,
         states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
         oneshot: bool,
+        drop_on_buffer_full: bool,
     ) {
         let send_fn: SendFnArc = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
@@ -123,11 +122,11 @@ impl Toolbox {
             } else {
                 return false;
             };
-            Self::send_ws_msg(&state.message_queue, msg, oneshot);
+            Self::send_ws_msg(&state.message_queue, msg, oneshot, conn_id, drop_on_buffer_full);
             true
         });
         if self.send_msg.set(send_fn).is_err() {
-            panic!("set_ws_states called twice");
+            warn!(ws_server=true, "set_ws_states called twice — ignoring second call");
         }
     }
 
@@ -135,15 +134,26 @@ impl Toolbox {
         sender: &tokio::sync::mpsc::Sender<Message>,
         resp: WsResponseValue,
         oneshot: bool,
+        conn_id: ConnectionId,
+        drop_on_full: bool,
     ) {
-        let resp = serde_json::to_string(&resp).unwrap();
-        match sender.try_send(resp.into()) {
+        let serialized = match serde_json::to_string(&resp) {
+            Ok(s) => s,
+            Err(e) => {
+                error!(ws_server=true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
+                return;
+            }
+        };
+        match sender.try_send(serialized.into()) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                error!("WebSocket send buffer full — client is too slow or disconnected");
+                error!(ws_server=true, conn_id, "Send buffer full — client too slow or disconnected");
+                if drop_on_full {
+                    let _ = sender.try_send(Message::Close(None));
+                }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                debug!("WebSocket send channel closed (client already disconnected)");
+                debug!(ws_server=true, conn_id, "Send channel closed — client already disconnected");
             }
         }
         if oneshot {
@@ -157,13 +167,26 @@ impl Toolbox {
         }
     }
     pub fn send_response(&self, ctx: &RequestContext, resp: impl Serialize) {
+        let params = match serde_json::value::to_raw_value(&resp) {
+            Ok(p) => p,
+            Err(e) => {
+                error!(ws_server=true, conn_id=ctx.connection_id, err=%e, "Failed to serialize response — sending error to client");
+                self.send(ctx.connection_id, WsResponseValue::Error(WsResponseError {
+                    method: ctx.method,
+                    code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                    seq: ctx.seq,
+                    log_id: ctx.log_id.to_string(),
+                    params: Value::Null,
+                }));
+                return;
+            }
+        };
         self.send(
             ctx.connection_id,
             WsResponseValue::Immediate(WsSuccessResponse {
                 method: ctx.method,
                 seq: ctx.seq,
-                params: serde_json::value::to_raw_value(&resp)
-                    .expect("Failed to serialize response"),
+                params,
             }),
         );
     }
@@ -198,11 +221,19 @@ impl Toolbox {
             ..
         } = ctx;
         let resp = match resp {
-            Ok(ok) => WsResponseValue::Immediate(WsSuccessResponse {
-                method,
-                seq,
-                params: serde_json::value::to_raw_value(&ok).expect("Failed to serialize response"),
-            }),
+            Ok(ok) => match serde_json::value::to_raw_value(&ok) {
+                Ok(params) => WsResponseValue::Immediate(WsSuccessResponse { method, seq, params }),
+                Err(e) => {
+                    error!(ws_server=true, connection_id, err=%e, "Failed to serialize response — sending error to client");
+                    WsResponseValue::Error(WsResponseError {
+                        method,
+                        code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                        seq,
+                        log_id: log_id.to_string(),
+                        params: Value::Null,
+                    })
+                }
+            },
             Err(err) if err.is::<NoResponseError>() => {
                 return None;
             }

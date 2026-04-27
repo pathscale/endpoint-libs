@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
+use tracing::error;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext};
 
@@ -73,8 +74,13 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
         filter: impl Fn(&RequestContext) -> bool,
     ) {
         if let Some(mut topic_2) = self.topics.get_mut(&topic) {
-            let data =
-                serde_json::value::to_raw_value(msg).expect("Failed to serialize stream data");
+            let data = match serde_json::value::to_raw_value(msg) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!(ws_server=true, err=%e, "Failed to serialize stream data — skipping publish");
+                    return;
+                }
+            };
             let mut dead_connections = vec![];
             let stream_code = topic.into();
             for sub in topic_2.subscribers.values_mut() {

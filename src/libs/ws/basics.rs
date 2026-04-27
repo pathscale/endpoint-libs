@@ -131,13 +131,14 @@ pub fn internal_error_to_resp(
 
     if let Some(location) = location {
         tracing::error!(
+            ws_server=true,
             caller_location = location,
             "Internal error: {:?} {:?}",
             err,
             err0
         );
     } else {
-        tracing::error!("Internal error: {:?} {:?}", err, err0);
+        tracing::error!(ws_server=true, "Internal error: {:?} {:?}", err, err0);
     }
 
     WsResponseValue::Error(err)
@@ -157,6 +158,6 @@ pub fn request_error_to_resp(
         log_id,
         params,
     };
-    tracing::warn!("Request error: {:?}", err);
+    tracing::warn!(ws_server=true, "Request error: {:?}", err);
     WsResponseValue::Error(err)
 }

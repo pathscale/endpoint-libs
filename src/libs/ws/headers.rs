@@ -31,7 +31,7 @@ impl Callback for VerifyProtocol<'_> {
         mut response: Response,
     ) -> Result<Response, ErrorResponse> {
         let addr = self.addr;
-        debug!(?addr, "handshake request: {:?}", request);
+        debug!(ws_server=true, ?addr, "handshake request: {:?}", request);
 
         let protocol = request
             .headers()
@@ -94,7 +94,7 @@ impl Callback for VerifyProtocol<'_> {
             }
         }
 
-        debug!(?addr, "Responding handshake with: {:?}", response);
+        debug!(ws_server=true, ?addr, "Responding handshake with: {:?}", response);
 
         Ok(response)
     }
@@ -247,7 +247,7 @@ impl AuthController for EndpointAuthController {
                     conn,
                 )
                 .await;
-            debug!("Auth response: {:?}", resp);
+            debug!(ws_server=true, "Auth response: {:?}", resp);
             let conn_id = ctx.connection_id;
             if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
                 toolbox.send(conn_id, resp);
