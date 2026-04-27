@@ -7,12 +7,12 @@ pub mod scheduler;
 pub mod signal;
 pub mod types;
 pub mod utils;
-#[cfg(feature = "ws")]
+#[cfg(feature = "ws-core")]
 pub mod ws;
 
-#[cfg(feature = "ws")]
+#[cfg(feature = "ws-core")]
 pub use ws::handler;
-#[cfg(feature = "ws")]
+#[cfg(feature = "ws-core")]
 pub use ws::toolbox;
 
 #[deprecated]

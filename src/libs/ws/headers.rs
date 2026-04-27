@@ -1,15 +1,10 @@
-use chrono::Utc;
 use convert_case::Case;
 use convert_case::Casing;
 use eyre::{Context, ContextCompat, Result, bail};
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio_tungstenite::tungstenite::handshake::server::{
-    Callback, ErrorResponse, Request, Response,
-};
 use tracing::*;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox};
@@ -17,88 +12,6 @@ use crate::model::EndpointSchema;
 use crate::model::Type;
 
 use super::WsConnection;
-
-pub struct VerifyProtocol<'a> {
-    pub addr: SocketAddr,
-    pub tx: tokio::sync::mpsc::Sender<String>,
-    pub allow_cors_domains: &'a Option<Vec<String>>,
-}
-
-impl Callback for VerifyProtocol<'_> {
-    fn on_request(
-        self,
-        request: &Request,
-        mut response: Response,
-    ) -> Result<Response, ErrorResponse> {
-        let addr = self.addr;
-        debug!(ws_server=true, ?addr, "handshake request: {:?}", request);
-
-        let protocol = request
-            .headers()
-            .get("Sec-WebSocket-Protocol")
-            .or_else(|| request.headers().get("sec-websocket-protocol"));
-
-        let protocol_str = match protocol {
-            Some(protocol) => protocol
-                .to_str()
-                .map_err(|_| {
-                    ErrorResponse::new(Some("Sec-WebSocket-Protocol is not valid utf-8".to_owned()))
-                })?
-                .to_string(),
-            None => "".to_string(),
-        };
-
-        self.tx.try_send(protocol_str.clone()).unwrap();
-
-        response
-            .headers_mut()
-            .append("Date", Utc::now().to_rfc2822().parse().unwrap());
-        if !protocol_str.is_empty() {
-            response.headers_mut().insert(
-                "Sec-WebSocket-Protocol",
-                protocol_str
-                    .split(',')
-                    .next()
-                    .unwrap_or("")
-                    .parse()
-                    .unwrap(),
-            );
-        }
-
-        response
-            .headers_mut()
-            .insert("Server", "RustWebsocketServer/1.0".parse().unwrap());
-
-        if let Some(allow_cors_domains) = self.allow_cors_domains {
-            if let Some(origin) = request.headers().get("Origin") {
-                let origin = origin.to_str().unwrap();
-                if allow_cors_domains.iter().any(|x| x == origin) {
-                    response
-                        .headers_mut()
-                        .insert("Access-Control-Allow-Origin", origin.parse().unwrap());
-                    response
-                        .headers_mut()
-                        .insert("Access-Control-Allow-Credentials", "true".parse().unwrap());
-                }
-            }
-        } else {
-            // Allow all domains
-            if let Some(origin) = request.headers().get("Origin") {
-                let origin = origin.to_str().unwrap();
-                response
-                    .headers_mut()
-                    .insert("Access-Control-Allow-Origin", origin.parse().unwrap());
-                response
-                    .headers_mut()
-                    .insert("Access-Control-Allow-Credentials", "true".parse().unwrap());
-            }
-        }
-
-        debug!(ws_server=true, ?addr, "Responding handshake with: {:?}", response);
-
-        Ok(response)
-    }
-}
 
 pub trait AuthController: Sync + Send {
     fn auth(
@@ -247,7 +160,7 @@ impl AuthController for EndpointAuthController {
                     conn,
                 )
                 .await;
-            debug!(ws_server=true, "Auth response: {:?}", resp);
+            debug!(ws_server = true, "Auth response: {:?}", resp);
             let conn_id = ctx.connection_id;
             if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
                 toolbox.send(conn_id, resp);

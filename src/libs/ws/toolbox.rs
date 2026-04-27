@@ -1,3 +1,4 @@
+use crate::libs::ws::WsMessage as Message;
 use dashmap::DashMap;
 use eyre::Result;
 use serde::*;
@@ -5,7 +6,6 @@ use serde_json::Value;
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, OnceLock};
-use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
@@ -122,11 +122,20 @@ impl Toolbox {
             } else {
                 return false;
             };
-            Self::send_ws_msg(&state.message_queue, msg, oneshot, conn_id, drop_on_buffer_full);
+            Self::send_ws_msg(
+                &state.message_queue,
+                msg,
+                oneshot,
+                conn_id,
+                drop_on_buffer_full,
+            );
             true
         });
         if self.send_msg.set(send_fn).is_err() {
-            warn!(ws_server=true, "set_ws_states called twice — ignoring second call");
+            warn!(
+                ws_server = true,
+                "set_ws_states called twice — ignoring second call"
+            );
         }
     }
 
@@ -140,20 +149,26 @@ impl Toolbox {
         let serialized = match serde_json::to_string(&resp) {
             Ok(s) => s,
             Err(e) => {
-                error!(ws_server=true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
+                error!(ws_server = true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
                 return;
             }
         };
         match sender.try_send(serialized.into()) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                error!(ws_server=true, conn_id, "Send buffer full — client too slow or disconnected");
+                error!(
+                    ws_server = true,
+                    conn_id, "Send buffer full — client too slow or disconnected"
+                );
                 if drop_on_full {
                     let _ = sender.try_send(Message::Close(None));
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                debug!(ws_server=true, conn_id, "Send channel closed — client already disconnected");
+                debug!(
+                    ws_server = true,
+                    conn_id, "Send channel closed — client already disconnected"
+                );
             }
         }
         if oneshot {
@@ -170,14 +185,17 @@ impl Toolbox {
         let params = match serde_json::value::to_raw_value(&resp) {
             Ok(p) => p,
             Err(e) => {
-                error!(ws_server=true, conn_id=ctx.connection_id, err=%e, "Failed to serialize response — sending error to client");
-                self.send(ctx.connection_id, WsResponseValue::Error(WsResponseError {
-                    method: ctx.method,
-                    code: ErrorCode::INTERNAL_ERROR.to_u32(),
-                    seq: ctx.seq,
-                    log_id: ctx.log_id.to_string(),
-                    params: Value::Null,
-                }));
+                error!(ws_server = true, conn_id=ctx.connection_id, err=%e, "Failed to serialize response — sending error to client");
+                self.send(
+                    ctx.connection_id,
+                    WsResponseValue::Error(WsResponseError {
+                        method: ctx.method,
+                        code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                        seq: ctx.seq,
+                        log_id: ctx.log_id.to_string(),
+                        params: Value::Null,
+                    }),
+                );
                 return;
             }
         };
@@ -222,9 +240,13 @@ impl Toolbox {
         } = ctx;
         let resp = match resp {
             Ok(ok) => match serde_json::value::to_raw_value(&ok) {
-                Ok(params) => WsResponseValue::Immediate(WsSuccessResponse { method, seq, params }),
+                Ok(params) => WsResponseValue::Immediate(WsSuccessResponse {
+                    method,
+                    seq,
+                    params,
+                }),
                 Err(e) => {
-                    error!(ws_server=true, connection_id, err=%e, "Failed to serialize response — sending error to client");
+                    error!(ws_server = true, connection_id, err=%e, "Failed to serialize response — sending error to client");
                     WsResponseValue::Error(WsResponseError {
                         method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),

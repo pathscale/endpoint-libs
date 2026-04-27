@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::libs::ws::WsMessage as Message;
 use bytes::Bytes;
 use eyre::{Context, Result, bail, ensure, eyre};
 use futures::SinkExt;
@@ -18,25 +19,12 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
 
 use crate::libs::log::LogLevel;
-use crate::libs::ws::WsLogResponse;
-use crate::libs::ws::WsRequestGeneric;
-use crate::libs::ws::WsResponseGeneric;
-
-pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
-    type Response: WsResponse;
-    const METHOD_ID: u32;
-    const SCHEMA: &'static str;
-    const ROLES: &'static [u32];
-}
-pub trait WsResponse: Serialize + DeserializeOwned + Send + Sync + Clone {
-    type Request: WsRequest;
-}
+use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGeneric};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -142,7 +130,7 @@ impl WsClient {
         Ok(())
     }
 
-    // --- Public API (signatures unchanged) --------------------------------
+    // --- Public API --------------------------------
 
     pub async fn send_req(&mut self, method: u32, params: impl Serialize) -> Result<()> {
         self.seq += 1;

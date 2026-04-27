@@ -1,4 +1,5 @@
 use parking_lot::RwLock;
+use serde::de::DeserializeOwned;
 use serde::*;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -15,6 +16,16 @@ use crate::libs::toolbox::RequestContext;
 use crate::model::EndpointSchema;
 
 pub type ConnectionId = u32;
+
+pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
+    type Response: WsResponse;
+    const METHOD_ID: u32;
+    const SCHEMA: &'static str;
+    const ROLES: &'static [u32];
+}
+pub trait WsResponse: Serialize + DeserializeOwned + Send + Sync + Clone {
+    type Request: WsRequest;
+}
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct WsRequestGeneric<Req> {
     pub method: u32,
@@ -131,14 +142,14 @@ pub fn internal_error_to_resp(
 
     if let Some(location) = location {
         tracing::error!(
-            ws_server=true,
+            ws_server = true,
             caller_location = location,
             "Internal error: {:?} {:?}",
             err,
             err0
         );
     } else {
-        tracing::error!(ws_server=true, "Internal error: {:?} {:?}", err, err0);
+        tracing::error!(ws_server = true, "Internal error: {:?} {:?}", err, err0);
     }
 
     WsResponseValue::Error(err)
@@ -158,6 +169,6 @@ pub fn request_error_to_resp(
         log_id,
         params,
     };
-    tracing::warn!(ws_server=true, "Request error: {:?}", err);
+    tracing::warn!(ws_server = true, "Request error: {:?}", err);
     WsResponseValue::Error(err)
 }

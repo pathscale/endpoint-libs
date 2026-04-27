@@ -1,57 +1,30 @@
+use super::WsMessage as Message;
 use eyre::{ContextCompat, Result, bail, eyre};
-use http_body_util::Empty;
-use hyper::body::{Bytes, Incoming};
-use hyper::header::HeaderValue;
-use hyper::header::{CONNECTION, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode, Version};
-use hyper_util::rt::{TokioExecutor, TokioIo};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::convert::Infallible;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
-use crate::libs::ws::client::WsRequest;
-use crate::libs::ws::{ConnectionListener, TcpListener, TlsListener};
-use crate::libs::ws::{WsClientSession, WsConnection};
+use crate::libs::ws::{
+    BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
+    WsStream, WsUpgrader,
+};
+#[cfg(feature = "ws")]
+use crate::libs::ws::{HyperTungsteniteUpgrader, TlsListener};
 use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
-
-/// Carries the data needed to complete an H2 WebSocket upgrade inside a shard's LocalSet.
-/// All fields are `Send` so this can be transmitted across the tokio thread pool boundary
-/// that hyper's TokioExecutor creates when dispatching H2 stream service calls.
-struct H2UpgradeMsg {
-    on_upgrade: hyper::upgrade::OnUpgrade,
-    toolbox: ArcToolbox,
-    server: Arc<WebsocketServer>,
-    addr: SocketAddr,
-    states: Arc<WebsocketStates>,
-    protocol: String,
-}
-
-static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
-static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
-static HDR_SERVER: HeaderValue = HeaderValue::from_static("RustWebsocketServer/1.0");
-static HDR_CREDENTIALS_TRUE: HeaderValue = HeaderValue::from_static("true");
 
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
@@ -59,29 +32,33 @@ pub struct WebsocketServer {
     pub message_receiver: parking_lot::Mutex<Option<mpsc::Receiver<ConnectionId>>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
-    pub cached_date: RwLock<HeaderValue>,
+    pub cached_date: RwLock<String>,
+    pub upgrader: Option<Arc<dyn WsUpgrader>>,
 }
 
 impl WebsocketServer {
     pub fn new(config: WsServerConfig) -> Self {
         if config.insecure {
-            tracing::warn!(ws_server=true, "WS Server has been configured with insecure=true, is this desired?")
+            tracing::warn!(
+                ws_server = true,
+                "WS Server has been configured with insecure=true, is this desired?"
+            )
         }
         Self {
             auth_controller: Arc::new(SimpleAuthController),
             handlers: Default::default(),
             message_receiver: parking_lot::Mutex::new(None),
             toolbox: Toolbox::new(),
-            cached_date: RwLock::new(
-                httpdate::fmt_http_date(std::time::SystemTime::now())
-                    .parse()
-                    .unwrap(),
-            ),
+            cached_date: RwLock::new(httpdate::fmt_http_date(std::time::SystemTime::now())),
             config,
+            upgrader: default_upgrader(),
         }
     }
     pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
         self.auth_controller = Arc::new(controller);
+    }
+    pub fn set_upgrader(&mut self, upgrader: Arc<dyn WsUpgrader>) {
+        self.upgrader = Some(upgrader);
     }
     pub fn add_handler<T: RequestHandler + 'static>(&mut self, handler: T) {
         let schema = serde_json::from_str(T::Request::SCHEMA).expect("Invalid schema");
@@ -112,304 +89,42 @@ impl WebsocketServer {
             );
         }
     }
-    async fn handle_ws_handshake_and_connection<
-        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    >(
+    async fn handle_ws_handshake_and_connection(
         self: Arc<Self>,
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
-        stream: S,
-        h2_tx: mpsc::Sender<H2UpgradeMsg>,
+        stream: BoxedStream,
     ) -> Result<()> {
-        let io = TokioIo::new(stream);
-
-        let service = service_fn({
-            let h2_tx = h2_tx.clone();
-            move |mut req: Request<Incoming>| {
-                let this = Arc::clone(&self);
-                let states = Arc::clone(&states);
-                let h2_tx = h2_tx.clone();
-                async move {
-                    let is_http2 = req.version() == Version::HTTP_2;
-                    let is_options = req.method() == Method::OPTIONS;
-                    debug!(
-                        ws_server=true,
-                        ?addr,
-                        method=%req.method(),
-                        uri=%req.uri(),
-                        version=?req.version(),
-                        is_http2,
-                        is_options,
-                        "WS handshake request received"
-                    );
-
-                    // Extract CORS origin and requested headers/methods from client
-                    let origin = req
-                        .headers()
-                        .get("Origin")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-
-                    let access_control_request_method = req
-                        .headers()
-                        .get("Access-Control-Request-Method")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-
-                    let access_control_request_headers = req
-                        .headers()
-                        .get("Access-Control-Request-Headers")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-
-                    // Handle CORS preflight OPTIONS request
-                    if is_options && access_control_request_method.is_some() {
-                        debug!(ws_server=true, ?addr, "CORS preflight request detected");
-                        let mut resp = Response::new(Empty::<Bytes>::new());
-                        *resp.status_mut() = StatusCode::OK;
-
-                        if let Some(origin) = &origin {
-                            let allow = match this.config.allow_cors_urls.as_ref() {
-                                Some(domains) => domains.iter().any(|d| d == origin),
-                                None => true,
-                            };
-                            if allow {
-                                if let Ok(v) = origin.parse::<hyper::header::HeaderValue>() {
-                                    resp.headers_mut().append("Access-Control-Allow-Origin", v);
-                                    resp.headers_mut()
-                                        .append("Access-Control-Allow-Credentials", HDR_CREDENTIALS_TRUE.clone());
-                                    resp.headers_mut().append(
-                                        "Access-Control-Allow-Methods",
-                                        "GET, OPTIONS, CONNECT".parse().unwrap(),
-                                    );
-                                    if let Some(req_headers) = access_control_request_headers {
-                                        if let Ok(v) = req_headers.parse::<hyper::header::HeaderValue>() {
-                                            resp.headers_mut()
-                                                .append("Access-Control-Allow-Headers", v);
-                                        }
-                                    } else {
-                                        resp.headers_mut().append(
-                                            "Access-Control-Allow-Headers",
-                                            "Content-Type, Authorization, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions, Sec-WebSocket-Protocol"
-                                                .parse()
-                                                .unwrap(),
-                                        );
-                                    }
-                                    resp.headers_mut().append(
-                                        "Access-Control-Max-Age",
-                                        "86400".parse().unwrap(), // 24 hours
-                                    );
-                                    debug!(ws_server=true, ?addr, "CORS preflight allowed");
-                                } else {
-                                    debug!(ws_server=true, ?addr, "Failed to parse origin as header value");
-                                }
-                            } else {
-                                debug!(ws_server=true, ?addr, origin=%origin, "CORS origin not in allowlist");
-                            }
-                        }
-
-                        resp.headers_mut()
-                            .append("Date", this.cached_date.read().clone());
-                        resp.headers_mut().append("Server", HDR_SERVER.clone());
-                        return Ok::<_, Infallible>(resp);
-                    }
-
-                    // Validate the upgrade request based on HTTP version.
-                    // HTTP/1.1: GET + Upgrade: websocket + Sec-WebSocket-Key
-                    // HTTP/2:   CONNECT + :protocol = websocket (RFC 8441 / RFC 9113 §8.5)
-                    let derived = if is_http2 {
-                        if req.method() == Method::GET {
-                            let resp = Response::new(Empty::<Bytes>::new());
-                            return Ok::<_, Infallible>(resp);
-                        }
-                        if req.method() != Method::CONNECT {
-                            debug!(ws_server=true, ?addr, method=%req.method(), "H2: rejected — expected CONNECT method");
-                            let mut resp = Response::new(Empty::<Bytes>::new());
-                            *resp.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
-                            return Ok::<_, Infallible>(resp);
-                        }
-                        let protocol_ext = req
-                            .extensions()
-                            .get::<hyper::ext::Protocol>()
-                            .map(|p| p.as_str().to_owned());
-                        let proto_ok = protocol_ext.as_deref() == Some("websocket");
-                        debug!(
-                            ws_server=true,
-                            ?addr,
-                            ?protocol_ext,
-                            proto_ok,
-                            "H2: checking :protocol extension"
-                        );
-                        if !proto_ok {
-                            debug!(ws_server=true, ?addr, "H2: rejected — :protocol != websocket");
-                            let mut resp = Response::new(Empty::<Bytes>::new());
-                            *resp.status_mut() = StatusCode::BAD_REQUEST;
-                            return Ok::<_, Infallible>(resp);
-                        }
-                        debug!(ws_server=true, ?addr, "H2: CONNECT upgrade valid, responding 200 OK");
-                        None
-                    } else {
-                        let is_upgrade = req
-                            .headers()
-                            .get(UPGRADE)
-                            .and_then(|v| v.to_str().ok())
-                            .map(|v| v.eq_ignore_ascii_case("websocket"))
-                            .unwrap_or(false);
-                        if !is_upgrade {
-                            debug!(
-                                ws_server=true,
-                                ?addr,
-                                "H1: rejected — missing or invalid Upgrade: websocket header"
-                            );
-                            let mut resp = Response::new(Empty::<Bytes>::new());
-                            *resp.status_mut() = StatusCode::BAD_REQUEST;
-                            return Ok::<_, Infallible>(resp);
-                        }
-                        let Some(key) = req.headers().get(SEC_WEBSOCKET_KEY) else {
-                            debug!(ws_server=true, ?addr, "H1: rejected — missing Sec-WebSocket-Key");
-                            let mut resp = Response::new(Empty::<Bytes>::new());
-                            *resp.status_mut() = StatusCode::BAD_REQUEST;
-                            return Ok::<_, Infallible>(resp);
-                        };
-                        debug!(
-                            ws_server=true,
-                            ?addr,
-                            "H1: upgrade valid, responding 101 Switching Protocols"
-                        );
-                        Some(derive_accept_key(key.as_bytes()))
-                    };
-
-                    let protocol = req
-                        .headers()
-                        .get("Sec-WebSocket-Protocol")
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-
-                    let on_upgrade = hyper::upgrade::on(&mut req);
-
-                    let toolbox = this.toolbox.clone();
-                    let this_upgrade = Arc::clone(&this);
-                    let protocol_upgrade = protocol.clone();
-
-                    if is_http2 {
-                        // Both H1 and H2 stream service calls are dispatched by hyper via
-                        // TokioExecutor (tokio::spawn), which breaks out of the shard's
-                        // LocalSet. Route back via the channel so the !Send session future
-                        // runs in the correct context.
-                        if h2_tx
-                            .send(H2UpgradeMsg {
-                                on_upgrade,
-                                toolbox,
-                                server: this_upgrade,
-                                addr,
-                                states,
-                                protocol: protocol_upgrade,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            debug!(ws_server=true, ?addr, "H2: upgrade channel closed, dropping connection");
-                        }
-                    } else {
-                        // H1 stream service calls are also dispatched by hyper via
-                        // TokioExecutor (tokio::spawn), which breaks out of the
-                        // shard's LocalSet. Route the upgrade back into the shard
-                        // via the same H2 channel so the !Send session future runs
-                        // in the correct context.
-                        if h2_tx
-                            .send(H2UpgradeMsg {
-                                on_upgrade,
-                                toolbox,
-                                server: this_upgrade,
-                                addr,
-                                states,
-                                protocol: protocol_upgrade,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            debug!(ws_server=true, ?addr, "H1: upgrade channel closed, dropping connection");
-                        }
-                    }
-
-                    // HTTP/2: respond 200 OK (RFC 9113 §8.5); no 101 or Sec-WebSocket-Accept.
-                    // HTTP/1.1: respond 101 Switching Protocols with the derived accept key.
-                    let mut resp = Response::new(Empty::<Bytes>::new());
-                    if let Some(derived) = derived {
-                        *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-                        resp.headers_mut().append(CONNECTION, HDR_UPGRADE.clone());
-                        resp.headers_mut().append(UPGRADE, HDR_WEBSOCKET.clone());
-                        resp.headers_mut()
-                            .append(SEC_WEBSOCKET_ACCEPT, derived.parse().unwrap());
-                    }
-
-                    if !protocol.is_empty() {
-                        let first = protocol.split(',').next().unwrap_or("").trim();
-                        if let Ok(val) = first.parse::<hyper::header::HeaderValue>() {
-                            resp.headers_mut().append("Sec-WebSocket-Protocol", val);
-                        }
-                    }
-
-                    if let Some(origin) = origin {
-                        let allow = match this.config.allow_cors_urls.as_ref() {
-                            Some(domains) => domains.iter().any(|d| d == &origin),
-                            None => true,
-                        };
-                        if allow {
-                            if let Ok(v) = origin.parse::<hyper::header::HeaderValue>() {
-                                resp.headers_mut().append("Access-Control-Allow-Origin", v);
-                                resp.headers_mut().append(
-                                    "Access-Control-Allow-Credentials",
-                                    HDR_CREDENTIALS_TRUE.clone(),
-                                );
-                                resp.headers_mut().append(
-                                    "Access-Control-Allow-Methods",
-                                    "GET, OPTIONS, CONNECT".parse().unwrap(),
-                                );
-                                if let Some(req_headers) = access_control_request_headers {
-                                    if let Ok(v) = req_headers.parse::<hyper::header::HeaderValue>() {
-                                        resp.headers_mut()
-                                            .append("Access-Control-Allow-Headers", v);
-                                    }
-                                } else {
-                                    resp.headers_mut().append(
-                                        "Access-Control-Allow-Headers",
-                                        "Content-Type, Authorization, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions, Sec-WebSocket-Protocol"
-                                            .parse()
-                                            .unwrap(),
-                                    );
-                                }
-                                resp.headers_mut().append(
-                                    "Access-Control-Max-Age",
-                                    "86400".parse().unwrap(),
-                                );
-                            }
-                        }
-                    }
-
-                    resp.headers_mut()
-                        .append("Date", this.cached_date.read().clone());
-                    resp.headers_mut().append("Server", HDR_SERVER.clone());
-
-                    Ok::<_, Infallible>(resp)
-                }
-            }
-        });
-
-        let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-        builder.http2().enable_connect_protocol();
-        builder
-            .serve_connection_with_upgrades(io, service)
+        let cached_date = self.cached_date.read().clone();
+        let upgrader = self.upgrader.as_ref().ok_or_else(|| {
+            eyre!("No WS backend configured; call set_upgrader() before listen()")
+        })?;
+        match upgrader
+            .upgrade(stream, addr, &self.config, &cached_date)
             .await
-            .map_err(|e| eyre!(e))
+        {
+            Ok((ws_stream, protocol)) => {
+                self.post_upgrade_connection(addr, states, ws_stream, protocol)
+                    .await;
+                Ok(())
+            }
+            Err(e) if e.to_string().contains("not a websocket upgrade") => {
+                debug!(
+                    ws_server = true,
+                    ?addr,
+                    "Non-WebSocket HTTP request ignored"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    async fn post_upgrade_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    async fn post_upgrade_connection(
         self: Arc<Self>,
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
-        stream: WebSocketStream<S>,
+        stream: Box<dyn WsStream>,
         protocol: String,
     ) {
         let conn = Arc::new(WsConnection {
@@ -419,7 +134,12 @@ impl WebsocketServer {
             address: addr,
             log_id: get_log_id(),
         });
-        debug!(ws_server=true, ?addr, "New connection handshaken {:?}", conn);
+        debug!(
+            ws_server = true,
+            ?addr,
+            "New connection handshaken {:?}",
+            conn
+        );
 
         let (tx, rx) = mpsc::channel(self.config.message_buffer_size);
         states.insert(conn.connection_id, tx, conn.clone());
@@ -444,38 +164,41 @@ impl WebsocketServer {
             return;
         }
 
-        // debug!(
-        //     ip_addr=%raw_ctx.ip_addr,
-        //     user_id=raw_ctx.user_id,
-        //     conn_id=raw_ctx.connection_id,
-        //     roles=?raw_ctx.roles,
-        //     "WS connection request valid, proceeding to initiate the session"
-        // );
         self.handle_session_connection(conn, states, stream, rx)
             .await;
     }
 
-    pub async fn handle_session_connection<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    pub async fn handle_session_connection(
         self: Arc<Self>,
         conn: Arc<WsConnection>,
         states: Arc<WebsocketStates>,
-        stream: WebSocketStream<S>,
+        stream: Box<dyn WsStream>,
         rx: mpsc::Receiver<Message>,
     ) {
         let addr = conn.address;
         let context = RequestContext::from_conn(&conn);
         let conn_id = context.connection_id;
 
-        debug!(ws_server=true, ?addr, ?conn_id, "Starting websocket session");
+        debug!(
+            ws_server = true,
+            ?addr,
+            ?conn_id,
+            "Starting websocket session"
+        );
         let session = WsClientSession::new(conn, stream, rx, self);
         session.run().await;
 
         states.remove(context.connection_id);
-        info!(ws_server=true, ?addr, ?conn_id, "Connection closed and removed from states (check logs above for any errors)");
+        info!(
+            ws_server = true,
+            ?addr,
+            ?conn_id,
+            "Connection closed and removed from states (check logs above for any errors)"
+        );
     }
 
     pub async fn listen(self) -> Result<()> {
-        debug!(ws_server=true, "Listening on {}", self.config.address);
+        debug!(ws_server = true, "Listening on {}", self.config.address);
 
         // Resolve the address and get the socket address
         let addr = tokio::net::lookup_host(&self.config.address)
@@ -487,27 +210,43 @@ impl WebsocketServer {
         if self.config.insecure {
             self.listen_impl(Arc::new(listener)).await
         } else if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
-            // Proceed with binding the listener for secure mode
-            let listener = TlsListener::bind(
-                listener,
-                self.config.pub_certs.clone().unwrap(),
-                self.config.priv_key.clone().unwrap(),
-            )
-            .await?;
-            self.listen_impl(Arc::new(listener)).await
+            #[cfg(feature = "ws")]
+            {
+                let listener = TlsListener::bind(
+                    listener,
+                    self.config.pub_certs.clone().unwrap(),
+                    self.config.priv_key.clone().unwrap(),
+                )
+                .await?;
+                self.listen_impl(Arc::new(listener)).await
+            }
+            #[cfg(not(feature = "ws"))]
+            {
+                bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` feature)")
+            }
         } else {
-            bail!("pub_certs and priv_key should be set")
+            #[cfg(feature = "ws")]
+            {
+                bail!("pub_certs and priv_key should be set")
+            }
+            #[cfg(not(feature = "ws"))]
+            {
+                bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` feature)")
+            }
         }
     }
 
     async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {
         let states = Arc::new(WebsocketStates::new());
         let this = Arc::new(self);
-        this.toolbox
-            .set_ws_states(states.clone_states(), this.config.header_only, this.config.drop_conn_on_buffer_full);
+        this.toolbox.set_ws_states(
+            states.clone_states(),
+            this.config.header_only,
+            this.config.drop_conn_on_buffer_full,
+        );
 
         let num_shards = shard_count();
-        debug!(ws_server=true, "Starting {} WebSocket shards", num_shards);
+        debug!(ws_server = true, "Starting {} WebSocket shards", num_shards);
 
         let mut shard_senders = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
@@ -528,9 +267,7 @@ impl WebsocketServer {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     *this.cached_date.write() =
-                        httpdate::fmt_http_date(std::time::SystemTime::now())
-                            .parse()
-                            .unwrap();
+                        httpdate::fmt_http_date(std::time::SystemTime::now());
                 }
             }
         });
@@ -571,60 +308,42 @@ impl WebsocketServer {
             .build()
             .expect("Failed to build shard runtime");
         let local_set = LocalSet::new();
-        // H2 upgrades arrive from hyper's TokioExecutor context (outside the LocalSet).
-        // The channel re-routes them back into this shard's LocalSet for !Send session handling.
-        let (h2_tx, mut h2_rx) = mpsc::channel::<H2UpgradeMsg>(256);
         rt.block_on(local_set.run_until(async move {
             loop {
-                tokio::select! {
-                    msg = rx.recv() => {
-                        let Some((stream, addr)) = msg else { break };
-                        let this = Arc::clone(&this);
-                        let states = Arc::clone(&states);
-                        let listener = Arc::clone(&listener);
-                        let h2_tx = h2_tx.clone();
-                        tokio::task::spawn_local(async move {
-                            let stream = match listener.handshake(stream).await {
-                                Ok(channel) => {
-                                    debug!(ws_server=true, "Accepted stream from {}", addr);
-                                    channel
-                                }
-                                Err(err) => {
-                                    error!(ws_server=true, "Error while handshaking stream: {:?}", err);
-                                    return;
-                                }
-                            };
-                            let _ = TOOLBOX
-                                .scope(
-                                    this.toolbox.clone(),
-                                    this.handle_ws_handshake_and_connection(addr, states, stream, h2_tx),
-                                )
-                                .await;
-                        });
+                let Some((stream, addr)) = rx.recv().await else {
+                    break;
+                };
+                let this = Arc::clone(&this);
+                let states = Arc::clone(&states);
+                let listener = Arc::clone(&listener);
+                tokio::task::spawn_local(async move {
+                    let stream = match listener.handshake(stream).await {
+                        Ok(channel) => {
+                            debug!(ws_server = true, "Accepted stream from {}", addr);
+                            channel
+                        }
+                        Err(err) => {
+                            error!(
+                                ws_server = true,
+                                "Error while handshaking stream: {:?}", err
+                            );
+                            return;
+                        }
+                    };
+                    if let Err(err) = TOOLBOX
+                        .scope(
+                            this.toolbox.clone(),
+                            this.handle_ws_handshake_and_connection(addr, states, Box::new(stream)),
+                        )
+                        .await
+                    {
+                        error!(
+                            ws_server = true,
+                            ?addr,
+                            "Failed to handle WS connection: {err}"
+                        );
                     }
-                    msg = h2_rx.recv() => {
-                        let Some(H2UpgradeMsg { on_upgrade, toolbox, server, addr, states, protocol }) = msg else { continue };
-                        tokio::task::spawn_local(async move {
-                            match on_upgrade.await {
-                                Ok(upgraded) => {
-                                    debug!(ws_server=true, ?addr, "H2: upgrade resolved, starting WebSocket session");
-                                    let ws_stream = WebSocketStream::from_raw_socket(
-                                        TokioIo::new(upgraded),
-                                        Role::Server,
-                                        None,
-                                    ).await;
-                                    let _ = TOOLBOX
-                                        .scope(
-                                            toolbox,
-                                            server.post_upgrade_connection(addr, states, ws_stream, protocol),
-                                        )
-                                        .await;
-                                }
-                                Err(e) => error!(ws_server=true, ?addr, "H2 upgrade error: {e}"),
-                            }
-                        });
-                    }
-                }
+                });
             }
         }));
     }
@@ -639,7 +358,7 @@ impl WebsocketServer {
             .sorted()
             .collect();
         debug!(
-            ws_server=true,
+            ws_server = true,
             "Dumping {} endpoint names to {}",
             available_schemas.len(),
             file
@@ -666,7 +385,10 @@ fn shard_count() -> usize {
                 return n;
             }
         }
-        warn!(ws_server=true, "WS_SHARDS env var set but invalid, ignoring: {:?}", val);
+        warn!(
+            ws_server = true,
+            "WS_SHARDS env var set but invalid, ignoring: {:?}", val
+        );
     }
 
     // 2. cgroup v1 quota (common in older Docker / k8s).
@@ -702,10 +424,6 @@ fn read_cgroup_v1_quota() -> Option<usize> {
     }
     // Ceiling division: round up so a 1.5-CPU quota gives 2 shards.
     Some(((quota + period - 1) / period) as usize)
-}
-
-pub fn wrap_ws_error<T>(err: Result<T, WsError>) -> Result<T> {
-    err.map_err(|x| eyre!(x))
 }
 
 pub fn check_name(cat: &str, be_name: &str, should_name: &str) -> Result<()> {
@@ -773,5 +491,16 @@ impl Default for WsServerConfig {
 impl WsServerConfig {
     fn default_message_buffer_size() -> usize {
         256
+    }
+}
+
+fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
+    #[cfg(feature = "ws")]
+    {
+        return Some(Arc::new(HyperTungsteniteUpgrader));
+    }
+    #[cfg(not(feature = "ws"))]
+    {
+        None
     }
 }

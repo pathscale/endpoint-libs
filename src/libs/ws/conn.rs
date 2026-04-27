@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use tokio_tungstenite::tungstenite::Message;
+use super::WsMessage as Message;
 
 use super::{ConnectionId, WsConnection};
 

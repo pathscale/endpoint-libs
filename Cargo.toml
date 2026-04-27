@@ -23,23 +23,26 @@ full = [
     "ws-tls12",
 ]
 types = []
-ws = [
-    # Features ws depends on
+ws-core = [
+    # Shared WS infrastructure (WsMessage, server, session, traits, etc.)
     "types",
     "signal",
-    # Feature dependencies
+    "dep:parking_lot",
+    "dep:dashmap",
+    "dep:async-trait",
+    "dep:httpdate",
+]
+ws = [
+    "ws-core",
+    # Backend-specific deps (hyper + TLS + tokio-tungstenite)
     "dep:tokio-tungstenite",
     "dep:tokio-rustls",
     "dep:rustls",
     "dep:rustls-pemfile",
-    "dep:parking_lot",
-    "dep:dashmap",
     "dep:reqwest",
-    "dep:async-trait",
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
-    "dep:httpdate",
     "dep:webpki-roots",
     # "dep:",
 ]
@@ -79,8 +82,8 @@ error_aggregation = [
 ]
 log_throttling = ["dep:tracing-throttle"]
 s3-sync = ["cert-provider/s3-sync"]
-ws-http1 = ["hyper/http1"]
-ws-tls12 = ["rustls/tls12", "tokio-rustls/tls12"]
+ws-http1 = ["ws", "hyper/http1"]
+ws-tls12 = ["ws", "rustls/tls12", "tokio-rustls/tls12"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

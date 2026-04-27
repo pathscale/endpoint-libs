@@ -1,33 +1,30 @@
 use eyre::Result;
-use futures::StreamExt;
-use futures::{Sink, SinkExt, Stream};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Error as WsError;
-use tokio_tungstenite::tungstenite::Message;
 use tracing::*;
+
+use crate::libs::ws::WsMessage as Message;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
-use super::{WebsocketServer, WsConnection, WsRequestValue, request_error_to_resp};
-pub struct WsClientSession<WS> {
+use super::{
+    StreamError, WebsocketServer, WsConnection, WsRequestValue, WsStream, request_error_to_resp,
+};
+
+pub struct WsClientSession {
     conn_info: Arc<WsConnection>,
-    conn: WS,
+    conn: Box<dyn WsStream>,
     rx: mpsc::Receiver<Message>,
     server: Arc<WebsocketServer>,
 }
-impl<
-    WS: Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
-        + Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
-> WsClientSession<WS>
-{
+
+impl WsClientSession {
     pub fn new(
         conn_info: Arc<WsConnection>,
-        conn: WS,
+        conn: Box<dyn WsStream>,
         rx: mpsc::Receiver<Message>,
         server: Arc<WebsocketServer>,
     ) -> Self {
@@ -39,38 +36,36 @@ impl<
         }
     }
 
-    pub fn conn(&self) -> &WS {
-        &self.conn
+    pub fn conn(&self) -> &dyn WsStream {
+        self.conn.as_ref()
     }
+
     pub async fn run(mut self) {
         let addr = self.conn_info.address;
         let conn_id = self.conn_info.connection_id;
         if let Err(err) = self.run_loop().await {
-            error!(ws_server=true, ?err, ?addr, ?conn_id, "Failed to run websocket session");
+            error!(
+                ws_server = true,
+                ?err,
+                ?addr,
+                ?conn_id,
+                "Failed to run websocket session"
+            );
         }
-
-        // if let Err(err) = self.handler.handle_drop().await {
-        //     error!(
-        //         ?err,
-        //         ?addr,
-        //         ?conn_id,
-        //         "Failed to handle websocket session drop"
-        //     );
-        // }
     }
-    // if continue, returns true
+
     fn handle_message(&mut self, msg: Message) -> Result<bool> {
         let addr = &self.conn_info.address;
         let mut context = RequestContext::from_conn(&self.conn_info);
 
+        #[allow(unreachable_patterns)]
         let obj: Result<WsRequestValue, _> = match msg {
             Message::Text(t) => {
-                debug!(ws_server=true, ?addr, "Handling request {}", t);
-
+                debug!(ws_server = true, ?addr, "Handling request {}", t);
                 serde_json::from_str(&t)
             }
             Message::Binary(b) => {
-                debug!(ws_server=true, ?addr, "Handling request <BIN>");
+                debug!(ws_server = true, ?addr, "Handling request <BIN>");
                 serde_json::from_slice(&b)
             }
             Message::Ping(_) => {
@@ -80,11 +75,11 @@ impl<
                 return Ok(true);
             }
             Message::Close(_) => {
-                debug!(ws_server=true, ?addr, "Receive side terminated");
+                debug!(ws_server = true, ?addr, "Receive side terminated");
                 return Ok(false);
             }
             _ => {
-                warn!(ws_server=true, ?addr, "Strange pattern {:?}", msg);
+                warn!(ws_server = true, ?addr, "Strange pattern {:?}", msg);
                 return Ok(true);
             }
         };
@@ -103,7 +98,6 @@ impl<
         context.user_id = self.conn_info.get_user_id();
         context.roles = self.conn_info.get_roles();
 
-        // Check roles
         let Some(endpoint) = self.server.handlers.get(&req.method) else {
             self.server.toolbox.send(
                 context.connection_id,
@@ -133,10 +127,10 @@ impl<
 
         Ok(true)
     }
+
     async fn run_loop(&mut self) -> Result<()> {
         let conn_id = self.conn_info.connection_id;
         loop {
-            // Drain all pending outbound messages before blocking on new events.
             while let Ok(msg) = self.rx.try_recv() {
                 if !self.send_message(msg).await {
                     return Ok(());
@@ -156,28 +150,28 @@ impl<
                             break;
                         }
                     } else {
-                        debug!(ws_server=true, ?conn_id, "Outbound channel closed");
+                        debug!(ws_server = true, ?conn_id, "Outbound channel closed");
                         break;
                     }
                 }
-                msg = self.conn.next() => {
+                msg = self.conn.recv() => {
                     if let Some(msg_result) = msg {
                         let msg = match msg_result {
                             Ok(m) => m,
-                            Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => {
-                                debug!(ws_server=true, ?conn_id, "WS receive: connection closed");
+                            Err(StreamError::Closed) => {
+                                debug!(ws_server = true, ?conn_id, "WS receive: connection closed");
                                 break;
                             }
-                            Err(WsError::Protocol(e)) => {
-                                warn!(ws_server=true, ?conn_id, err=%e, "WS protocol error on receive");
+                            Err(StreamError::Protocol(e)) => {
+                                warn!(ws_server = true, ?conn_id, err=%e, "WS protocol error on receive");
                                 break;
                             }
-                            Err(WsError::WriteBufferFull(_)) => {
-                                warn!(ws_server=true, ?conn_id, "WS write buffer full on receive");
+                            Err(StreamError::WriteBufferFull) => {
+                                warn!(ws_server = true, ?conn_id, "WS write buffer full on receive");
                                 break;
                             }
-                            Err(e) => {
-                                error!(ws_server=true, ?conn_id, err=%e, "WS receive error");
+                            Err(StreamError::Other(e)) => {
+                                error!(ws_server = true, ?conn_id, err=%e, "WS receive error");
                                 break;
                             }
                         };
@@ -185,7 +179,7 @@ impl<
                             break;
                         }
                     } else {
-                        debug!(ws_server=true, ?conn_id, "Inbound stream ended");
+                        debug!(ws_server = true, ?conn_id, "Inbound stream ended");
                         break;
                     }
                 }
@@ -194,24 +188,25 @@ impl<
 
         Ok(())
     }
+
     async fn send_message(&mut self, msg: Message) -> bool {
         let conn_id = self.conn_info.connection_id;
         match self.conn.send(msg).await {
             Ok(()) => true,
-            Err(WsError::ConnectionClosed | WsError::AlreadyClosed) => {
-                debug!(ws_server=true, ?conn_id, "WS send: connection already closed");
+            Err(StreamError::Closed) => {
+                debug!(ws_server = true, ?conn_id, "WS send: connection closed");
                 false
             }
-            Err(WsError::WriteBufferFull(_)) => {
-                warn!(ws_server=true, ?conn_id, "WS send: write buffer full");
+            Err(StreamError::WriteBufferFull) => {
+                warn!(ws_server = true, ?conn_id, "WS send: write buffer full");
                 false
             }
-            Err(WsError::Protocol(e)) => {
-                warn!(ws_server=true, ?conn_id, err=%e, "WS send: protocol error");
+            Err(StreamError::Protocol(e)) => {
+                warn!(ws_server = true, ?conn_id, err=%e, "WS send: protocol error");
                 false
             }
-            Err(e) => {
-                error!(ws_server=true, ?conn_id, err=%e, "WS send error");
+            Err(StreamError::Other(e)) => {
+                error!(ws_server = true, ?conn_id, err=%e, "WS send error");
                 false
             }
         }
