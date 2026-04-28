@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.7.12] - 2026-04-28
+
+### Features
+
+- Split out ws client to not depend on anything server related
+
 ## [1.7.11] - 2026-04-28
 
 ### Features
