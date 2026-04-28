@@ -154,8 +154,14 @@ async fn upgrade_h1(
     hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
     let accept = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
 
+    let selected_protocol = protocol.split(',').next().unwrap_or("").trim().to_string();
+    let protocol_line = if !selected_protocol.is_empty() {
+        format!("Sec-WebSocket-Protocol: {selected_protocol}\r\n")
+    } else {
+        String::new()
+    };
     let response = format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n{protocol_line}\r\n"
     );
     stream
         .write_all(response.as_bytes())
