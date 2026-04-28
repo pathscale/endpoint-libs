@@ -104,6 +104,15 @@ fn parse_ty(ty: &Type, value: &str) -> Result<serde_json::Value> {
     })
 }
 
+fn parse_protocol_header(header: &str) -> HashMap<&str, &str> {
+    header
+        .split(',')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .map(|x| (&x[..1], &x[1..]))
+        .collect()
+}
+
 impl AuthController for EndpointAuthController {
     fn auth(
         self: Arc<Self>,
@@ -114,12 +123,7 @@ impl AuthController for EndpointAuthController {
         let toolbox = toolbox.clone();
 
         async move {
-            let splits = header
-                .split(',')
-                .map(|x| x.trim())
-                .filter(|x| !x.is_empty())
-                .map(|x| (&x[..1], &x[1..]))
-                .collect::<HashMap<&str, &str>>();
+            let splits = parse_protocol_header(&header);
 
             let method = splits.get("0").context("Could not find method")?;
             // info!("method: {:?}", method);

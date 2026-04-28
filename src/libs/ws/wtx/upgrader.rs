@@ -138,7 +138,7 @@ async fn upgrade_h1(
         } else if h.name.eq_ignore_ascii_case("Sec-WebSocket-Key") {
             ws_key = Some(value.to_string());
         } else if h.name.eq_ignore_ascii_case("Sec-WebSocket-Protocol") {
-            protocol = value.split(',').next().unwrap_or("").trim().to_string();
+            protocol = value.trim().to_string();
         }
     }
 
@@ -197,8 +197,14 @@ async fn upgrade_h2(
 
     tokio::task::spawn_local(frame_reader);
 
-    let (mut server_stream, _) = http2
-        .stream(|_req, _protocol| {})
+    let (mut server_stream, protocol) = http2
+        .stream(|req, _protocol| {
+            req.rrd
+                .headers
+                .get_by_name(b"sec-websocket-protocol")
+                .map(|h| h.value.to_string())
+                .unwrap_or_default()
+        })
         .await
         .map_err(|e| eyre!("H2 stream error: {e}"))?
         .ok_or_else(|| eyre!("H2 connection closed before any stream"))?;
@@ -210,7 +216,6 @@ async fn upgrade_h2(
     // recv_req() is NOT called here — http2.stream() already delivered the
     // CONNECT HEADERS frame; calling recv_req() again causes UnknownStreamId.
 
-    let protocol = String::new();
     let headers = Headers::new();
     let ws = WebSocketOverStream::new(
         &headers,
