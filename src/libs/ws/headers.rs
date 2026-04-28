@@ -174,3 +174,73 @@ impl AuthController for EndpointAuthController {
         .boxed_local()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_empty_header() {
+        let map = parse_protocol_header("");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn parse_single_method() {
+        let map = parse_protocol_header("0my_endpoint");
+        assert_eq!(map.get("0"), Some(&"my_endpoint"));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn parse_method_and_token() {
+        let map = parse_protocol_header("0login,1abc123");
+        assert_eq!(map.get("0"), Some(&"login"));
+        assert_eq!(map.get("1"), Some(&"abc123"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parse_multiple_params() {
+        let map = parse_protocol_header("0my_endpoint,1token_value,2user_123,3extra");
+        assert_eq!(map.get("0"), Some(&"my_endpoint"));
+        assert_eq!(map.get("1"), Some(&"token_value"));
+        assert_eq!(map.get("2"), Some(&"user_123"));
+        assert_eq!(map.get("3"), Some(&"extra"));
+        assert_eq!(map.len(), 4);
+    }
+
+    #[test]
+    fn parse_whitespace_tolerance() {
+        let map = parse_protocol_header("0method, 1value , 2another");
+        assert_eq!(map.get("0"), Some(&"method"));
+        assert_eq!(map.get("1"), Some(&"value"));
+        assert_eq!(map.get("2"), Some(&"another"));
+        assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn parse_empty_segments_filtered() {
+        let map = parse_protocol_header("0method,,1value");
+        assert_eq!(map.get("0"), Some(&"method"));
+        assert_eq!(map.get("1"), Some(&"value"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parse_leading_trailing_commas() {
+        let map = parse_protocol_header(",0method,1value,");
+        assert_eq!(map.get("0"), Some(&"method"));
+        assert_eq!(map.get("1"), Some(&"value"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parse_comma_in_value() {
+        let map = parse_protocol_header("0method,1val,ue");
+        assert_eq!(map.get("0"), Some(&"method"));
+        assert_eq!(map.get("1"), Some(&"val"));
+        assert_eq!(map.get("u"), Some(&"e"));
+        assert_eq!(map.len(), 3);
+    }
+}
