@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.7.11] - 2026-04-28
+
+### Features
+
+- Add wtx backend
+
 ## [1.7.6] - 2026-04-27
 
 ### Refactor
