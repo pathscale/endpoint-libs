@@ -108,6 +108,8 @@ impl WebsocketServer {
             .await
         {
             Ok((ws_stream, protocol)) => {
+                // TODO: downgrade to debug after wtx protocol handling is stable
+                info!(ws_server = true, ?addr, protocol = %protocol, "WsServer: upgrade succeeded, protocol received");
                 self.post_upgrade_connection(addr, states, ws_stream, protocol)
                     .await;
                 Ok(())

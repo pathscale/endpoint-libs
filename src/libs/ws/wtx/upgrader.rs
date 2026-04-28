@@ -104,6 +104,9 @@ async fn upgrade_h1(
         }
     };
 
+    // TODO: downgrade to debug after wtx protocol handling is stable
+    info!(ws_server = true, ?addr, raw_headers = %String::from_utf8_lossy(&buf[..header_end]), "H1: raw HTTP headers");
+
     let mut hbuf = [httparse::EMPTY_HEADER; 64];
     let mut req = HttpRequest::new(&mut hbuf);
     match req.parse(&buf[..header_end]) {
@@ -128,6 +131,8 @@ async fn upgrade_h1(
 
     for h in req.headers.iter() {
         let value = core::str::from_utf8(h.value).unwrap_or("").trim();
+        // TODO: downgrade to debug after wtx protocol handling is stable
+        info!(ws_server = true, ?addr, header_name = %h.name, header_value = %value, "H1: parsed header");
         if h.name.eq_ignore_ascii_case("Upgrade") {
             has_upgrade = value.eq_ignore_ascii_case("websocket");
         } else if h.name.eq_ignore_ascii_case("Connection") {
@@ -141,6 +146,9 @@ async fn upgrade_h1(
             protocol = value.trim().to_string();
         }
     }
+
+    // TODO: downgrade to debug after wtx protocol handling is stable
+    info!(ws_server = true, ?addr, protocol = %protocol, "H1: extracted protocol");
 
     if !has_upgrade || !has_connection_upgrade || !ws_version_ok {
         return Err(eyre!("not a websocket upgrade: missing upgrade headers on {addr}"));
@@ -168,6 +176,9 @@ async fn upgrade_h1(
         .await
         .map_err(|e| eyre!("write 101 on {addr}: {e}"))?;
 
+    // TODO: downgrade to debug after wtx protocol handling is stable
+    info!(ws_server = true, ?addr, response = %response.lines().next().unwrap_or(""), "H1: sent 101 response");
+
     // Re-queue any bytes received after headers (shouldn't happen for WS upgrades)
     if buf.len() > header_end {
         stream.prepend_bytes(buf[header_end..].to_vec());
@@ -180,6 +191,9 @@ async fn upgrade_h1(
     ws.set_max_payload_len(MAX_FRAME_SIZE);
 
     debug!(ws_server = true, ?addr, protocol = %protocol, "H1 WTX upgrade successful");
+
+    // TODO: downgrade to debug after wtx protocol handling is stable
+    info!(ws_server = true, ?addr, protocol = %protocol, "H1: returning protocol to upgrader");
 
     Ok((
         Box::new(GenericWsStream { ws, read_buffer: Vector::new() }) as Box<dyn WsStream + 'static>,
@@ -205,11 +219,17 @@ async fn upgrade_h2(
 
     let (mut server_stream, protocol) = http2
         .stream(|req, _protocol| {
-            req.rrd
-                .headers
-                .get_by_name(b"sec-websocket-protocol")
+            let proto = req.rrd.headers.get_by_name(b"sec-websocket-protocol")
                 .map(|h| h.value.to_string())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // TODO: downgrade to debug after wtx protocol handling is stable
+            info!(
+                ws_server = true, ?addr,
+                proto, _protocol = %_protocol.map(|p| p.to_string()).unwrap_or_default(),
+                all_headers = ?req.rrd.headers.iter().map(|h| format!("{}: {}", h.name, h.value)).collect::<Vec<_>>(),
+                "H2: extracted protocol from headers"
+            );
+            proto
         })
         .await
         .map_err(|e| eyre!("H2 stream error: {e}"))?
@@ -232,7 +252,8 @@ async fn upgrade_h2(
     .await
     .map_err(|e| eyre!("WebSocketOverStream::new failed: {e}"))?;
 
-    debug!(ws_server = true, ?addr, "H2 WTX upgrade successful");
+    // TODO: downgrade to debug after wtx protocol handling is stable
+    info!(ws_server = true, ?addr, protocol = %protocol, "H2 WTX upgrade successful");
 
     Ok((
         Box::new(H2WsStream {
