@@ -20,8 +20,12 @@ use crate::libs::ws::{
     BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
     WsStream, WsUpgrader,
 };
+#[cfg(any(feature = "ws", feature = "ws-wtx"))]
+use crate::libs::ws::TlsListener;
 #[cfg(feature = "ws")]
-use crate::libs::ws::{HyperTungsteniteUpgrader, TlsListener};
+use crate::libs::ws::HyperTungsteniteUpgrader;
+#[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
+use crate::libs::ws::WtxUpgrader;
 use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
@@ -209,31 +213,29 @@ impl WebsocketServer {
         let listener = TcpListener::bind(addr).await?;
         if self.config.insecure {
             self.listen_impl(Arc::new(listener)).await
-        } else if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
-            #[cfg(feature = "ws")]
-            {
-                let listener = TlsListener::bind(
-                    listener,
-                    self.config.pub_certs.clone().unwrap(),
-                    self.config.priv_key.clone().unwrap(),
-                )
-                .await?;
-                self.listen_impl(Arc::new(listener)).await
-            }
-            #[cfg(not(feature = "ws"))]
-            {
-                bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` feature)")
-            }
         } else {
-            #[cfg(feature = "ws")]
-            {
-                bail!("pub_certs and priv_key should be set")
-            }
-            #[cfg(not(feature = "ws"))]
-            {
-                bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` feature)")
-            }
+            self.listen_tls(listener).await
         }
+    }
+
+    #[cfg(any(feature = "ws", feature = "ws-wtx"))]
+    async fn listen_tls(self, listener: TcpListener) -> Result<()> {
+        if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
+            let listener = TlsListener::bind(
+                listener,
+                self.config.pub_certs.clone().unwrap(),
+                self.config.priv_key.clone().unwrap(),
+            )
+            .await?;
+            self.listen_impl(Arc::new(listener)).await
+        } else {
+            bail!("pub_certs and priv_key should be set")
+        }
+    }
+
+    #[cfg(not(any(feature = "ws", feature = "ws-wtx")))]
+    async fn listen_tls(self, _listener: TcpListener) -> Result<()> {
+        bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` or `ws-wtx` feature)")
     }
 
     async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {
@@ -499,7 +501,11 @@ fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
     {
         return Some(Arc::new(HyperTungsteniteUpgrader));
     }
-    #[cfg(not(feature = "ws"))]
+    #[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
+    {
+        return Some(Arc::new(WtxUpgrader));
+    }
+    #[cfg(not(any(feature = "ws", feature = "ws-wtx")))]
     {
         None
     }

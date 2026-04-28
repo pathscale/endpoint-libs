@@ -1299,6 +1299,7 @@ version = "1.7.10"
 dependencies = [
  "alloy-primitives",
  "async-trait",
+ "base64",
  "bytes",
  "cert-provider",
  "chrono",
@@ -1310,6 +1311,7 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
+ "httparse",
  "httpdate",
  "hyper",
  "hyper-rustls",
@@ -1323,6 +1325,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parking_lot",
  "postgres-from-row",
+ "rcgen",
  "regex",
  "reqwest",
  "rev_lines",
@@ -1333,6 +1336,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha1 0.11.0",
  "tempfile",
  "tokio",
  "tokio-cron-scheduler",
@@ -1349,6 +1353,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webpki-roots 1.0.7",
+ "wtx",
 ]
 
 [[package]]
@@ -1697,6 +1702,15 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+
+[[package]]
+name = "hashbrown"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -3763,6 +3777,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.2",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4499,7 +4524,7 @@ dependencies = [
  "rand 0.9.2",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.10.6",
  "thiserror 2.0.18",
 ]
 
@@ -5313,6 +5338,36 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "wtx"
+version = "0.44.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dc1cd886098559ac89f0ae62a440d828caf32b98b7890f22d9de41b68a37625"
+dependencies = [
+ "foldhash 0.2.0",
+ "hashbrown 0.17.0",
+ "httparse",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "sha1 0.11.0",
+ "tokio",
+ "tokio-rustls",
+ "wtx-macros",
+]
+
+[[package]]
+name = "wtx-macros"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0878e9e0fbf13ba57967eac090f5c4793e19e496c89c413e5dbdf58fad7054f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "wyz"

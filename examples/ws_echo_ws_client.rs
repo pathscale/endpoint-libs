@@ -8,7 +8,6 @@ use std::io::{self, BufRead};
 
 #[cfg(feature = "error_aggregation")]
 use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
-use endpoint_libs::libs::ws::WsClient;
 use endpoint_libs::libs::{
     log::{LogLevel, LoggingConfig, OtelConfig, setup_logging},
     ws::WsClientBuilder,
@@ -47,11 +46,15 @@ async fn main() -> eyre::Result<()> {
         .expect("Usage: ws_echo_ws_client <server_url>");
 
     tracing::info!("Connecting to {server} via WsClient...");
+    #[cfg(feature = "ws-http1")]
+    let mode = endpoint_libs::libs::ws::WsVersionMode::Http1Only;
+    #[cfg(not(feature = "ws-http1"))]
+    let mode = endpoint_libs::libs::ws::WsVersionMode::Http2Only;
     let (mut client, _) = WsClientBuilder::new()
-        .mode(endpoint_libs::libs::ws::WsVersionMode::Auto)
+        .mode(mode)
+        .danger_accept_invalid_certs()
         .build(&server)
         .await?;
-    // let (mut client, _) = WsClient::new(&server, "", None).await?;
     tracing::info!("Connected. Type a message and press Enter.");
 
     for line in io::stdin().lock().lines() {
