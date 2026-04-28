@@ -125,12 +125,10 @@ impl AuthController for EndpointAuthController {
         async move {
             let splits = parse_protocol_header(&header);
 
-            // TODO: downgrade to debug after wtx protocol handling is stable
-            info!(ws_server = true, raw_header = %header, splits = ?splits, "EndpointAuthController: parsed protocol header");
+            debug!(ws_server = true, raw_header = %header, splits = ?splits, "EndpointAuthController: parsed protocol header");
 
             let method = splits.get("0").context("Could not find method")?;
-            // TODO: downgrade to debug after wtx protocol handling is stable
-            info!(ws_server = true, method = %method, "EndpointAuthController: resolved method");
+            debug!(ws_server = true, method = %method, "EndpointAuthController: resolved method");
             let endpoint = self
                 .auth_endpoints
                 .get(*method)
