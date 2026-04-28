@@ -32,6 +32,17 @@ ws-core = [
     "dep:async-trait",
     "dep:httpdate",
 ]
+ws-client = [
+    # WS client (WsClient, WsClientBuilder) - standalone
+    "ws-core",
+    "dep:tokio-tungstenite",
+    "dep:tokio-rustls",
+    "dep:rustls",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:webpki-roots",
+]
 ws = [
     "ws-core",
     # Backend-specific deps (hyper + TLS + tokio-tungstenite)
@@ -216,10 +227,13 @@ denylist = [
     "log_throttling", # log_throttling is currently not working
 ]
 
-# Features "foo" and "bar" are incompatible, so skip permutations including them
-# skip_feature_sets = [
-#     ["foo", "bar"],
-# ]
+# ws and ws-wtx are mutually exclusive backends — skip permutations including both
+# (includes compound features that transitively enable ws)
+skip_feature_sets = [
+    ["ws", "ws-wtx"],
+    ["ws-http1", "ws-wtx"],
+    ["ws-tls12", "ws-wtx"],
+]
 
 # If your crate has a large number of optional dependencies, skip them for speed
 # skip_optional_dependencies = true

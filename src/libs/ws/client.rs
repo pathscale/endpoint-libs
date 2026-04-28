@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::libs::ws::WsMessage as Message;
+use tokio_tungstenite::tungstenite::Message;
 use bytes::Bytes;
 use eyre::{Context, Result, bail, ensure, eyre};
 use futures::SinkExt;
@@ -10,7 +10,7 @@ use http_body_util::Empty;
 use hyper::StatusCode;
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use reqwest::header::HeaderValue;
+use hyper::header::HeaderValue;
 use rustls::pki_types::ServerName;
 use serde::Serialize;
 use serde::de::DeserializeOwned;

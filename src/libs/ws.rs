@@ -17,6 +17,8 @@ mod traits;
 pub(crate) mod tungstenite;
 #[cfg(feature = "ws-wtx")]
 pub(crate) mod wtx;
+#[cfg(feature = "ws-client")]
+mod client;
 
 pub use basics::*;
 pub use conn::*;
@@ -34,3 +36,5 @@ pub use traits::*;
 pub use tungstenite::*;
 #[cfg(feature = "ws-wtx")]
 pub use wtx::WtxUpgrader;
+#[cfg(feature = "ws-client")]
+pub use client::*;
