@@ -121,7 +121,7 @@ tracing-subscriber = { version = "0.3", features = [
     "fmt",
 ] }
 bytes = "1.7"
-chrono = "0.4"
+chrono = {version = "0.4.44", default-features = false, features = ["oldtime", "std", "now"]}
 urlencoding = "2.1"
 hex = "0.4"
 rust_decimal = "1.36"
