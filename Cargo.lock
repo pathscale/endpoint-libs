@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "endpoint-libs"
-version = "1.7.21"
+version = "1.7.22"
 dependencies = [
  "alloy-primitives",
  "async-trait",
