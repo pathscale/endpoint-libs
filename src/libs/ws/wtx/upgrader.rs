@@ -229,7 +229,7 @@ async fn upgrade_h2(
     let headers = Headers::new();
     let ws = WebSocketOverStream::new(
         &headers,
-        false,
+        true,
         Xorshift64::new(wtx::rng::simple_seed()),
         server_stream,
     )
