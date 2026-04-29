@@ -104,19 +104,19 @@ SERVER_PIDS=()
 build_artifact "ws,ws-http1" ws_echo_server
 
 # ── H1 test ──
-build_artifact "ws,ws-http1" ws_echo_ws_client
+build_artifact "ws-client" ws_echo_ws_client
 test_scenario "Tungstenite HTTP/1.1 (ws+ws-http1)" ws_echo_server
 
 # ── H2 test ──
-build_artifact "ws" ws_echo_ws_client
+build_artifact "ws-client" ws_echo_ws_client
 test_scenario "Tungstenite HTTP/2 (ws)" ws_echo_server
 
 # ── WTX ──
 build_artifact "ws-wtx" ws_echo_server_wtx
-build_artifact "ws,ws-http1" ws_echo_ws_client
+build_artifact "ws-client,ws-wtx" ws_echo_ws_client
 test_scenario "WTX HTTP/1.1 (ws-wtx)" ws_echo_server_wtx
 build_artifact "ws-wtx,ws-wtx-http2" ws_echo_server_wtx
-build_artifact "ws" ws_echo_ws_client
+build_artifact "ws-client" ws_echo_ws_client
 test_scenario "WTX HTTP/2 (ws-wtx+ws-wtx-http2)" ws_echo_server_wtx
 
 echo ""

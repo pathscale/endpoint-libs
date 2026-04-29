@@ -205,7 +205,7 @@ required-features = ["ws"]
 
 [[example]]
 name = "ws_echo_ws_client"
-required-features = ["ws"]
+required-features = ["ws-client"]
 
 [[example]]
 name = "ws_echo_server"

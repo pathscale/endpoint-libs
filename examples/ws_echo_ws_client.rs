@@ -46,9 +46,15 @@ async fn main() -> eyre::Result<()> {
         .expect("Usage: ws_echo_ws_client <server_url>");
 
     tracing::info!("Connecting to {server} via WsClient...");
-    #[cfg(feature = "ws-http1")]
+    #[cfg(any(
+        feature = "ws-http1",
+        all(feature = "ws-wtx", not(feature = "ws-wtx-http2"))
+    ))]
     let mode = endpoint_libs::libs::ws::WsVersionMode::Http1Only;
-    #[cfg(not(feature = "ws-http1"))]
+    #[cfg(not(any(
+        feature = "ws-http1",
+        all(feature = "ws-wtx", not(feature = "ws-wtx-http2"))
+    )))]
     let mode = endpoint_libs::libs::ws::WsVersionMode::Http2Only;
     let (mut client, _) = WsClientBuilder::new()
         .mode(mode)
