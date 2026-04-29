@@ -13,3 +13,5 @@ examples/ws-echo/target/
 /.kiro
 CLAUDE*.md
 AGENTS.md
+
+/.idea

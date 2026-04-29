@@ -321,7 +321,11 @@ fn message_to_payload(msg: Message) -> (OpCode, Vec<u8>) {
 
 fn payload_to_message(op_code: OpCode, payload: Vec<u8>) -> Option<Message> {
     match op_code {
-        OpCode::Text => Some(Message::Text(String::from_utf8(payload).ok()?.into())),
+        OpCode::Text => {
+            let text = String::from_utf8_lossy(&payload);
+            tracing::info!("Received: {}, op_code: {:?}", text, op_code);
+            Some(Message::Text(text.to_string().into()))
+        },
         OpCode::Binary => Some(Message::Binary(payload.into())),
         OpCode::Ping => Some(Message::Ping(payload.into())),
         OpCode::Pong => Some(Message::Pong(payload.into())),
