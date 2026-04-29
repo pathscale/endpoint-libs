@@ -38,6 +38,9 @@ impl<T: ConnectionListener> TlsListener<T> {
         #[cfg(not(feature = "ws-tls12"))]
         let protocol_versions: &[&rustls::SupportedProtocolVersion] =
             { &[&rustls::version::TLS13] };
+        #[cfg(feature = "ws-wtx")]
+        let protocol_versions: &[&rustls::SupportedProtocolVersion] =
+            { &[&rustls::version::TLS12] };
 
         #[cfg(any(feature = "ws-http1", feature = "ws-wtx"))]
         let alpn_protocols = { vec![b"h2".to_vec(), b"http/1.1".to_vec()] };
