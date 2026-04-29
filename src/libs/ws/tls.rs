@@ -42,9 +42,14 @@ impl<T: ConnectionListener> TlsListener<T> {
         let protocol_versions: &[&rustls::SupportedProtocolVersion] =
             { &[&rustls::version::TLS12] };
 
-        #[cfg(any(feature = "ws-http1", feature = "ws-wtx"))]
+        #[cfg(any(
+            all(feature = "ws", feature = "ws-http1"),
+            all(feature = "ws-wtx", feature = "ws-wtx-http2"),
+        ))]
         let alpn_protocols = { vec![b"h2".to_vec(), b"http/1.1".to_vec()] };
-        #[cfg(not(any(feature = "ws-http1", feature = "ws-wtx")))]
+        #[cfg(all(feature = "ws-wtx", not(feature = "ws-wtx-http2")))]
+        let alpn_protocols = { vec![b"http/1.1".to_vec()] };
+        #[cfg(all(feature = "ws", not(feature = "ws-http1")))]
         let alpn_protocols = { vec![b"h2".to_vec()] };
 
         let tls_cfg = {

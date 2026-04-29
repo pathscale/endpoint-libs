@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio_tungstenite::tungstenite::Message;
 use bytes::Bytes;
 use eyre::{Context, Result, bail, ensure, eyre};
 use futures::SinkExt;
@@ -9,8 +8,8 @@ use futures::StreamExt;
 use http_body_util::Empty;
 use hyper::StatusCode;
 use hyper::client::conn::http2;
-use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper::header::HeaderValue;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +18,7 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
@@ -364,9 +364,7 @@ async fn connect_h1(
     }
 
     let (ws_stream, response) = if danger_accept_invalid_certs {
-        let connector = tokio_tungstenite::Connector::Rustls(Arc::new(
-            make_dangerous_tls_config(),
-        ));
+        let connector = tokio_tungstenite::Connector::Rustls(Arc::new(make_dangerous_tls_config()));
         tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector))
             .await
             .context("Failed to connect to endpoint")?

@@ -13,12 +13,12 @@ mod tls;
 pub mod toolbox;
 mod traits;
 
+#[cfg(feature = "ws-client")]
+mod client;
 #[cfg(feature = "ws")]
 pub(crate) mod tungstenite;
 #[cfg(feature = "ws-wtx")]
 pub(crate) mod wtx;
-#[cfg(feature = "ws-client")]
-mod client;
 
 pub use basics::*;
 pub use conn::*;
@@ -32,9 +32,9 @@ pub use subs::*;
 pub use tls::*;
 pub use traits::*;
 
+#[cfg(feature = "ws-client")]
+pub use client::*;
 #[cfg(feature = "ws")]
 pub use tungstenite::*;
 #[cfg(feature = "ws-wtx")]
 pub use wtx::WtxUpgrader;
-#[cfg(feature = "ws-client")]
-pub use client::*;

@@ -16,16 +16,16 @@ use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
+#[cfg(feature = "ws")]
+use crate::libs::ws::HyperTungsteniteUpgrader;
+#[cfg(any(feature = "ws", feature = "ws-wtx"))]
+use crate::libs::ws::TlsListener;
+#[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
+use crate::libs::ws::WtxUpgrader;
 use crate::libs::ws::{
     BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
     WsStream, WsUpgrader,
 };
-#[cfg(any(feature = "ws", feature = "ws-wtx"))]
-use crate::libs::ws::TlsListener;
-#[cfg(feature = "ws")]
-use crate::libs::ws::HyperTungsteniteUpgrader;
-#[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
-use crate::libs::ws::WtxUpgrader;
 use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
@@ -236,7 +236,9 @@ impl WebsocketServer {
 
     #[cfg(not(any(feature = "ws", feature = "ws-wtx")))]
     async fn listen_tls(self, _listener: TcpListener) -> Result<()> {
-        bail!("TLS requires a ws backend that provides TLS support (e.g. the `ws` or `ws-wtx` feature)")
+        bail!(
+            "TLS requires a ws backend that provides TLS support (e.g. the `ws` or `ws-wtx` feature)"
+        )
     }
 
     async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {

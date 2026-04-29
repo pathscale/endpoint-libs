@@ -229,22 +229,31 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
         // None means conn closed without the service sending an upgrade event (CORS
         // preflight, health check, rejected request). No select needed: the upgrade
         // event is always buffered before tx closes, so recv order is deterministic.
-        let Some(UpgradeEvent { on_upgrade, protocol }) = rx.recv().await else {
-            return Err(eyre!("not a websocket upgrade: connection closed without upgrade event"));
+        let Some(UpgradeEvent {
+            on_upgrade,
+            protocol,
+        }) = rx.recv().await
+        else {
+            return Err(eyre!(
+                "not a websocket upgrade: connection closed without upgrade event"
+            ));
         };
 
-        debug!(ws_server = true, ?addr, "Upgrade event received, completing handshake");
+        debug!(
+            ws_server = true,
+            ?addr,
+            "Upgrade event received, completing handshake"
+        );
 
         // For H1, conn already resolved on_upgrade before it completed.
         // For H2, the conn background task interleaves on the LocalSet and advances
         // H2 framing until on_upgrade resolves, then keeps running after.
         let upgraded = on_upgrade.await.map_err(|e| eyre!(e))?;
-        let ws = WebSocketStream::from_raw_socket(
-            TokioIo::new(upgraded),
-            Role::Server,
-            None,
-        ).await;
-        Ok((Box::new(HyperWsStream { inner: ws }) as Box<dyn WsStream + 'static>, protocol))
+        let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+        Ok((
+            Box::new(HyperWsStream { inner: ws }) as Box<dyn WsStream + 'static>,
+            protocol,
+        ))
     }
 }
 

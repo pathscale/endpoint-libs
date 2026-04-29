@@ -211,10 +211,7 @@ async fn main() -> Result<()> {
     let key_path = cert_dir.path().join("key.pem");
 
     let key_pair = rcgen::KeyPair::generate()?;
-    let params = rcgen::CertificateParams::new(vec![
-        "localhost".into(),
-        "127.0.0.1".into(),
-    ])?;
+    let params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
     let cert = params.self_signed(&key_pair)?;
 
     std::fs::write(&cert_path, cert.pem())?;

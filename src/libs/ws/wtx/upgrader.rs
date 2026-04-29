@@ -1,23 +1,28 @@
 use std::net::SocketAddr;
 
-use async_trait::async_trait;
-use eyre::{Result, eyre};
-use httparse::Request as HttpRequest;
-use tokio::io::AsyncReadExt;
-use tracing::*;
-use wtx::{
-    collection::Vector,
-    http::{Headers, HttpRecvParams, Protocol},
-    http2::{Http2, Http2Buffer, WebSocketOverStream},
-    rng::Xorshift64,
-    stream::Stream,
-    web_socket::{Frame, OpCode, WebSocket, WebSocketBuffer, WebSocketPayloadOrigin},
-};
-use wtx::http2::Http2ErrorCode;
 use super::stream::TokioStreamAdapter;
 use crate::libs::ws::{
     WsMessage as Message, WsServerConfig,
     traits::{BoxedStream, StreamError, WsStream, WsUpgrader},
+};
+use async_trait::async_trait;
+use eyre::{Result, eyre};
+use httparse::Request as HttpRequest;
+#[cfg(feature = "ws-wtx-http2")]
+use tokio::io::AsyncReadExt;
+use tracing::*;
+#[cfg(feature = "ws-wtx-http2")]
+use wtx::http2::Http2ErrorCode;
+use wtx::{
+    collection::Vector,
+    rng::Xorshift64,
+    stream::Stream,
+    web_socket::{Frame, OpCode, WebSocket, WebSocketBuffer, WebSocketPayloadOrigin},
+};
+#[cfg(feature = "ws-wtx-http2")]
+use wtx::{
+    http::{Headers, HttpRecvParams, Protocol},
+    http2::{Http2, Http2Buffer, WebSocketOverStream},
 };
 
 const MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
@@ -28,43 +33,56 @@ pub struct WtxUpgrader;
 impl WsUpgrader for WtxUpgrader {
     async fn upgrade(
         &self,
-        stream: BoxedStream,
+        mut stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
     ) -> Result<(Box<dyn WsStream>, String)> {
-        // Try H2 first by attempting an H2 preface read. If the first bytes
-        // match the H2 preface, route to the H2 upgrader. Otherwise replay
-        // the peeked bytes and fall through to the H1 (WebSocketAcceptor) path.
-        let mut peek_buf = [0u8; 24];
-        let mut stream = stream;
-        let n = stream
-            .read(&mut peek_buf)
-            .await
-            .map_err(|e| eyre!("failed to read for protocol detection: {e}"))?;
+        #[cfg(feature = "ws-wtx-http2")]
+        {
+            // Try H2 first by peeking at the first bytes. If they match
+            // the H2 preface, route to the H2 upgrader. Otherwise replay
+            // the peeked bytes and fall through to H1.
+            let mut peek_buf = [0u8; 24];
+            let n = (&mut stream)
+                .read(&mut peek_buf)
+                .await
+                .map_err(|e| eyre!("failed to read for protocol detection: {e}"))?;
 
-        if n == 0 {
-            return Err(eyre!("connection closed before protocol detection"));
+            if n == 0 {
+                return Err(eyre!("connection closed before protocol detection"));
+            }
+
+            let is_h2 = n == 24
+                && peek_buf[0..4] == [b'P', b'R', b'I', b' ']
+                && peek_buf[4..16] == *b"* HTTP/2.0\r\n"
+                && peek_buf[16..18] == [b'\r', b'\n']
+                && peek_buf[18..20] == [b'S', b'M']
+                && peek_buf[20..22] == [b'\r', b'\n']
+                && peek_buf[22..24] == [b'\r', b'\n'];
+
+            if is_h2 {
+                debug!(ws_server = true, ?addr, "H2 connection detected");
+                let replayed: BoxedStream =
+                    Box::new(TokioStreamAdapter::with_prefix(stream, &peek_buf[..n]));
+                let (read_half, write_half) = tokio::io::split(replayed);
+                return upgrade_h2(read_half, write_half, addr).await;
+            }
+
+            debug!(ws_server = true, ?addr, "H1 connection detected");
+            return upgrade_h1(
+                TokioStreamAdapter::with_prefix(stream, &peek_buf[..n]),
+                addr,
+                config,
+                cached_date,
+            )
+            .await;
         }
 
-        let is_h2 = n == 24
-            && peek_buf[0..4] == [b'P', b'R', b'I', b' ']
-            && peek_buf[4..16] == *b"* HTTP/2.0\r\n"
-            && peek_buf[16..18] == [b'\r', b'\n']
-            && peek_buf[18..20] == [b'S', b'M']
-            && peek_buf[20..22] == [b'\r', b'\n']
-            && peek_buf[22..24] == [b'\r', b'\n'];
-
-        if is_h2 {
-            debug!(ws_server = true, ?addr, "H2 connection detected");
-            // Http2::accept() reads the preface itself — replay the consumed bytes.
-            let replayed: BoxedStream =
-                Box::new(TokioStreamAdapter::with_prefix(stream, &peek_buf[..n]));
-            let (read_half, write_half) = tokio::io::split(replayed);
-            upgrade_h2(read_half, write_half, addr).await
-        } else {
-            debug!(ws_server = true, ?addr, "H1 connection detected");
-            upgrade_h1(TokioStreamAdapter::with_prefix(stream, &peek_buf[..n]), addr, config, cached_date).await
+        #[cfg(not(feature = "ws-wtx-http2"))]
+        {
+            debug!(ws_server = true, ?addr, "H1 connection (H2 disabled)");
+            upgrade_h1(TokioStreamAdapter::new(stream), addr, config, cached_date).await
         }
     }
 }
@@ -93,11 +111,15 @@ async fn upgrade_h1(
             .await
             .map_err(|e| eyre!("read during H1 upgrade on {addr}: {e}"))?;
         if n == 0 {
-            return Err(eyre!("not a websocket upgrade: connection closed during headers"));
+            return Err(eyre!(
+                "not a websocket upgrade: connection closed during headers"
+            ));
         }
         buf.extend_from_slice(&tmp[..n]);
         if buf.len() > MAX_HTTP_HEADER_LEN {
-            return Err(eyre!("not a websocket upgrade: headers too large on {addr}"));
+            return Err(eyre!(
+                "not a websocket upgrade: headers too large on {addr}"
+            ));
         }
         if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break pos + 4;
@@ -109,14 +131,22 @@ async fn upgrade_h1(
     match req.parse(&buf[..header_end]) {
         Ok(httparse::Status::Complete(_)) => {}
         Ok(httparse::Status::Partial) => {
-            return Err(eyre!("not a websocket upgrade: incomplete HTTP request on {addr}"));
+            return Err(eyre!(
+                "not a websocket upgrade: incomplete HTTP request on {addr}"
+            ));
         }
         Err(e) => {
-            return Err(eyre!("not a websocket upgrade: HTTP parse error on {addr}: {e}"));
+            return Err(eyre!(
+                "not a websocket upgrade: HTTP parse error on {addr}: {e}"
+            ));
         }
     }
 
-    if !req.method.map(|m| m.eq_ignore_ascii_case("GET")).unwrap_or(false) {
+    if !req
+        .method
+        .map(|m| m.eq_ignore_ascii_case("GET"))
+        .unwrap_or(false)
+    {
         return Err(eyre!("not a websocket upgrade: expected GET on {addr}"));
     }
 
@@ -132,8 +162,9 @@ async fn upgrade_h1(
         if h.name.eq_ignore_ascii_case("Upgrade") {
             has_upgrade = value.eq_ignore_ascii_case("websocket");
         } else if h.name.eq_ignore_ascii_case("Connection") {
-            has_connection_upgrade =
-                value.split(',').any(|t| t.trim().eq_ignore_ascii_case("upgrade"));
+            has_connection_upgrade = value
+                .split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("upgrade"));
         } else if h.name.eq_ignore_ascii_case("Sec-WebSocket-Version") {
             ws_version_ok = value == "13";
         } else if h.name.eq_ignore_ascii_case("Sec-WebSocket-Key") {
@@ -144,10 +175,12 @@ async fn upgrade_h1(
     }
 
     if !has_upgrade || !has_connection_upgrade || !ws_version_ok {
-        return Err(eyre!("not a websocket upgrade: missing upgrade headers on {addr}"));
+        return Err(eyre!(
+            "not a websocket upgrade: missing upgrade headers on {addr}"
+        ));
     }
-    let key =
-        ws_key.ok_or_else(|| eyre!("not a websocket upgrade: missing Sec-WebSocket-Key on {addr}"))?;
+    let key = ws_key
+        .ok_or_else(|| eyre!("not a websocket upgrade: missing Sec-WebSocket-Key on {addr}"))?;
 
     // RFC 6455 §4.2.2: accept key = base64(SHA1(client_key + WS_GUID))
     let mut hasher = Sha1::new();
@@ -187,13 +220,17 @@ async fn upgrade_h1(
     ws.set_max_payload_len(MAX_FRAME_SIZE);
 
     Ok((
-        Box::new(GenericWsStream { ws, read_buffer: Vector::new() }) as Box<dyn WsStream + 'static>,
+        Box::new(GenericWsStream {
+            ws,
+            read_buffer: Vector::new(),
+        }) as Box<dyn WsStream + 'static>,
         protocol,
     ))
 }
 
 // -- H2 path --
 
+#[cfg(feature = "ws-wtx-http2")]
 async fn upgrade_h2(
     reader: tokio::io::ReadHalf<BoxedStream>,
     writer: tokio::io::WriteHalf<BoxedStream>,
@@ -210,7 +247,10 @@ async fn upgrade_h2(
 
     let (mut server_stream, protocol) = http2
         .stream(|req, _protocol| {
-            let proto = req.rrd.headers.get_by_name(b"sec-websocket-protocol")
+            let proto = req
+                .rrd
+                .headers
+                .get_by_name(b"sec-websocket-protocol")
                 .map(|h| h.value.to_string())
                 .unwrap_or_default();
             proto
@@ -220,7 +260,9 @@ async fn upgrade_h2(
         .ok_or_else(|| eyre!("H2 connection closed before any stream"))?;
 
     if server_stream.protocol() != Some(Protocol::WebSocket) {
-        return Err(eyre!("not a websocket upgrade: H2 stream is not a WS upgrade"));
+        return Err(eyre!(
+            "not a websocket upgrade: H2 stream is not a WS upgrade"
+        ));
     }
 
     // recv_req() is NOT called here — http2.stream() already delivered the
@@ -273,20 +315,26 @@ impl<S: Stream + Unpin + Send + 'static> WsStream for GenericWsStream<S> {
             Ok(f) => f,
             Err(e) => return Some(Err(map_wtx_err(e))),
         };
-        Some(Ok(payload_to_message(frame.op_code(), frame.payload().to_vec())?))
+        Some(Ok(payload_to_message(
+            frame.op_code(),
+            frame.payload().to_vec(),
+        )?))
     }
 }
 
 // -- H2 WsStream wrapper --
 
+#[cfg(feature = "ws-wtx-http2")]
 type H2ServerStream = wtx::http2::ServerStream<Http2Buffer, tokio::io::WriteHalf<BoxedStream>>;
 
+#[cfg(feature = "ws-wtx-http2")]
 struct H2WsStream {
     ws: WebSocketOverStream<H2ServerStream>,
     read_buffer: Vector<u8>,
     _http2: Http2<Http2Buffer, tokio::io::WriteHalf<BoxedStream>, false>,
 }
 
+#[cfg(feature = "ws-wtx-http2")]
 #[async_trait(?Send)]
 impl WsStream for H2WsStream {
     async fn send(&mut self, msg: Message) -> Result<(), StreamError> {
@@ -303,8 +351,8 @@ impl WsStream for H2WsStream {
             Ok(f) => f,
             Err(e) => {
                 self._http2.send_go_away(Http2ErrorCode::NoError).await;
-                return Some(Err(map_wtx_err(e)))
-            },
+                return Some(Err(map_wtx_err(e)));
+            }
         };
 
         if frame.op_code() == OpCode::Close {
@@ -312,7 +360,10 @@ impl WsStream for H2WsStream {
             return Some(Ok(Message::Close(None)));
         }
 
-        Some(Ok(payload_to_message(frame.op_code(), frame.payload().to_vec())?))
+        Some(Ok(payload_to_message(
+            frame.op_code(),
+            frame.payload().to_vec(),
+        )?))
     }
 }
 
