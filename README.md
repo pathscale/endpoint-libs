@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/1.7.17/status.svg)](https://deps.rs/crate/endpoint-libs/1.7.17)
+[![Security audit](https://deps.rs/crate/endpoint-libs/1.7.18/status.svg)](https://deps.rs/crate/endpoint-libs/1.7.18)
 
 Common library used across Pathscale projects. Contains generic utilities and shared types that are not specific to any single service, including a WebSocket server implementation, endpoint schema types for use with [endpoint-gen](https://github.com/pathscale/endpoint-gen), structured logging setup, and more.
 
