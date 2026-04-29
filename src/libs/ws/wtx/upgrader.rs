@@ -13,7 +13,7 @@ use wtx::{
     stream::Stream,
     web_socket::{Frame, OpCode, WebSocket, WebSocketBuffer, WebSocketPayloadOrigin},
 };
-
+use wtx::http2::Http2ErrorCode;
 use super::stream::TokioStreamAdapter;
 use crate::libs::ws::{
     WsMessage as Message, WsServerConfig,
@@ -301,8 +301,17 @@ impl WsStream for H2WsStream {
         self.read_buffer.clear();
         let frame = match self.ws.read_frame(&mut self.read_buffer).await {
             Ok(f) => f,
-            Err(e) => return Some(Err(map_wtx_err(e))),
+            Err(e) => {
+                self._http2.send_go_away(Http2ErrorCode::NoError).await;
+                return Some(Err(map_wtx_err(e)))
+            },
         };
+
+        if frame.op_code() == OpCode::Close {
+            self._http2.send_go_away(Http2ErrorCode::NoError).await;
+            return Some(Ok(Message::Close(None)));
+        }
+
         Some(Ok(payload_to_message(frame.op_code(), frame.payload().to_vec())?))
     }
 }
@@ -321,11 +330,7 @@ fn message_to_payload(msg: Message) -> (OpCode, Vec<u8>) {
 
 fn payload_to_message(op_code: OpCode, payload: Vec<u8>) -> Option<Message> {
     match op_code {
-        OpCode::Text => {
-            let text = String::from_utf8_lossy(&payload);
-            tracing::info!("Received: {}, op_code: {:?}", text, op_code);
-            Some(Message::Text(text.to_string().into()))
-        },
+        OpCode::Text => Some(Message::Text(String::from_utf8(payload).ok()?.into())),
         OpCode::Binary => Some(Message::Binary(payload.into())),
         OpCode::Ping => Some(Message::Ping(payload.into())),
         OpCode::Pong => Some(Message::Pong(payload.into())),
