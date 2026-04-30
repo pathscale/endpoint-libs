@@ -474,6 +474,8 @@ pub struct WsServerConfig {
     pub header_only: bool,
     #[serde(skip)]
     pub allow_cors_urls: Arc<Option<Vec<String>>>,
+    #[serde(default = "WsServerConfig::default_server_name")]
+    pub server_name: String,
 }
 
 impl Default for WsServerConfig {
@@ -489,6 +491,7 @@ impl Default for WsServerConfig {
             drop_conn_on_buffer_full: false,
             header_only: false,
             allow_cors_urls: Arc::new(None),
+            server_name: Self::default_server_name(),
         }
     }
 }
@@ -496,6 +499,9 @@ impl Default for WsServerConfig {
 impl WsServerConfig {
     fn default_message_buffer_size() -> usize {
         256
+    }
+    fn default_server_name() -> String {
+        "RustWebsocketServer/1.0".to_string()
     }
 }
 

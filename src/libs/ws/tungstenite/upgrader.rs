@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use eyre::{Result, eyre};
@@ -23,8 +24,8 @@ use super::super::{
 
 static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
 static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
-static HDR_SERVER: HeaderValue = HeaderValue::from_static("RustWebsocketServer/1.0");
 static HDR_CREDENTIALS_TRUE: HeaderValue = HeaderValue::from_static("true");
+static SERVER_HEADER: OnceLock<HeaderValue> = OnceLock::new();
 
 fn build_response(
     status: StatusCode,
@@ -39,7 +40,27 @@ fn build_response(
     if let Ok(v) = cached_date.parse::<HeaderValue>() {
         resp.headers_mut().append("Date", v);
     }
-    resp.headers_mut().append("Server", HDR_SERVER.clone());
+    let server_val = SERVER_HEADER.get_or_init(|| {
+        let app = option_env!("WS_SERVER_NAME").unwrap_or(&config.server_name);
+        format!("{} endpointlibs/{}", app, env!("CARGO_PKG_VERSION"))
+            .parse::<HeaderValue>()
+            .expect("invalid Server header value")
+    });
+    resp.headers_mut().append("Server", server_val.clone());
+    resp.headers_mut().append(
+        "Content-Type",
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp.headers_mut().append(
+        "X-Content-Type-Options",
+        HeaderValue::from_static("nosniff"),
+    );
+    if status.is_client_error() || status.is_server_error() {
+        resp.headers_mut().append(
+            "Cache-Control",
+            HeaderValue::from_static("no-store"),
+        );
+    }
     resp
 }
 
@@ -226,6 +247,7 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                 );
                 if let Some(derived) = derived {
                     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+                    resp.headers_mut().remove("content-type");
                     resp.headers_mut().append(CONNECTION, HDR_UPGRADE.clone());
                     resp.headers_mut().append(UPGRADE, HDR_WEBSOCKET.clone());
                     resp.headers_mut()
@@ -330,6 +352,7 @@ fn add_cors_headers(
     if let Ok(v) = origin.parse::<HeaderValue>() {
         resp.headers_mut().append("Access-Control-Allow-Origin", v.clone());
         resp.headers_mut().append("Timing-Allow-Origin", v);
+        resp.headers_mut().append("Vary", HeaderValue::from_static("Origin"));
         resp.headers_mut().append(
             "Access-Control-Allow-Credentials",
             HDR_CREDENTIALS_TRUE.clone(),
