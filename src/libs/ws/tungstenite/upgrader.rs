@@ -336,7 +336,7 @@ fn add_cors_headers(
         );
         resp.headers_mut().append(
             "Access-Control-Allow-Methods",
-            "GET, OPTIONS, CONNECT".parse().unwrap(),
+            "GET, HEAD, OPTIONS, CONNECT".parse().unwrap(),
         );
         if let Some(req_headers) = access_control_request_headers {
             if let Ok(v) = req_headers.parse::<HeaderValue>() {
