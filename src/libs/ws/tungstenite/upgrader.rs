@@ -7,7 +7,7 @@ use eyre::{Result, eyre};
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONNECTION, HeaderValue, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
+use hyper::header::{CONNECTION, HeaderMap, HeaderValue, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -25,7 +25,7 @@ use super::super::{
 static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
 static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
 static HDR_CREDENTIALS_TRUE: HeaderValue = HeaderValue::from_static("true");
-static SERVER_HEADER: OnceLock<HeaderValue> = OnceLock::new();
+static BASE_HEADERS: OnceLock<HeaderMap> = OnceLock::new();
 
 fn build_response(
     status: StatusCode,
@@ -36,25 +36,48 @@ fn build_response(
 ) -> Response<Empty<Bytes>> {
     let mut resp = Response::new(Empty::<Bytes>::new());
     *resp.status_mut() = status;
+    *resp.headers_mut() = BASE_HEADERS.get_or_init(|| {
+        let mut h = HeaderMap::new();
+        h.insert(
+            hyper::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        h.insert(
+            "x-content-type-options".parse::<hyper::header::HeaderName>().unwrap(),
+            HeaderValue::from_static("nosniff"),
+        );
+        let app = option_env!("WS_SERVER_NAME").unwrap_or(&config.server_name);
+        let sv = format!("{} endpointlibs/{}", app, env!("CARGO_PKG_VERSION"));
+        h.insert("server", sv.parse::<HeaderValue>().expect("invalid Server header value"));
+
+        if config.allow_cors_urls.is_none() {
+            h.insert(
+                "access-control-allow-origin",
+                HeaderValue::from_static("*"),
+            );
+            h.insert(
+                "access-control-allow-methods",
+                HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
+            );
+            h.insert(
+                "access-control-allow-headers",
+                HeaderValue::from_static(
+                    "Content-Type, Authorization, Sec-WebSocket-Key, \
+                     Sec-WebSocket-Version, Sec-WebSocket-Extensions, \
+                     Sec-WebSocket-Protocol",
+                ),
+            );
+            h.insert(
+                "access-control-max-age",
+                HeaderValue::from_static("86400"),
+            );
+        }
+        h
+    }).clone();
     add_cors_headers(&mut resp, origin, config, access_control_request_headers);
     if let Ok(v) = cached_date.parse::<HeaderValue>() {
         resp.headers_mut().append("Date", v);
     }
-    let server_val = SERVER_HEADER.get_or_init(|| {
-        let app = option_env!("WS_SERVER_NAME").unwrap_or(&config.server_name);
-        format!("{} endpointlibs/{}", app, env!("CARGO_PKG_VERSION"))
-            .parse::<HeaderValue>()
-            .expect("invalid Server header value")
-    });
-    resp.headers_mut().append("Server", server_val.clone());
-    resp.headers_mut().append(
-        "Content-Type",
-        HeaderValue::from_static("text/plain; charset=utf-8"),
-    );
-    resp.headers_mut().append(
-        "X-Content-Type-Options",
-        HeaderValue::from_static("nosniff"),
-    );
     if status.is_client_error() || status.is_server_error() {
         resp.headers_mut().append(
             "Cache-Control",
@@ -337,43 +360,49 @@ fn add_cors_headers(
     config: &WsServerConfig,
     access_control_request_headers: &Option<String>,
 ) {
-    let Some(origin) = origin else {
-        return;
-    };
-
-    let allow = match config.allow_cors_urls.as_ref() {
-        Some(domains) => domains.iter().any(|d| d == origin),
-        None => true,
-    };
-    if !allow {
-        return;
-    }
-
-    if let Ok(v) = origin.parse::<HeaderValue>() {
-        resp.headers_mut().append("Access-Control-Allow-Origin", v.clone());
-        resp.headers_mut().append("Timing-Allow-Origin", v);
-        resp.headers_mut().append("Vary", HeaderValue::from_static("Origin"));
-        resp.headers_mut().append(
-            "Access-Control-Allow-Credentials",
-            HDR_CREDENTIALS_TRUE.clone(),
-        );
-        resp.headers_mut().append(
-            "Access-Control-Allow-Methods",
-            "GET, HEAD, OPTIONS, CONNECT".parse().unwrap(),
-        );
-        if let Some(req_headers) = access_control_request_headers {
-            if let Ok(v) = req_headers.parse::<HeaderValue>() {
-                resp.headers_mut().append("Access-Control-Allow-Headers", v);
+    match config.allow_cors_urls.as_ref() {
+        None => {
+            // Wildcard mode — static CORS headers are in the template.
+            // Only Access-Control-Allow-Headers can vary (preflight echo).
+            if let Some(req_headers) = access_control_request_headers {
+                if let Ok(v) = req_headers.parse::<HeaderValue>() {
+                    resp.headers_mut().insert("Access-Control-Allow-Headers", v);
+                }
             }
-        } else {
-            resp.headers_mut().append(
-                "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions, Sec-WebSocket-Protocol"
-                    .parse()
-                    .unwrap(),
-            );
         }
-        resp.headers_mut()
-            .append("Access-Control-Max-Age", "86400".parse().unwrap());
+        Some(domains) => {
+            // Specific domains — echo the requesting origin, allow credentials.
+            let Some(origin_str) = origin else { return };
+            if !domains.iter().any(|d| d == origin_str) {
+                return;
+            }
+            if let Ok(v) = origin_str.parse::<HeaderValue>() {
+                resp.headers_mut().append("Access-Control-Allow-Origin", v.clone());
+                resp.headers_mut().append("Timing-Allow-Origin", v);
+                resp.headers_mut().append("Vary", HeaderValue::from_static("Origin"));
+                resp.headers_mut().append(
+                    "Access-Control-Allow-Credentials",
+                    HDR_CREDENTIALS_TRUE.clone(),
+                );
+                resp.headers_mut().append(
+                    "Access-Control-Allow-Methods",
+                    "GET, HEAD, OPTIONS, CONNECT".parse().unwrap(),
+                );
+                if let Some(req_headers) = access_control_request_headers {
+                    if let Ok(v) = req_headers.parse::<HeaderValue>() {
+                        resp.headers_mut().append("Access-Control-Allow-Headers", v);
+                    }
+                } else {
+                    resp.headers_mut().append(
+                        "Access-Control-Allow-Headers",
+                        "Content-Type, Authorization, Sec-WebSocket-Key, Sec-WebSocket-Version, Sec-WebSocket-Extensions, Sec-WebSocket-Protocol"
+                            .parse()
+                            .unwrap(),
+                    );
+                }
+                resp.headers_mut()
+                    .append("Access-Control-Max-Age", "86400".parse().unwrap());
+            }
+        }
     }
 }
