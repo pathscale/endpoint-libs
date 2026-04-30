@@ -56,6 +56,10 @@ fn build_response(
                 HeaderValue::from_static("*"),
             );
             h.insert(
+                "timing-allow-origin",
+                HeaderValue::from_static("*"),
+            );
+            h.insert(
                 "access-control-allow-methods",
                 HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
             );
