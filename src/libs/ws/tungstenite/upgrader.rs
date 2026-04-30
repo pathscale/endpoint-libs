@@ -26,6 +26,23 @@ static HDR_WEBSOCKET: HeaderValue = HeaderValue::from_static("websocket");
 static HDR_SERVER: HeaderValue = HeaderValue::from_static("RustWebsocketServer/1.0");
 static HDR_CREDENTIALS_TRUE: HeaderValue = HeaderValue::from_static("true");
 
+fn build_response(
+    status: StatusCode,
+    origin: &Option<String>,
+    config: &WsServerConfig,
+    access_control_request_headers: &Option<String>,
+    cached_date: &str,
+) -> Response<Empty<Bytes>> {
+    let mut resp = Response::new(Empty::<Bytes>::new());
+    *resp.status_mut() = status;
+    add_cors_headers(&mut resp, origin, config, access_control_request_headers);
+    if let Ok(v) = cached_date.parse::<HeaderValue>() {
+        resp.headers_mut().append("Date", v);
+    }
+    resp.headers_mut().append("Server", HDR_SERVER.clone());
+    resp
+}
+
 struct UpgradeEvent {
     on_upgrade: hyper::upgrade::OnUpgrade,
     protocol: String,
@@ -83,30 +100,35 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string());
 
+                if req.method() == Method::HEAD {
+                    return Ok(build_response(
+                        StatusCode::OK, &origin, &config,
+                        &access_control_request_headers, &cached_date,
+                    ));
+                }
+
                 if is_options && access_control_request_method.is_some() {
                     debug!(ws_server = true, ?addr, "CORS preflight request detected");
-                    let mut resp = Response::new(Empty::<Bytes>::new());
-                    *resp.status_mut() = StatusCode::OK;
-                    add_cors_headers(&mut resp, &origin, &config, &access_control_request_headers);
-                    resp.headers_mut().append(
-                        "Date",
-                        cached_date
-                            .parse::<HeaderValue>()
-                            .unwrap_or_else(|_| HeaderValue::from_static("")),
-                    );
-                    resp.headers_mut().append("Server", HDR_SERVER.clone());
-                    return Ok::<_, Infallible>(resp);
+                    return Ok(build_response(
+                        StatusCode::OK, &origin, &config,
+                        &access_control_request_headers, &cached_date,
+                    ));
                 }
 
                 let derived = if is_http2 {
                     if req.method() == Method::GET {
-                        let resp = Response::new(Empty::<Bytes>::new());
-                        return Ok::<_, Infallible>(resp);
+                        return Ok(build_response(
+                            StatusCode::OK, &origin, &config,
+                            &access_control_request_headers, &cached_date,
+                        ));
                     }
                     if req.method() != Method::CONNECT {
                         debug!(ws_server = true, ?addr, method=%req.method(), "H2: rejected — expected CONNECT method");
-                        let mut resp = Response::new(Empty::<Bytes>::new());
-                        *resp.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
+                        let mut resp = build_response(
+                            StatusCode::METHOD_NOT_ALLOWED, &origin, &config,
+                            &access_control_request_headers, &cached_date,
+                        );
+                        resp.headers_mut().append("Allow", HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"));
                         return Ok::<_, Infallible>(resp);
                     }
                     let protocol_ext = req
@@ -127,9 +149,10 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             ?addr,
                             "H2: rejected — :protocol != websocket"
                         );
-                        let mut resp = Response::new(Empty::<Bytes>::new());
-                        *resp.status_mut() = StatusCode::BAD_REQUEST;
-                        return Ok::<_, Infallible>(resp);
+                        return Ok(build_response(
+                            StatusCode::BAD_REQUEST, &origin, &config,
+                            &access_control_request_headers, &cached_date,
+                        ));
                     }
                     debug!(
                         ws_server = true,
@@ -145,13 +168,22 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                         .map(|v| v.eq_ignore_ascii_case("websocket"))
                         .unwrap_or(false);
                     if !is_upgrade {
+                        if req.method() == Method::GET {
+                            return Ok(build_response(
+                                StatusCode::OK, &origin, &config,
+                                &access_control_request_headers, &cached_date,
+                            ));
+                        }
                         debug!(
                             ws_server = true,
-                            ?addr,
+                            ?addr, method=%req.method(),
                             "H1: rejected — missing or invalid Upgrade: websocket header"
                         );
-                        let mut resp = Response::new(Empty::<Bytes>::new());
-                        *resp.status_mut() = StatusCode::BAD_REQUEST;
+                        let mut resp = build_response(
+                            StatusCode::METHOD_NOT_ALLOWED, &origin, &config,
+                            &access_control_request_headers, &cached_date,
+                        );
+                        resp.headers_mut().append("Allow", HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"));
                         return Ok::<_, Infallible>(resp);
                     }
                     let Some(key) = req.headers().get(SEC_WEBSOCKET_KEY) else {
@@ -160,9 +192,10 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             ?addr,
                             "H1: rejected — missing Sec-WebSocket-Key"
                         );
-                        let mut resp = Response::new(Empty::<Bytes>::new());
-                        *resp.status_mut() = StatusCode::BAD_REQUEST;
-                        return Ok::<_, Infallible>(resp);
+                        return Ok(build_response(
+                            StatusCode::BAD_REQUEST, &origin, &config,
+                            &access_control_request_headers, &cached_date,
+                        ));
                     };
                     debug!(
                         ws_server = true,
@@ -187,7 +220,10 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                 .await
                 .ok();
 
-                let mut resp = Response::new(Empty::<Bytes>::new());
+                let mut resp = build_response(
+                    StatusCode::OK, &origin, &config,
+                    &access_control_request_headers, &cached_date,
+                );
                 if let Some(derived) = derived {
                     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
                     resp.headers_mut().append(CONNECTION, HDR_UPGRADE.clone());
@@ -202,15 +238,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                         resp.headers_mut().append("Sec-WebSocket-Protocol", val);
                     }
                 }
-
-                add_cors_headers(&mut resp, &origin, &config, &access_control_request_headers);
-                resp.headers_mut().append(
-                    "Date",
-                    cached_date
-                        .parse::<HeaderValue>()
-                        .unwrap_or_else(|_| HeaderValue::from_static("")),
-                );
-                resp.headers_mut().append("Server", HDR_SERVER.clone());
 
                 Ok::<_, Infallible>(resp)
             }
@@ -301,7 +328,8 @@ fn add_cors_headers(
     }
 
     if let Ok(v) = origin.parse::<HeaderValue>() {
-        resp.headers_mut().append("Access-Control-Allow-Origin", v);
+        resp.headers_mut().append("Access-Control-Allow-Origin", v.clone());
+        resp.headers_mut().append("Timing-Allow-Origin", v);
         resp.headers_mut().append(
             "Access-Control-Allow-Credentials",
             HDR_CREDENTIALS_TRUE.clone(),
