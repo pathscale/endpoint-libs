@@ -98,6 +98,7 @@ fn parse_ty(ty: &Type, value: &str) -> Result<serde_json::Value> {
         Type::Enum { .. } => serde_json::Value::String(value.to_string()),
         Type::EnumRef { .. } => serde_json::Value::String(value.to_string()),
         Type::UUID => serde_json::Value::String(value.to_string()),
+        Type::NanoId { .. } => serde_json::Value::String(value.to_string()),
         Type::Optional(ty) => parse_ty(ty, value)?,
         Type::BlockchainAddress => serde_json::Value::String(value.to_string()),
         ty => bail!("Not implemented {:?}", ty),
