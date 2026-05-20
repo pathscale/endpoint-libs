@@ -59,6 +59,28 @@ impl Display for CustomError {
 
 impl std::error::Error for CustomError {}
 
+/// Trait for handler-specific error enums.
+///
+/// Each variant defines its own error code and params string.
+/// Implementations provide their own `From<Self> for CustomError`.
+pub trait HandlerError: std::error::Error + Send + Sync + Into<CustomError> + 'static {
+    /// Returns the error code for this variant.
+    fn error_code(&self) -> ErrorCode;
+
+    /// Returns the params string for this variant.
+    fn params(&self) -> String;
+}
+
+impl HandlerError for CustomError {
+    fn error_code(&self) -> ErrorCode {
+        self.code
+    }
+
+    fn params(&self) -> String {
+        self.params.as_str().unwrap_or("").to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct RequestContext {
     pub connection_id: ConnectionId,

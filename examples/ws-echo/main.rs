@@ -7,7 +7,7 @@ use endpoint_libs::libs::handler::RequestHandler;
 use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
 use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
 use endpoint_libs::libs::toolbox::{ArcToolbox, RequestContext};
-use endpoint_libs::libs::ws::toolbox::CustomError;
+use endpoint_libs::libs::ws::toolbox::{CustomError, HandlerError};
 use endpoint_libs::libs::ws::{
     AuthController, WebsocketServer, WsConnection, WsRequest, WsResponse, WsServerConfig,
 };
@@ -88,6 +88,54 @@ impl WsResponse for HoneyReceiveUserInfoResponse {
     type Request = HoneyReceiveUserInfoRequest;
 }
 
+// --- Typed error enum example ---
+//
+// This demonstrates the HandlerError trait for defining per-handler error codes.
+
+#[derive(Debug, Clone)]
+pub enum EchoTypedError {
+    MessageTooLong { max_length: u32, actual_length: u32 },
+    EmptyMessage,
+}
+
+impl std::fmt::Display for EchoTypedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MessageTooLong { max_length, actual_length } => {
+                write!(f, "message length {} exceeds maximum {}", actual_length, max_length)
+            }
+            Self::EmptyMessage => write!(f, "message cannot be empty"),
+        }
+    }
+}
+
+impl std::error::Error for EchoTypedError {}
+
+impl HandlerError for EchoTypedError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            // Handler-specific codes for Echo (method 1): 1001-1099
+            Self::MessageTooLong { .. } => ErrorCode::new(1001),
+            Self::EmptyMessage => ErrorCode::new(1002),
+        }
+    }
+
+    fn params(&self) -> String {
+        match self {
+            Self::MessageTooLong { max_length, actual_length } => {
+                format!("message length {} exceeds maximum {}", actual_length, max_length)
+            }
+            Self::EmptyMessage => "empty message not allowed".to_string(),
+        }
+    }
+}
+
+impl From<EchoTypedError> for CustomError {
+    fn from(err: EchoTypedError) -> Self {
+        CustomError::new(err.error_code(), err.params())
+    }
+}
+
 // --- Handlers ---
 
 pub struct MethodEcho;
@@ -95,13 +143,26 @@ pub struct MethodEcho;
 #[async_trait(?Send)]
 impl RequestHandler for MethodEcho {
     type Request = EchoRequest;
+    type Error = EchoTypedError;
 
-    async fn handle(&self, ctx: RequestContext, req: EchoRequest) -> Result<EchoResponse> {
+    async fn handle(&self, ctx: RequestContext, req: EchoRequest) -> Result<EchoResponse, EchoTypedError> {
         tracing::info!(
             conn_id = %ctx.connection_id,
             message = %req.message,
             "Echo request received"
         );
+
+        if req.message.is_empty() {
+            return Err(EchoTypedError::EmptyMessage);
+        }
+
+        if req.message.len() > 1000 {
+            return Err(EchoTypedError::MessageTooLong {
+                max_length: 1000,
+                actual_length: req.message.len() as u32,
+            });
+        }
+
         let response = EchoResponse {
             message: format!("echo: {}", req.message),
         };
@@ -119,12 +180,13 @@ pub struct MethodReceiveUserInfo;
 #[async_trait(?Send)]
 impl RequestHandler for MethodReceiveUserInfo {
     type Request = HoneyReceiveUserInfoRequest;
+    type Error = CustomError;
 
     async fn handle(
         &self,
         ctx: RequestContext,
         req: HoneyReceiveUserInfoRequest,
-    ) -> Result<HoneyReceiveUserInfoResponse> {
+    ) -> Result<HoneyReceiveUserInfoResponse, CustomError> {
         tracing::info!(
             conn_id = %ctx.connection_id,
             user_pub_id = %req.user_pub_id,
@@ -147,7 +209,7 @@ impl RequestHandler for MethodReceiveUserInfo {
             user_pub_id = %req.user_pub_id,
             "Rejecting ReceiveUserInfo with BAD_REQUEST"
         );
-        Err(CustomError::new(ErrorCode::BAD_REQUEST, msg).into())
+        Err(CustomError::new(ErrorCode::BAD_REQUEST, msg))
     }
 }
 

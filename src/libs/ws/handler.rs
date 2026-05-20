@@ -7,14 +7,17 @@ use crate::libs::{
     toolbox::{ArcToolbox, RequestContext, Toolbox},
     ws::{WsRequest, request_error_to_resp},
 };
+use crate::libs::ws::toolbox::{CustomError, HandlerError};
 
 #[allow(type_alias_bounds)]
-pub type Response<T: WsRequest> = Result<T::Response>;
+pub type Response<T: WsRequest, E: HandlerError = CustomError> = Result<T::Response, E>;
+
 #[async_trait(?Send)]
 pub trait RequestHandler: Send + Sync {
     type Request: WsRequest + 'static;
+    type Error: HandlerError + Into<eyre::Error>;
 
-    async fn handle(&self, ctx: RequestContext, req: Self::Request) -> Response<Self::Request>;
+    async fn handle(&self, ctx: RequestContext, req: Self::Request) -> Response<Self::Request, Self::Error>;
 }
 
 #[doc(hidden)]
@@ -53,6 +56,15 @@ impl<T: RequestHandler> RequestHandlerErased for T {
         let fut = RequestHandler::handle(self, ctx.clone(), data);
 
         let resp = fut.await;
+        // Convert handler error to eyre::Result via CustomError
+        let resp: eyre::Result<<T::Request as WsRequest>::Response> = match resp {
+            Ok(ok) => Ok(ok),
+            Err(err) => {
+                let custom: CustomError = err.into();
+                Err(custom.into())
+            }
+        };
+
         if let Some(resp) = Toolbox::encode_ws_response(ctx.clone(), resp) {
             toolbox.send(ctx.connection_id, resp);
         }
