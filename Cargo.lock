@@ -1306,6 +1306,7 @@ dependencies = [
  "convert_case 0.6.0",
  "dashmap",
  "deadpool-postgres",
+ "derive_more",
  "eyre",
  "futures",
  "hex",

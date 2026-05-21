@@ -11,6 +11,7 @@ examples/ws-echo/target/
 /.opencode
 /.serena
 /.kiro
+/.zed
 CLAUDE*.md
 AGENTS.md
 

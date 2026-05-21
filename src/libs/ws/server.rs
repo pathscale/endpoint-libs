@@ -12,7 +12,6 @@ use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tracing::*;
 
-use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
@@ -28,10 +27,10 @@ use crate::libs::ws::{
 };
 use crate::model::EndpointSchema;
 
-use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
+use super::{AuthControllerErased, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
 pub struct WebsocketServer {
-    pub auth_controller: Arc<dyn AuthController>,
+    pub auth_controller: Arc<dyn AuthControllerErased>,
     pub handlers: HashMap<u32, WsEndpoint>,
     pub message_receiver: parking_lot::Mutex<Option<mpsc::Receiver<ConnectionId>>>,
     pub toolbox: ArcToolbox,
@@ -58,7 +57,7 @@ impl WebsocketServer {
             upgrader: default_upgrader(),
         }
     }
-    pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
+    pub fn set_auth_controller(&mut self, controller: impl AuthControllerErased + 'static) {
         self.auth_controller = Arc::new(controller);
     }
     pub fn set_upgrader(&mut self, upgrader: Arc<dyn WsUpgrader>) {
@@ -154,16 +153,18 @@ impl WebsocketServer {
             .await;
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
+            let code = err.code;
+            let params = err.params.clone();
             self.toolbox
-                .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
+                .send_request_error(&raw_ctx, code, err.params);
             error!(
                 ws_server=true,
-                error_code=?ErrorCode::BAD_REQUEST,
+                error_code=?code,
                 ip_addr=%raw_ctx.ip_addr,
                 user_id=raw_ctx.user_id,
                 conn_id=raw_ctx.connection_id,
                 roles=?raw_ctx.roles,
-                error=%err,
+                error=%params,
                 "Error while handling connection"
             );
             return;

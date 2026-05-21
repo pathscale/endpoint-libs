@@ -1,55 +1,149 @@
 use convert_case::Case;
 use convert_case::Casing;
-use eyre::{Context, ContextCompat, Result, bail};
+use derive_more::Display;
+use eyre::{Context, Result, bail};
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::*;
 
+use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox};
 use crate::model::EndpointSchema;
 use crate::model::Type;
 
 use super::WsConnection;
+use super::toolbox::{CustomError, HandlerError};
 
 pub trait AuthController: Sync + Send {
+    type Error: HandlerError;
+
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>>;
+    ) -> LocalBoxFuture<'static, Result<(), Self::Error>>;
 }
 
 pub struct SimpleAuthController;
 
 impl AuthController for SimpleAuthController {
+    type Error = CustomError;
+
     fn auth(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         _header: String,
         _conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<(), CustomError>> {
         async move { Ok(()) }.boxed()
     }
 }
 
 pub trait SubAuthController: Sync + Send {
+    type Error: HandlerError;
+
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         param: serde_json::Value,
         ctx: RequestContext,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<serde_json::Value>>;
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value, Self::Error>>;
 }
+
+pub trait SubAuthControllerErased: Sync + Send {
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value, CustomError>>;
+}
+
+impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value, CustomError>> {
+        let toolbox = toolbox.clone();
+        async move {
+            SubAuthController::auth(self, &toolbox, param, ctx, conn)
+                .await
+                .map_err(|e| e.into())
+        }
+        .boxed_local()
+    }
+}
+
+pub trait AuthControllerErased: Sync + Send {
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        header: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<(), CustomError>>;
+}
+
+impl<T: AuthController + 'static> AuthControllerErased for T {
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        header: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<(), CustomError>> {
+        let toolbox = toolbox.clone();
+        async move {
+            AuthController::auth(self, &toolbox, header, conn)
+                .await
+                .map_err(|e| e.into())
+        }
+        .boxed_local()
+    }
+}
+
+#[derive(Debug, Clone, Display)]
+pub enum EndpointAuthError {
+    #[display("Could not find method")]
+    MissingMethod,
+    #[display("Could not find endpoint for method {method}")]
+    EndpointNotFound { method: String },
+    #[display("Failed to parse parameter {param}: {reason}")]
+    ParameterParseError { param: String, reason: String },
+    #[display("Could not find param {param} {index}")]
+    MissingRequiredParameter { param: String, index: usize },
+}
+
+impl std::error::Error for EndpointAuthError {}
+
+impl HandlerError for EndpointAuthError {
+    fn error_code(&self) -> ErrorCode {
+        ErrorCode::BAD_REQUEST
+    }
+
+    fn params(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl From<EndpointAuthError> for CustomError {
+    fn from(err: EndpointAuthError) -> Self {
+        CustomError::new(err.error_code(), err.params())
+    }
+}
+
 pub struct EndpointAuthController {
     pub auth_endpoints: HashMap<String, WsAuthController>,
 }
 pub struct WsAuthController {
     pub schema: EndpointSchema,
-    pub handler: Arc<dyn SubAuthController>,
+    pub handler: Arc<dyn SubAuthControllerErased>,
 }
 
 impl Default for EndpointAuthController {
@@ -115,12 +209,14 @@ fn parse_protocol_header(header: &str) -> HashMap<&str, &str> {
 }
 
 impl AuthController for EndpointAuthController {
+    type Error = EndpointAuthError;
+
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<(), EndpointAuthError>> {
         let toolbox = toolbox.clone();
 
         async move {
@@ -128,21 +224,30 @@ impl AuthController for EndpointAuthController {
 
             debug!(ws_server = true, raw_header = %header, splits = ?splits, "EndpointAuthController: parsed protocol header");
 
-            let method = splits.get("0").context("Could not find method")?;
+            let method = splits.get("0").ok_or(EndpointAuthError::MissingMethod)?;
             debug!(ws_server = true, method = %method, "EndpointAuthController: resolved method");
             let endpoint = self
                 .auth_endpoints
                 .get(*method)
-                .with_context(|| format!("Could not find endpoint for method {method}"))?;
+                .ok_or_else(|| EndpointAuthError::EndpointNotFound { method: method.to_string() })?;
             let mut params = serde_json::Map::new();
             for (index, param) in endpoint.schema.parameters.iter().enumerate() {
                 let index = index + 1;
                 match splits.get(&index.to_string().as_str()) {
                     Some(value) => {
-                        params.insert(param.name.to_case(Case::Camel), parse_ty(&param.ty, value)?);
+                        params.insert(
+                            param.name.to_case(Case::Camel),
+                            parse_ty(&param.ty, value).map_err(|e| EndpointAuthError::ParameterParseError {
+                                param: param.name.clone(),
+                                reason: e.to_string(),
+                            })?,
+                        );
                     }
                     None if !matches!(&param.ty, Type::Optional(_)) => {
-                        bail!("Could not find param {} {}", param.name, index);
+                        return Err(EndpointAuthError::MissingRequiredParameter {
+                            param: param.name.clone(),
+                            index,
+                        });
                     }
                     _ => {}
                 }

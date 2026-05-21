@@ -15,7 +15,7 @@ pub type Response<T: WsRequest, E: HandlerError = CustomError> = Result<T::Respo
 #[async_trait(?Send)]
 pub trait RequestHandler: Send + Sync {
     type Request: WsRequest + 'static;
-    type Error: HandlerError + Into<eyre::Error>;
+    type Error: HandlerError;
 
     async fn handle(&self, ctx: RequestContext, req: Self::Request) -> Response<Self::Request, Self::Error>;
 }
@@ -56,14 +56,7 @@ impl<T: RequestHandler> RequestHandlerErased for T {
         let fut = RequestHandler::handle(self, ctx.clone(), data);
 
         let resp = fut.await;
-        // Convert handler error to eyre::Result via CustomError
-        let resp: eyre::Result<<T::Request as WsRequest>::Response> = match resp {
-            Ok(ok) => Ok(ok),
-            Err(err) => {
-                let custom: CustomError = err.into();
-                Err(custom.into())
-            }
-        };
+        let resp: Result<_, CustomError> = resp.map_err(|err| err.into());
 
         if let Some(resp) = Toolbox::encode_ws_response(ctx.clone(), resp) {
             toolbox.send(ctx.connection_id, resp);

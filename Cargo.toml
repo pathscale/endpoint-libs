@@ -123,6 +123,7 @@ tracing-subscriber = { version = "0.3", features = [
     "std",
     "fmt",
 ] }
+derive_more = { version = "2.0", features = ["display"] }
 bytes = "1.7"
 chrono = {version = "0.4.44", default-features = false, features = ["oldtime", "std", "now"]}
 urlencoding = "2.1"

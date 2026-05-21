@@ -221,12 +221,14 @@ impl RequestHandler for MethodReceiveUserInfo {
 struct AllowAllAuthController;
 
 impl AuthController for AllowAllAuthController {
+    type Error = CustomError;
+
     fn auth(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<(), CustomError>> {
         async move {
             let conn_id = conn.connection_id;
             tracing::info!(

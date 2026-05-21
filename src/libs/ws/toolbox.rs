@@ -16,17 +16,6 @@ use crate::libs::ws::{
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct NoResponseError;
-
-impl Display for NoResponseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NoResp")
-    }
-}
-
-impl std::error::Error for NoResponseError {}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomError {
     pub code: ErrorCode,
     pub params: Value,
@@ -249,7 +238,7 @@ impl Toolbox {
     }
     pub fn encode_ws_response<Resp: Serialize>(
         ctx: RequestContext,
-        resp: Result<Resp>,
+        resp: Result<Resp, CustomError>,
     ) -> Option<WsResponseValue> {
         #[allow(unused_variables)]
         let RequestContext {
@@ -278,13 +267,7 @@ impl Toolbox {
                     })
                 }
             },
-            Err(err) if err.is::<NoResponseError>() => {
-                return None;
-            }
-            Err(err) => match err.downcast::<CustomError>() {
-                Ok(err) => request_error_to_resp(&ctx, err.code, err.params),
-                Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
-            },
+            Err(err) => request_error_to_resp(&ctx, err.code, err.params),
         };
         Some(resp)
     }
