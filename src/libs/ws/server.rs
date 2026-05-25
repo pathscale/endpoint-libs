@@ -20,8 +20,8 @@ use crate::libs::utils::{get_conn_id, get_log_id};
 use crate::libs::ws::HyperTungsteniteUpgrader;
 #[cfg(any(feature = "ws", feature = "ws-wtx"))]
 use crate::libs::ws::TlsListener;
-#[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
-use crate::libs::ws::WtxUpgrader;
+#[cfg(feature = "ws")]
+use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
     BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
     WsStream, WsUpgrader,
@@ -93,6 +93,7 @@ impl WebsocketServer {
             );
         }
     }
+
     async fn handle_ws_handshake_and_connection(
         self: Arc<Self>,
         addr: SocketAddr,
@@ -103,26 +104,45 @@ impl WebsocketServer {
         let upgrader = self.upgrader.as_ref().ok_or_else(|| {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
         })?;
-        match upgrader
-            .upgrade(stream, addr, &self.config, &cached_date)
-            .await
-        {
-            Ok((ws_stream, protocol)) => {
-                debug!(ws_server = true, ?addr, protocol = %protocol, "WsServer: upgrade succeeded, protocol received");
-                self.post_upgrade_connection(addr, states, ws_stream, protocol)
-                    .await;
-                Ok(())
-            }
-            Err(e) if e.to_string().contains("not a websocket upgrade") => {
+
+        // Get upgrade event receiver - H2 yields multiple events, H1 yields one
+        let mut rx = upgrader
+            .upgrade_stream(stream, addr, &self.config, &cached_date)
+            .await?;
+
+        // Loop: spawn session task for each upgrade event
+        while let Some(event) = rx.recv().await {
+            let this = Arc::clone(&self);
+            let states = Arc::clone(&states);
+            let addr_clone = addr;
+
+            tokio::task::spawn_local(async move {
+                let ws_stream = match create_ws_stream(event.on_upgrade).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(ws_server = true, ?addr_clone, "on_upgrade failed: {e}");
+                        return;
+                    }
+                };
+
                 debug!(
                     ws_server = true,
-                    ?addr,
-                    "Non-WebSocket HTTP request ignored"
+                    ?addr_clone,
+                    protocol = %event.protocol,
+                    "WsServer: upgrade succeeded, protocol received"
                 );
-                Ok(())
-            }
-            Err(e) => Err(e),
+
+                this.post_upgrade_connection(addr_clone, states, ws_stream, event.protocol)
+                    .await;
+            });
         }
+
+        debug!(
+            ws_server = true,
+            ?addr,
+            "Connection handler loop exited (TCP connection closed)"
+        );
+        Ok(())
     }
 
     async fn post_upgrade_connection(
@@ -510,11 +530,7 @@ fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
     {
         return Some(Arc::new(HyperTungsteniteUpgrader));
     }
-    #[cfg(all(feature = "ws-wtx", not(feature = "ws")))]
-    {
-        return Some(Arc::new(WtxUpgrader));
-    }
-    #[cfg(not(any(feature = "ws", feature = "ws-wtx")))]
+    #[cfg(not(feature = "ws"))]
     {
         None
     }
