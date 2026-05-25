@@ -2,9 +2,9 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use crossfire::{AsyncRx, mpsc::Array};
 use eyre::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 
 use super::WsMessage as Message;
 use super::WsServerConfig;
@@ -67,5 +67,5 @@ pub trait WsUpgrader: Send + Sync {
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<mpsc::Receiver<UpgradeEvent>>;
+    ) -> Result<AsyncRx<Array<UpgradeEvent>>>;
 }

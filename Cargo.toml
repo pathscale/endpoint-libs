@@ -31,6 +31,7 @@ ws-core = [
     "dep:dashmap",
     "dep:async-trait",
     "dep:httpdate",
+    "dep:crossfire",
 ]
 ws-client = [
     # WS client (WsClient, WsClientBuilder) - standalone
@@ -171,6 +172,7 @@ sha1 = { version = "0.11", optional = true }
 base64 = { version = "0.22", optional = true }
 tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 webpki-roots = { version = "1.0.7", optional = true }
+crossfire = { version = "3.1", features = ["tokio"], optional = true }
 wtx = { version = "0.44", default-features = false, features = [
     "web-socket",
     "web-socket-handshake",

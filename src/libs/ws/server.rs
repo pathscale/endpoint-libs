@@ -106,12 +106,12 @@ impl WebsocketServer {
         })?;
 
         // Get upgrade event receiver - H2 yields multiple events, H1 yields one
-        let mut rx = upgrader
+        let rx = upgrader
             .upgrade_stream(stream, addr, &self.config, &cached_date)
             .await?;
 
         // Loop: spawn session task for each upgrade event
-        while let Some(event) = rx.recv().await {
+        while let Ok(event) = rx.recv().await {
             let this = Arc::clone(&self);
             let states = Arc::clone(&states);
             let addr_clone = addr;

@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use crossfire::AsyncRx;
+use crossfire::mpsc::{bounded_async, Array};
 use eyre::{Result, eyre};
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
@@ -13,7 +15,6 @@ use hyper::header::{
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -100,9 +101,9 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<mpsc::Receiver<UpgradeEvent>> {
+    ) -> Result<AsyncRx<Array<UpgradeEvent>>> {
         let io = TokioIo::new(stream);
-        let (tx, rx) = mpsc::channel::<UpgradeEvent>(8);
+        let (tx, rx) = bounded_async::<UpgradeEvent>(8);
 
         let svc_config = config.clone();
         let svc_date = cached_date.to_owned();
