@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use crossfire::AsyncRx;
-use crossfire::mpsc::{bounded_async, Array};
+use crossfire::mpsc::{Array, bounded_async};
 use eyre::{Result, eyre};
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
@@ -103,7 +103,7 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
         cached_date: &str,
     ) -> Result<AsyncRx<Array<UpgradeEvent>>> {
         let io = TokioIo::new(stream);
-        let (tx, rx) = bounded_async::<UpgradeEvent>(8);
+        let (tx, rx) = bounded_async::<UpgradeEvent>(2);
 
         let svc_config = config.clone();
         let svc_date = cached_date.to_owned();
