@@ -3,15 +3,18 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
+use crossfire::AsyncRx;
+use crossfire::mpsc::{Array, bounded_async};
 use eyre::{Result, eyre};
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
-use hyper::header::{CONNECTION, HeaderMap, HeaderValue, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE};
+use hyper::header::{
+    CONNECTION, HeaderMap, HeaderValue, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, UPGRADE,
+};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -19,7 +22,7 @@ use tracing::*;
 
 use super::super::{
     WsMessage as Message, WsServerConfig,
-    traits::{BoxedStream, StreamError, WsStream, WsUpgrader},
+    traits::{BoxedStream, StreamError, UpgradeEvent, WsStream, WsUpgrader},
 };
 
 static HDR_UPGRADE: HeaderValue = HeaderValue::from_static("upgrade");
@@ -36,79 +39,71 @@ fn build_response(
 ) -> Response<Empty<Bytes>> {
     let mut resp = Response::new(Empty::<Bytes>::new());
     *resp.status_mut() = status;
-    *resp.headers_mut() = BASE_HEADERS.get_or_init(|| {
-        let mut h = HeaderMap::new();
-        h.insert(
-            hyper::header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        h.insert(
-            "x-content-type-options".parse::<hyper::header::HeaderName>().unwrap(),
-            HeaderValue::from_static("nosniff"),
-        );
-        let app = option_env!("WS_SERVER_NAME").unwrap_or(&config.server_name);
-        let sv = format!("{} endpointlibs/{}", app, env!("CARGO_PKG_VERSION"));
-        h.insert("server", sv.parse::<HeaderValue>().expect("invalid Server header value"));
+    *resp.headers_mut() = BASE_HEADERS
+        .get_or_init(|| {
+            let mut h = HeaderMap::new();
+            h.insert(
+                hyper::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            );
+            h.insert(
+                "x-content-type-options"
+                    .parse::<hyper::header::HeaderName>()
+                    .unwrap(),
+                HeaderValue::from_static("nosniff"),
+            );
+            let app = option_env!("WS_SERVER_NAME").unwrap_or(&config.server_name);
+            let sv = format!("{} endpointlibs/{}", app, env!("CARGO_PKG_VERSION"));
+            h.insert(
+                "server",
+                sv.parse::<HeaderValue>()
+                    .expect("invalid Server header value"),
+            );
 
-        if config.allow_cors_urls.is_none() {
-            h.insert(
-                "access-control-allow-origin",
-                HeaderValue::from_static("*"),
-            );
-            h.insert(
-                "timing-allow-origin",
-                HeaderValue::from_static("*"),
-            );
-            h.insert(
-                "access-control-allow-methods",
-                HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
-            );
-            h.insert(
-                "access-control-allow-headers",
-                HeaderValue::from_static(
-                    "Content-Type, Authorization, Sec-WebSocket-Key, \
+            if config.allow_cors_urls.is_none() {
+                h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+                h.insert("timing-allow-origin", HeaderValue::from_static("*"));
+                h.insert(
+                    "access-control-allow-methods",
+                    HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
+                );
+                h.insert(
+                    "access-control-allow-headers",
+                    HeaderValue::from_static(
+                        "Content-Type, Authorization, Sec-WebSocket-Key, \
                      Sec-WebSocket-Version, Sec-WebSocket-Extensions, \
                      Sec-WebSocket-Protocol",
-                ),
-            );
-            h.insert(
-                "access-control-max-age",
-                HeaderValue::from_static("86400"),
-            );
-        }
-        h
-    }).clone();
+                    ),
+                );
+                h.insert("access-control-max-age", HeaderValue::from_static("86400"));
+            }
+            h
+        })
+        .clone();
     add_cors_headers(&mut resp, origin, config, access_control_request_headers);
     if let Ok(v) = cached_date.parse::<HeaderValue>() {
         resp.headers_mut().append("Date", v);
     }
     if status.is_client_error() || status.is_server_error() {
-        resp.headers_mut().append(
-            "Cache-Control",
-            HeaderValue::from_static("no-store"),
-        );
+        resp.headers_mut()
+            .append("Cache-Control", HeaderValue::from_static("no-store"));
     }
     resp
-}
-
-struct UpgradeEvent {
-    on_upgrade: hyper::upgrade::OnUpgrade,
-    protocol: String,
 }
 
 pub struct HyperTungsteniteUpgrader;
 
 #[async_trait]
 impl WsUpgrader for HyperTungsteniteUpgrader {
-    async fn upgrade(
+    async fn upgrade_stream(
         &self,
         stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<(Box<dyn WsStream>, String)> {
+    ) -> Result<AsyncRx<Array<UpgradeEvent>>> {
         let io = TokioIo::new(stream);
-        let (tx, mut rx) = mpsc::channel::<UpgradeEvent>(8);
+        let (tx, rx) = bounded_async::<UpgradeEvent>(2);
 
         let svc_config = config.clone();
         let svc_date = cached_date.to_owned();
@@ -150,33 +145,48 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
 
                 if req.method() == Method::HEAD {
                     return Ok(build_response(
-                        StatusCode::OK, &origin, &config,
-                        &access_control_request_headers, &cached_date,
+                        StatusCode::OK,
+                        &origin,
+                        &config,
+                        &access_control_request_headers,
+                        &cached_date,
                     ));
                 }
 
                 if is_options && access_control_request_method.is_some() {
                     debug!(ws_server = true, ?addr, "CORS preflight request detected");
                     return Ok(build_response(
-                        StatusCode::OK, &origin, &config,
-                        &access_control_request_headers, &cached_date,
+                        StatusCode::OK,
+                        &origin,
+                        &config,
+                        &access_control_request_headers,
+                        &cached_date,
                     ));
                 }
 
                 let derived = if is_http2 {
                     if req.method() == Method::GET {
                         return Ok(build_response(
-                            StatusCode::OK, &origin, &config,
-                            &access_control_request_headers, &cached_date,
+                            StatusCode::OK,
+                            &origin,
+                            &config,
+                            &access_control_request_headers,
+                            &cached_date,
                         ));
                     }
                     if req.method() != Method::CONNECT {
                         debug!(ws_server = true, ?addr, method=%req.method(), "H2: rejected — expected CONNECT method");
                         let mut resp = build_response(
-                            StatusCode::METHOD_NOT_ALLOWED, &origin, &config,
-                            &access_control_request_headers, &cached_date,
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            &origin,
+                            &config,
+                            &access_control_request_headers,
+                            &cached_date,
                         );
-                        resp.headers_mut().append("Allow", HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"));
+                        resp.headers_mut().append(
+                            "Allow",
+                            HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
+                        );
                         return Ok::<_, Infallible>(resp);
                     }
                     let protocol_ext = req
@@ -198,8 +208,11 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             "H2: rejected — :protocol != websocket"
                         );
                         return Ok(build_response(
-                            StatusCode::BAD_REQUEST, &origin, &config,
-                            &access_control_request_headers, &cached_date,
+                            StatusCode::BAD_REQUEST,
+                            &origin,
+                            &config,
+                            &access_control_request_headers,
+                            &cached_date,
                         ));
                     }
                     debug!(
@@ -218,8 +231,11 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                     if !is_upgrade {
                         if req.method() == Method::GET {
                             return Ok(build_response(
-                                StatusCode::OK, &origin, &config,
-                                &access_control_request_headers, &cached_date,
+                                StatusCode::OK,
+                                &origin,
+                                &config,
+                                &access_control_request_headers,
+                                &cached_date,
                             ));
                         }
                         debug!(
@@ -228,10 +244,16 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             "H1: rejected — missing or invalid Upgrade: websocket header"
                         );
                         let mut resp = build_response(
-                            StatusCode::METHOD_NOT_ALLOWED, &origin, &config,
-                            &access_control_request_headers, &cached_date,
+                            StatusCode::METHOD_NOT_ALLOWED,
+                            &origin,
+                            &config,
+                            &access_control_request_headers,
+                            &cached_date,
                         );
-                        resp.headers_mut().append("Allow", HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"));
+                        resp.headers_mut().append(
+                            "Allow",
+                            HeaderValue::from_static("GET, HEAD, OPTIONS, CONNECT"),
+                        );
                         return Ok::<_, Infallible>(resp);
                     }
                     let Some(key) = req.headers().get(SEC_WEBSOCKET_KEY) else {
@@ -241,8 +263,11 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             "H1: rejected — missing Sec-WebSocket-Key"
                         );
                         return Ok(build_response(
-                            StatusCode::BAD_REQUEST, &origin, &config,
-                            &access_control_request_headers, &cached_date,
+                            StatusCode::BAD_REQUEST,
+                            &origin,
+                            &config,
+                            &access_control_request_headers,
+                            &cached_date,
                         ));
                     };
                     debug!(
@@ -261,16 +286,29 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                     .to_string();
 
                 let on_upgrade = hyper::upgrade::on(&mut req);
-                tx.send(UpgradeEvent {
-                    on_upgrade,
-                    protocol: protocol.clone(),
-                })
-                .await
-                .ok();
+
+                // Send upgrade event through channel - for H2 this happens multiple times
+                if tx
+                    .send(UpgradeEvent {
+                        on_upgrade,
+                        protocol: protocol.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    debug!(
+                        ws_server = true,
+                        ?addr,
+                        "Upgrade channel closed, connection likely dropped"
+                    );
+                }
 
                 let mut resp = build_response(
-                    StatusCode::OK, &origin, &config,
-                    &access_control_request_headers, &cached_date,
+                    StatusCode::OK,
+                    &origin,
+                    &config,
+                    &access_control_request_headers,
+                    &cached_date,
                 );
                 if let Some(derived) = derived {
                     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
@@ -292,44 +330,16 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
             }
         });
 
-        // builder borrows into the conn future, making it non-'static; create both inside
-        // the task. conn runs independently: for H2 it drives framing for the WS session
-        // lifetime; for H1 it completes after the 101 is flushed. Either way, when conn
-        // finishes it drops the service closure and with it tx, closing rx.
+        // Spawn connection handler task - runs for TCP connection lifetime
+        // For H2: handles multiple CONNECT requests, sends multiple upgrade events
+        // For H1: handles single upgrade, tx closes after one event
         tokio::task::spawn_local(async move {
             let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
             builder.http2().enable_connect_protocol();
             let _ = builder.serve_connection_with_upgrades(io, service).await;
         });
 
-        // None means conn closed without the service sending an upgrade event (CORS
-        // preflight, health check, rejected request). No select needed: the upgrade
-        // event is always buffered before tx closes, so recv order is deterministic.
-        let Some(UpgradeEvent {
-            on_upgrade,
-            protocol,
-        }) = rx.recv().await
-        else {
-            return Err(eyre!(
-                "not a websocket upgrade: connection closed without upgrade event"
-            ));
-        };
-
-        debug!(
-            ws_server = true,
-            ?addr,
-            "Upgrade event received, completing handshake"
-        );
-
-        // For H1, conn already resolved on_upgrade before it completed.
-        // For H2, the conn background task interleaves on the LocalSet and advances
-        // H2 framing until on_upgrade resolves, then keeps running after.
-        let upgraded = on_upgrade.await.map_err(|e| eyre!(e))?;
-        let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-        Ok((
-            Box::new(HyperWsStream { inner: ws }) as Box<dyn WsStream + 'static>,
-            protocol,
-        ))
+        Ok(rx)
     }
 }
 
@@ -346,6 +356,12 @@ impl WsStream for HyperWsStream {
     async fn recv(&mut self) -> Option<Result<Message, StreamError>> {
         self.inner.next().await.map(|r| r.map_err(map_err))
     }
+}
+
+pub async fn create_ws_stream(on_upgrade: hyper::upgrade::OnUpgrade) -> Result<Box<dyn WsStream>> {
+    let upgraded = on_upgrade.await.map_err(|e| eyre!(e))?;
+    let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+    Ok(Box::new(HyperWsStream { inner: ws }) as Box<dyn WsStream + 'static>)
 }
 
 fn map_err(e: tokio_tungstenite::tungstenite::Error) -> StreamError {
@@ -381,9 +397,11 @@ fn add_cors_headers(
                 return;
             }
             if let Ok(v) = origin_str.parse::<HeaderValue>() {
-                resp.headers_mut().append("Access-Control-Allow-Origin", v.clone());
+                resp.headers_mut()
+                    .append("Access-Control-Allow-Origin", v.clone());
                 resp.headers_mut().append("Timing-Allow-Origin", v);
-                resp.headers_mut().append("Vary", HeaderValue::from_static("Origin"));
+                resp.headers_mut()
+                    .append("Vary", HeaderValue::from_static("Origin"));
                 resp.headers_mut().append(
                     "Access-Control-Allow-Credentials",
                     HDR_CREDENTIALS_TRUE.clone(),

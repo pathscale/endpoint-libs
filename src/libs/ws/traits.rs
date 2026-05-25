@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use crossfire::{AsyncRx, mpsc::Array};
 use eyre::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -48,13 +49,23 @@ pub trait WsStream: Unpin + Send {
     async fn recv(&mut self) -> Option<Result<Message, StreamError>>;
 }
 
+/// An upgrade event yielded by the upgrader.
+/// Contains the on_upgrade future and the negotiated protocol.
+pub struct UpgradeEvent {
+    pub on_upgrade: hyper::upgrade::OnUpgrade,
+    pub protocol: String,
+}
+
 #[async_trait]
 pub trait WsUpgrader: Send + Sync {
-    async fn upgrade(
+    /// Returns a receiver that yields upgrade events.
+    /// - H1: receiver yields exactly one event (single WebSocket per TCP connection)
+    /// - H2: receiver yields multiple events (one per CONNECT request, multiplexing)
+    async fn upgrade_stream(
         &self,
         stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<(Box<dyn WsStream>, String)>;
+    ) -> Result<AsyncRx<Array<UpgradeEvent>>>;
 }
