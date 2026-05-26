@@ -1,6 +1,5 @@
 use eyre::Result;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::*;
@@ -14,19 +13,25 @@ use super::{
     StreamError, WebsocketServer, WsConnection, WsRequestValue, WsStream, request_error_to_resp,
 };
 
-pub struct WsClientSession {
-    conn_info: Arc<WsConnection>,
+pub struct WsClientSession<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static + std::fmt::Debug,
+{
+    conn_info: Arc<WsConnection<R>>,
     conn: Box<dyn WsStream>,
     rx: mpsc::Receiver<Message>,
-    server: Arc<WebsocketServer>,
+    server: Arc<WebsocketServer<R>>,
 }
 
-impl WsClientSession {
+impl<R> WsClientSession<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static + std::fmt::Debug,
+{
     pub fn new(
-        conn_info: Arc<WsConnection>,
+        conn_info: Arc<WsConnection<R>>,
         conn: Box<dyn WsStream>,
         rx: mpsc::Receiver<Message>,
-        server: Arc<WebsocketServer>,
+        server: Arc<WebsocketServer<R>>,
     ) -> Self {
         Self {
             conn_info,
@@ -96,7 +101,7 @@ impl WsClientSession {
         context.seq = req.seq;
         context.method = req.method;
         context.user_id = self.conn_info.get_user_id();
-        context.roles = self.conn_info.get_roles();
+        context.roles = Arc::new(self.conn_info.get_roles());
 
         let Some(endpoint) = self.server.handlers.get(&req.method) else {
             self.server.toolbox.send(
@@ -106,7 +111,7 @@ impl WsClientSession {
             return Ok(true);
         };
 
-        if !check_roles(&context.roles, &endpoint.allowed_roles) {
+        if !endpoint.role_checker.check(&context.roles) {
             self.server.toolbox.send(
                 context.connection_id,
                 request_error_to_resp(&context, ErrorCode::FORBIDDEN, "Forbidden"),
@@ -116,6 +121,7 @@ impl WsClientSession {
 
         let handler = endpoint.handler.clone();
         let toolbox = self.server.toolbox.clone();
+
         tokio::task::spawn_local(async move {
             TOOLBOX
                 .scope(
@@ -210,38 +216,5 @@ impl WsClientSession {
                 false
             }
         }
-    }
-}
-
-fn check_roles(actual_roles: &[u32], allowed_roles: &HashSet<u32>) -> bool {
-    if allowed_roles.is_empty() || actual_roles.is_empty() {
-        return false;
-    }
-    actual_roles.iter().any(|role| allowed_roles.contains(role))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn check_roles_allowed() {
-        use super::check_roles;
-        use std::collections::HashSet;
-
-        let allowed_roles: HashSet<u32> = [1, 2, 3].iter().cloned().collect();
-        assert!(check_roles(&[1], &allowed_roles.clone()));
-        assert!(check_roles(&[2], &allowed_roles.clone()));
-        assert!(check_roles(&[1, 2], &allowed_roles.clone()));
-        assert!(check_roles(&[4, 2], &allowed_roles.clone()));
-
-        assert!(!check_roles(&[4], &allowed_roles.clone()));
-    }
-
-    #[test]
-    fn check_roles_empty() {
-        use super::check_roles;
-        use std::collections::HashSet;
-
-        let allowed_roles: HashSet<u32> = HashSet::new();
-        assert!(!check_roles(&[1], &allowed_roles));
     }
 }

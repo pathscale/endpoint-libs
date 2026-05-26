@@ -13,52 +13,95 @@ use crate::model::Type;
 
 use super::WsConnection;
 
-pub trait AuthController: Sync + Send {
+pub trait AuthController<R>: Sync + Send
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         header: String,
-        conn: Arc<WsConnection>,
+        conn: Arc<WsConnection<R>>,
     ) -> LocalBoxFuture<'static, Result<()>>;
 }
 
-pub struct SimpleAuthController;
+pub struct SimpleAuthController<R>(std::marker::PhantomData<R>)
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static;
 
-impl AuthController for SimpleAuthController {
-    fn auth(
-        self: Arc<Self>,
-        _toolbox: &ArcToolbox,
-        _header: String,
-        _conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
-        async move { Ok(()) }.boxed()
+impl<R> SimpleAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
     }
 }
 
-pub trait SubAuthController: Sync + Send {
-    fn auth(
-        self: Arc<Self>,
-        toolbox: &ArcToolbox,
-        param: serde_json::Value,
-        ctx: RequestContext,
-        conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<serde_json::Value>>;
-}
-pub struct EndpointAuthController {
-    pub auth_endpoints: HashMap<String, WsAuthController>,
-}
-pub struct WsAuthController {
-    pub schema: EndpointSchema,
-    pub handler: Arc<dyn SubAuthController>,
-}
-
-impl Default for EndpointAuthController {
+impl<R> Default for SimpleAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl EndpointAuthController {
+impl<R> AuthController<R> for SimpleAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    fn auth(
+        self: Arc<Self>,
+        _toolbox: &ArcToolbox,
+        _header: String,
+        _conn: Arc<WsConnection<R>>,
+    ) -> LocalBoxFuture<'static, Result<()>> {
+        async move { Ok(()) }.boxed()
+    }
+}
+
+pub trait SubAuthController<R>: Sync + Send
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext<R>,
+        conn: Arc<WsConnection<R>>,
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value>>;
+}
+
+pub struct EndpointAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    pub auth_endpoints: HashMap<String, WsAuthController<R>>,
+}
+
+pub struct WsAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    pub schema: EndpointSchema,
+    pub handler: Arc<dyn SubAuthController<R>>,
+}
+
+impl<R> Default for EndpointAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> EndpointAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
     pub fn new() -> Self {
         Self {
             auth_endpoints: Default::default(),
@@ -67,7 +110,7 @@ impl EndpointAuthController {
     pub fn add_auth_endpoint(
         &mut self,
         schema: EndpointSchema,
-        handler: impl SubAuthController + 'static,
+        handler: impl SubAuthController<R> + 'static,
     ) {
         self.auth_endpoints.insert(
             schema.name.to_ascii_lowercase(),
@@ -114,12 +157,15 @@ fn parse_protocol_header(header: &str) -> HashMap<&str, &str> {
         .collect()
 }
 
-impl AuthController for EndpointAuthController {
+impl<R> AuthController<R> for EndpointAuthController<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
+{
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         header: String,
-        conn: Arc<WsConnection>,
+        conn: Arc<WsConnection<R>>,
     ) -> LocalBoxFuture<'static, Result<()>> {
         let toolbox = toolbox.clone();
 
@@ -147,14 +193,14 @@ impl AuthController for EndpointAuthController {
                     _ => {}
                 }
             }
-            let roles = conn.roles.read().clone();
+            let roles = conn.get_roles();
             let ctx = RequestContext {
                 connection_id: conn.connection_id,
                 user_id: 0,
                 seq: 0,
                 method: endpoint.schema.code,
                 log_id: conn.log_id,
-                roles: roles.clone(),
+                roles: Arc::new(roles),
                 ip_addr: conn.address.ip(),
             };
             let resp = endpoint
@@ -169,7 +215,7 @@ impl AuthController for EndpointAuthController {
                 .await;
             debug!(ws_server = true, "Auth response: {:?}", resp);
             let conn_id = ctx.connection_id;
-            if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
+            if let Some(resp) = Toolbox::encode_ws_response::<R, serde_json::Value>(ctx, resp) {
                 toolbox.send(conn_id, resp);
             }
             Ok(())

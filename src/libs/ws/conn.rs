@@ -5,12 +5,22 @@ use super::WsMessage as Message;
 
 use super::{ConnectionId, WsConnection};
 
-#[derive(Default)]
-pub struct WebsocketStates {
-    states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+pub struct WebsocketStates<R = u32> {
+    states: Arc<DashMap<ConnectionId, Arc<WsStreamState<R>>>>,
 }
 
-impl WebsocketStates {
+impl<R> Default for WebsocketStates<R> {
+    fn default() -> Self {
+        Self {
+            states: Arc::new(DashMap::new()),
+        }
+    }
+}
+
+impl<R> WebsocketStates<R>
+where
+    R: Clone,
+{
     pub fn new() -> Self {
         WebsocketStates::default()
     }
@@ -18,17 +28,17 @@ impl WebsocketStates {
         self.states.remove(&connection_id);
     }
 
-    pub fn get_state(&self, connection_id: u32) -> Option<Arc<WsStreamState>> {
+    pub fn get_state(&self, connection_id: u32) -> Option<Arc<WsStreamState<R>>> {
         self.states.get(&connection_id).map(|x| x.value().clone())
     }
-    pub fn clone_states(&self) -> Arc<DashMap<u32, Arc<WsStreamState>>> {
+    pub fn clone_states(&self) -> Arc<DashMap<u32, Arc<WsStreamState<R>>>> {
         Arc::clone(&self.states)
     }
     pub fn insert(
         &self,
         connection_id: u32,
         message_queue: tokio::sync::mpsc::Sender<Message>,
-        conn: Arc<WsConnection>,
+        conn: Arc<WsConnection<R>>,
     ) {
         self.states.insert(
             connection_id,
@@ -40,7 +50,7 @@ impl WebsocketStates {
     }
 }
 
-pub struct WsStreamState {
-    pub conn: Arc<WsConnection>,
+pub struct WsStreamState<R = u32> {
+    pub conn: Arc<WsConnection<R>>,
     pub message_queue: tokio::sync::mpsc::Sender<Message>,
 }

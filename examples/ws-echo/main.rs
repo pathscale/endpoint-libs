@@ -34,6 +34,7 @@ pub struct EchoResponse {
 
 impl WsRequest for EchoRequest {
     type Response = EchoResponse;
+    type Role = u32;
     const METHOD_ID: u32 = 1;
     const ROLES: &'static [u32] = &[1];
     const SCHEMA: &'static str = r#"{
@@ -65,6 +66,7 @@ pub struct HoneyReceiveUserInfoResponse {}
 
 impl WsRequest for HoneyReceiveUserInfoRequest {
     type Response = HoneyReceiveUserInfoResponse;
+    type Role = u32;
     const METHOD_ID: u32 = 211;
     const ROLES: &'static [u32] = &[1];
     const SCHEMA: &'static str = r#"{
@@ -158,12 +160,12 @@ impl RequestHandler for MethodReceiveUserInfo {
 
 struct AllowAllAuthController;
 
-impl AuthController for AllowAllAuthController {
+impl AuthController<u32> for AllowAllAuthController {
     fn auth(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         header: String,
-        conn: Arc<WsConnection>,
+        conn: Arc<WsConnection<u32>>,
     ) -> LocalBoxFuture<'static, Result<()>> {
         async move {
             let conn_id = conn.connection_id;
@@ -173,7 +175,7 @@ impl AuthController for AllowAllAuthController {
                 header_len = header.len(),
                 "New connection — granting role 1 (allow-all auth)"
             );
-            conn.set_roles(Arc::new(vec![1]));
+            conn.set_roles(vec![1]);
             tracing::info!(conn_id = %conn_id, "Roles set successfully");
             Ok(())
         }

@@ -3,25 +3,27 @@ use serde::de::DeserializeOwned;
 use serde::*;
 use serde_json::Value;
 use serde_json::value::RawValue;
-use std::collections::HashSet;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::libs::error_code::ErrorCode;
-use crate::libs::handler::RequestHandlerErased;
+use crate::libs::ws::handler::RequestHandlerErased;
 use crate::libs::log::{CustomEyreHandler, LogLevel};
 use crate::libs::toolbox::RequestContext;
+use crate::libs::ws::role::RoleChecker;
 use crate::model::EndpointSchema;
 
 pub type ConnectionId = u32;
 
 pub trait WsRequest: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Response: WsResponse;
+    type Role: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static;
     const METHOD_ID: u32;
     const SCHEMA: &'static str;
-    const ROLES: &'static [u32];
+    const ROLES: &'static [Self::Role];
 }
 pub trait WsResponse: Serialize + DeserializeOwned + Send + Sync + Clone {
     type Request: WsRequest;
@@ -44,19 +46,23 @@ pub struct WsResponseError {
 }
 
 #[derive(Debug)]
-pub struct WsConnection {
+pub struct WsConnection<R = u32> {
     pub connection_id: ConnectionId,
     pub user_id: AtomicU64,
-    pub roles: Arc<RwLock<Arc<Vec<u32>>>>,
+    pub roles: Arc<RwLock<Vec<R>>>,
     pub address: SocketAddr,
     pub log_id: u64,
 }
-impl WsConnection {
+
+impl<R> WsConnection<R> {
     pub fn get_user_id(&self) -> u64 {
         self.user_id.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub fn get_roles(&self) -> Arc<Vec<u32>> {
+    pub fn get_roles(&self) -> Vec<R>
+    where
+        R: Clone,
+    {
         self.roles.read().clone()
     }
 
@@ -65,7 +71,7 @@ impl WsConnection {
             .store(user_id, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn set_roles(&self, roles: Arc<Vec<u32>>) {
+    pub fn set_roles(&self, roles: Vec<R>) {
         let mut roles_lock = self.roles.write();
         *roles_lock = roles;
     }
@@ -115,14 +121,14 @@ pub enum WsResponseGeneric<Resp> {
 
 pub type WsResponseValue = WsResponseGeneric<Box<RawValue>>;
 
-pub struct WsEndpoint {
+pub struct WsEndpoint<R = u32> {
     pub schema: EndpointSchema,
-    pub handler: Arc<dyn RequestHandlerErased>,
-    pub allowed_roles: HashSet<u32>,
+    pub handler: Arc<dyn RequestHandlerErased<R>>,
+    pub role_checker: Arc<dyn RoleChecker<R>>,
 }
 
-pub fn internal_error_to_resp(
-    ctx: &RequestContext,
+pub fn internal_error_to_resp<R>(
+    ctx: &RequestContext<R>,
     code: ErrorCode,
     err0: eyre::Error,
 ) -> WsResponseValue {
@@ -155,8 +161,8 @@ pub fn internal_error_to_resp(
     WsResponseValue::Error(err)
 }
 
-pub fn request_error_to_resp(
-    ctx: &RequestContext,
+pub fn request_error_to_resp<R>(
+    ctx: &RequestContext<R>,
     code: ErrorCode,
     params: impl Into<Value>,
 ) -> WsResponseValue {

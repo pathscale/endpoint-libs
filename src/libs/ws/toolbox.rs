@@ -4,6 +4,7 @@ use eyre::Result;
 use serde::*;
 use serde_json::Value;
 use std::fmt::{Debug, Display, Formatter};
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, OnceLock};
 use tracing::*;
@@ -60,17 +61,17 @@ impl Display for CustomError {
 impl std::error::Error for CustomError {}
 
 #[derive(Clone)]
-pub struct RequestContext {
+pub struct RequestContext<R = u32> {
     pub connection_id: ConnectionId,
     pub user_id: u64,
     pub seq: u32,
     pub method: u32,
     pub log_id: u64,
-    pub roles: Arc<Vec<u32>>,
+    pub roles: Arc<Vec<R>>,
     pub ip_addr: IpAddr,
 }
 
-impl RequestContext {
+impl<R> RequestContext<R> {
     pub fn empty() -> Self {
         Self {
             connection_id: 0,
@@ -82,15 +83,17 @@ impl RequestContext {
             ip_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
         }
     }
-    pub fn from_conn(conn: &WsConnection) -> Self {
-        let roles = conn.roles.read().clone();
+    pub fn from_conn(conn: &WsConnection<R>) -> Self
+    where
+        R: Clone,
+    {
         Self {
             connection_id: conn.connection_id,
             user_id: conn.get_user_id(),
             seq: 0,
             method: 0,
             log_id: conn.log_id,
-            roles,
+            roles: Arc::new(conn.get_roles()),
             ip_addr: conn.address.ip(),
         }
     }
@@ -110,12 +113,22 @@ impl Toolbox {
         })
     }
 
-    pub fn set_ws_states(
+    pub fn set_ws_states<R>(
         &self,
-        states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+        states: Arc<DashMap<ConnectionId, Arc<WsStreamState<R>>>>,
         oneshot: bool,
         drop_on_buffer_full: bool,
-    ) {
+    ) where
+        R: Clone
+            + Eq
+            + Hash
+            + Send
+            + Sync
+            + Serialize
+            + for<'de> Deserialize<'de>
+            + 'static
+            + std::fmt::Debug,
+    {
         let send_fn: SendFnArc = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
@@ -181,7 +194,10 @@ impl Toolbox {
             None => false,
         }
     }
-    pub fn send_response(&self, ctx: &RequestContext, resp: impl Serialize) {
+    pub fn send_response<R>(&self, ctx: &RequestContext<R>, resp: impl Serialize)
+    where
+        R: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    {
         let params = match serde_json::value::to_raw_value(&resp) {
             Ok(p) => p,
             Err(e) => {
@@ -208,13 +224,26 @@ impl Toolbox {
             }),
         );
     }
-    pub fn send_internal_error(&self, ctx: &RequestContext, code: ErrorCode, err: eyre::Error) {
+    pub fn send_internal_error<R>(&self, ctx: &RequestContext<R>, code: ErrorCode, err: eyre::Error)
+    where
+        R: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    {
         self.send(ctx.connection_id, internal_error_to_resp(ctx, code, err));
     }
-    pub fn send_request_error(&self, ctx: &RequestContext, code: ErrorCode, err: impl Into<Value>) {
+    pub fn send_request_error<R>(
+        &self,
+        ctx: &RequestContext<R>,
+        code: ErrorCode,
+        err: impl Into<Value>,
+    ) where
+        R: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    {
         self.send(ctx.connection_id, request_error_to_resp(ctx, code, err));
     }
-    pub fn send_log(&self, ctx: &RequestContext, level: LogLevel, msg: impl Into<String>) {
+    pub fn send_log<R>(&self, ctx: &RequestContext<R>, level: LogLevel, msg: impl Into<String>)
+    where
+        R: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    {
         self.send(
             ctx.connection_id,
             WsResponseValue::Log(WsLogResponse {
@@ -225,10 +254,13 @@ impl Toolbox {
             }),
         );
     }
-    pub fn encode_ws_response<Resp: Serialize>(
-        ctx: RequestContext,
+    pub fn encode_ws_response<R, Resp: Serialize>(
+        ctx: RequestContext<R>,
         resp: Result<Resp>,
-    ) -> Option<WsResponseValue> {
+    ) -> Option<WsResponseValue>
+    where
+        R: Clone + Eq + Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    {
         #[allow(unused_variables)]
         let RequestContext {
             connection_id,

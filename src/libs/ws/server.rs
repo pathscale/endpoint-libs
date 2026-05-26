@@ -3,7 +3,7 @@ use eyre::{ContextCompat, Result, bail, eyre};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -23,16 +23,20 @@ use crate::libs::ws::TlsListener;
 #[cfg(feature = "ws")]
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
-    BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
-    WsStream, WsUpgrader,
+    BoxedStream, ConnectionListener, IntoRoleChecker, TcpListener, WsClientSession, WsConnection,
+    WsRequest, WsStream, WsUpgrader,
 };
+use crate::libs::ws::handler::HandlerWrapper;
 use crate::model::EndpointSchema;
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
-pub struct WebsocketServer {
-    pub auth_controller: Arc<dyn AuthController>,
-    pub handlers: HashMap<u32, WsEndpoint>,
+pub struct WebsocketServer<R = u32>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static + std::fmt::Debug,
+{
+    pub auth_controller: Arc<dyn AuthController<R>>,
+    pub handlers: HashMap<u32, WsEndpoint<R>>,
     pub message_receiver: parking_lot::Mutex<Option<mpsc::Receiver<ConnectionId>>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
@@ -40,7 +44,10 @@ pub struct WebsocketServer {
     pub upgrader: Option<Arc<dyn WsUpgrader>>,
 }
 
-impl WebsocketServer {
+impl<R> WebsocketServer<R>
+where
+    R: Clone + Eq + std::hash::Hash + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static + std::fmt::Debug,
+{
     pub fn new(config: WsServerConfig) -> Self {
         if config.insecure {
             tracing::warn!(
@@ -49,7 +56,7 @@ impl WebsocketServer {
             )
         }
         Self {
-            auth_controller: Arc::new(SimpleAuthController),
+            auth_controller: Arc::new(SimpleAuthController::<R>::new()),
             handlers: Default::default(),
             message_receiver: parking_lot::Mutex::new(None),
             toolbox: Toolbox::new(),
@@ -58,32 +65,37 @@ impl WebsocketServer {
             upgrader: default_upgrader(),
         }
     }
-    pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
+    pub fn set_auth_controller(&mut self, controller: impl AuthController<R> + 'static) {
         self.auth_controller = Arc::new(controller);
     }
     pub fn set_upgrader(&mut self, upgrader: Arc<dyn WsUpgrader>) {
         self.upgrader = Some(upgrader);
     }
-    pub fn add_handler<T: RequestHandler + 'static>(&mut self, handler: T) {
+    pub fn add_handler<T>(&mut self, handler: T)
+    where
+        T: RequestHandler + 'static,
+        R: Into<<T::Request as crate::libs::ws::WsRequest>::Role>,
+    {
         let schema = serde_json::from_str(T::Request::SCHEMA).expect("Invalid schema");
-        let roles: &[u32] = T::Request::ROLES;
+        let allowed: std::collections::HashSet<<T::Request as crate::libs::ws::WsRequest>::Role> =
+            T::Request::ROLES.iter().cloned().collect();
         check_handler::<T>(&schema).expect("Invalid handler");
-        self.add_handler_erased(schema, roles, Arc::new(handler))
+        let checker = IntoRoleChecker::<R, <T::Request as crate::libs::ws::WsRequest>::Role>::new(allowed);
+        let handler_wrapper = HandlerWrapper::<T, R>::new(handler);
+        self.add_handler_erased(schema, handler_wrapper, Arc::new(checker));
     }
     pub fn add_handler_erased(
         &mut self,
         schema: EndpointSchema,
-        roles: &[u32],
-        handler: Arc<dyn RequestHandlerErased>,
+        handler: Arc<dyn RequestHandlerErased<R>>,
+        role_checker: Arc<dyn crate::libs::ws::RoleChecker<R>>,
     ) {
-        let roles_set = roles.iter().cloned().collect::<HashSet<u32>>();
-
         let old = self.handlers.insert(
             schema.code,
             WsEndpoint {
                 schema,
                 handler,
-                allowed_roles: roles_set,
+                role_checker,
             },
         );
         if let Some(old) = old {
@@ -97,7 +109,7 @@ impl WebsocketServer {
     async fn handle_ws_handshake_and_connection(
         self: Arc<Self>,
         addr: SocketAddr,
-        states: Arc<WebsocketStates>,
+        states: Arc<WebsocketStates<R>>,
         stream: BoxedStream,
     ) -> Result<()> {
         let cached_date = self.cached_date.read().clone();
@@ -148,14 +160,14 @@ impl WebsocketServer {
     async fn post_upgrade_connection(
         self: Arc<Self>,
         addr: SocketAddr,
-        states: Arc<WebsocketStates>,
+        states: Arc<WebsocketStates<R>>,
         stream: Box<dyn WsStream>,
         protocol: String,
     ) {
-        let conn = Arc::new(WsConnection {
+        let conn = Arc::new(WsConnection::<R> {
             connection_id: get_conn_id(),
             user_id: Default::default(),
-            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            roles: Arc::new(RwLock::new(Vec::new())),
             address: addr,
             log_id: get_log_id(),
         });
@@ -195,8 +207,8 @@ impl WebsocketServer {
 
     pub async fn handle_session_connection(
         self: Arc<Self>,
-        conn: Arc<WsConnection>,
-        states: Arc<WebsocketStates>,
+        conn: Arc<WsConnection<R>>,
+        states: Arc<WebsocketStates<R>>,
         stream: Box<dyn WsStream>,
         rx: mpsc::Receiver<Message>,
     ) {
@@ -262,7 +274,7 @@ impl WebsocketServer {
     }
 
     async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {
-        let states = Arc::new(WebsocketStates::new());
+        let states = Arc::new(WebsocketStates::<R>::new());
         let this = Arc::new(self);
         this.toolbox.set_ws_states(
             states.clone_states(),
@@ -324,7 +336,7 @@ impl WebsocketServer {
 
     fn run_shard<T: ConnectionListener + 'static>(
         this: Arc<Self>,
-        states: Arc<WebsocketStates>,
+        states: Arc<WebsocketStates<R>>,
         listener: Arc<T>,
         mut rx: mpsc::Receiver<(T::Channel1, SocketAddr)>,
     ) {
