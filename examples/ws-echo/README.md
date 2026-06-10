@@ -28,7 +28,7 @@ Messages follow the library's JSON envelope format:
 {"method": 211, "seq": 2, "params": {"userPubId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890", "username": "alice"}}
 
 // server → client (always an error — test server)
-{"type":"Error","method":211,"seq":2,"params":"Test passed: received ReceiveUserInfo for user 'alice' (id: a1b2c3d4-e5f6-7890-abcd-ef1234567890) — this is a test server and will not process the request","error_code":{"code":100400},"log_id":"..."}
+{"type":"Error","method":211,"code":100400,"kind":"BadRequest","seq":2,"log_id":"...","params":"ReceiveUserInfo is not processed by this test server"}
 ```
 
 The optional fields `appPubId` and `token` can also be included:
@@ -76,7 +76,7 @@ With optional fields:
 Expected response (error confirming the test passed):
 
 ```
-{"type":"Error","method":211,"seq":2,"params":"Test passed: received ReceiveUserInfo for user 'alice' (id: a1b2c3d4-e5f6-7890-abcd-ef1234567890) — this is a test server and will not process the request","error_code":{"code":100400},"log_id":"..."}
+{"type":"Error","method":211,"code":100400,"kind":"BadRequest","seq":2,"log_id":"...","params":"ReceiveUserInfo is not processed by this test server"}
 ```
 
 ## Run with Cloudflare Containers (wrangler dev)
@@ -115,5 +115,5 @@ Or call `ReceiveUserInfo`:
 Expected response:
 
 ```
-{"type":"Error","method":211,"seq":2,"params":"Test passed: received ReceiveUserInfo for user 'alice' (id: a1b2c3d4-e5f6-7890-abcd-ef1234567890) — this is a test server and will not process the request","error_code":{"code":100400},"log_id":"..."}
+{"type":"Error","method":211,"code":100400,"kind":"BadRequest","seq":2,"log_id":"...","params":"ReceiveUserInfo is not processed by this test server"}
 ```

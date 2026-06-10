@@ -2,17 +2,18 @@ use crate::libs::ws::WsMessage as Message;
 use dashmap::DashMap;
 use eyre::Result;
 use serde::*;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::fmt::{Debug, Display, Formatter};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, OnceLock};
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
+use crate::libs::handler::HandlerError;
 use crate::libs::log::LogLevel;
 use crate::libs::ws::{
-    ConnectionId, WsConnection, WsLogResponse, WsResponseError, WsResponseValue, WsStreamState,
-    WsSuccessResponse, internal_error_to_resp, request_error_to_resp,
+    ConnectionId, WsConnection, WsLogResponse, WsRequest, WsResponseError, WsResponseValue,
+    WsStreamState, WsSuccessResponse, internal_error_to_resp, request_error_to_resp,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -39,6 +40,29 @@ impl CustomError {
             params: serde_json::to_value(reason).unwrap_or(Value::Null),
         }
     }
+
+    pub fn with_details(
+        code: impl Into<ErrorCode>,
+        message: impl Into<String>,
+        details: impl Serialize,
+    ) -> Self {
+        let mut params = match serde_json::to_value(details).unwrap_or(Value::Null) {
+            Value::Object(map) => map,
+            Value::Null => Map::new(),
+            value => {
+                let mut map = Map::new();
+                map.insert("details".to_owned(), value);
+                map
+            }
+        };
+        params.insert("message".to_owned(), Value::String(message.into()));
+
+        Self {
+            code: code.into(),
+            params: Value::Object(params),
+        }
+    }
+
     pub fn from_sql_error(err: &str, msg: impl Display) -> Result<Self> {
         let code = u32::from_str_radix(err, 36)?;
         let error_code = ErrorCode::new(code);
@@ -191,6 +215,7 @@ impl Toolbox {
                     WsResponseValue::Error(WsResponseError {
                         method: ctx.method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
                         seq: ctx.seq,
                         log_id: ctx.log_id.to_string(),
                         params: Value::Null,
@@ -250,6 +275,7 @@ impl Toolbox {
                     WsResponseValue::Error(WsResponseError {
                         method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
                         seq,
                         log_id: log_id.to_string(),
                         params: Value::Null,
@@ -263,6 +289,54 @@ impl Toolbox {
                 Ok(err) => request_error_to_resp(&ctx, err.code, err.params),
                 Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
             },
+        };
+        Some(resp)
+    }
+
+    pub fn encode_handler_response<Req, Err>(
+        ctx: RequestContext,
+        resp: crate::libs::handler::Response<Req, Err>,
+    ) -> Option<WsResponseValue>
+    where
+        Req: WsRequest,
+        Err: Into<CustomError>,
+    {
+        #[allow(unused_variables)]
+        let RequestContext {
+            connection_id,
+            user_id,
+            seq,
+            method,
+            log_id,
+            ..
+        } = ctx;
+        let resp = match resp {
+            Ok(ok) => match serde_json::value::to_raw_value(&ok) {
+                Ok(params) => WsResponseValue::Immediate(WsSuccessResponse {
+                    method,
+                    seq,
+                    params,
+                }),
+                Err(e) => {
+                    error!(ws_server = true, connection_id, err=%e, "Failed to serialize response — sending error to client");
+                    WsResponseValue::Error(WsResponseError {
+                        method,
+                        code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
+                        seq,
+                        log_id: log_id.to_string(),
+                        params: Value::Null,
+                    })
+                }
+            },
+            Err(HandlerError::Public(err)) => {
+                let err = err.into();
+                request_error_to_resp(&ctx, err.code, err.params)
+            }
+            Err(HandlerError::Internal(err)) => {
+                internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err)
+            }
+            Err(HandlerError::NoResponse) => return None,
         };
         Some(resp)
     }
