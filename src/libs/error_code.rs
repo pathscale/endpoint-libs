@@ -1,4 +1,5 @@
 use serde::*;
+use std::str::FromStr;
 
 /// `ErrorCode` is a wrapper around `u32` that represents an error code.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -185,4 +186,81 @@ impl ErrorCode {
             _ => "CustomError",
         }
     }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        let normalized: String = name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(char::to_uppercase)
+            .collect();
+
+        match normalized.as_str() {
+            "BADREQUEST" => Some(Self::BAD_REQUEST),
+            "UNAUTHORIZED" => Some(Self::UNAUTHORIZED),
+            "PAYMENTREQUIRED" => Some(Self::PAYMENT_REQUIRED),
+            "FORBIDDEN" => Some(Self::FORBIDDEN),
+            "NOTFOUND" => Some(Self::NOT_FOUND),
+            "METHODNOTALLOWED" => Some(Self::METHOD_NOT_ALLOWED),
+            "NOTACCEPTABLE" => Some(Self::NOT_ACCEPTABLE),
+            "PROXYAUTHENTICATIONREQUIRED" => Some(Self::PROXY_AUTHENTICATION_REQUIRED),
+            "REQUESTTIMEOUT" => Some(Self::REQUEST_TIMEOUT),
+            "CONFLICT" => Some(Self::CONFLICT),
+            "GONE" => Some(Self::GONE),
+            "LENGTHREQUIRED" => Some(Self::LENGTH_REQUIRED),
+            "PRECONDITIONFAILED" => Some(Self::PRECONDITION_FAILED),
+            "PAYLOADTOOLARGE" => Some(Self::PAYLOAD_TOO_LARGE),
+            "URITOOLONG" => Some(Self::URI_TOO_LONG),
+            "UNSUPPORTEDMEDIATYPE" => Some(Self::UNSUPPORTED_MEDIA_TYPE),
+            "RANGENOTSATISFIABLE" => Some(Self::RANGE_NOT_SATISFIABLE),
+            "EXPECTATIONFAILED" => Some(Self::EXPECTATION_FAILED),
+            "IMATEAPOT" => Some(Self::IM_A_TEAPOT),
+            "MISDIRECTEDREQUEST" => Some(Self::MISDIRECTED_REQUEST),
+            "UNPROCESSABLEENTITY" => Some(Self::UNPROCESSABLE_ENTITY),
+            "LOCKED" => Some(Self::LOCKED),
+            "FAILEDDEPENDENCY" => Some(Self::FAILED_DEPENDENCY),
+            "UPGRADEREQUIRED" => Some(Self::UPGRADE_REQUIRED),
+            "PRECONDITIONREQUIRED" => Some(Self::PRECONDITION_REQUIRED),
+            "TOOMANYREQUESTS" => Some(Self::TOO_MANY_REQUESTS),
+            "REQUESTHEADERFIELDSTOOLARGE" => Some(Self::REQUEST_HEADER_FIELDS_TOO_LARGE),
+            "UNAVAILABLEFORLEGALREASONS" => Some(Self::UNAVAILABLE_FOR_LEGAL_REASONS),
+            "INTERNALERROR" => Some(Self::INTERNAL_ERROR),
+            "NOTIMPLEMENTED" => Some(Self::NOT_IMPLEMENTED),
+            "BADGATEWAY" => Some(Self::BAD_GATEWAY),
+            "SERVICEUNAVAILABLE" => Some(Self::SERVICE_UNAVAILABLE),
+            "GATEWAYTIMEOUT" => Some(Self::GATEWAY_TIMEOUT),
+            "HTTPVERSIONNOTSUPPORTED" => Some(Self::HTTP_VERSION_NOT_SUPPORTED),
+            "VARIANTALSONEGOTIATES" => Some(Self::VARIANT_ALSO_NEGOTIATES),
+            "INSUFFICIENTSTORAGE" => Some(Self::INSUFFICIENT_STORAGE),
+            "LOOPDETECTED" => Some(Self::LOOP_DETECTED),
+            "NOTEXTENDED" => Some(Self::NOT_EXTENDED),
+            "NETWORKAUTHENTICATIONREQUIRED" => Some(Self::NETWORK_AUTHENTICATION_REQUIRED),
+            _ => None,
+        }
+    }
 }
+
+impl FromStr for ErrorCode {
+    type Err = ParseErrorCodeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(code) = Self::from_name(value) {
+            return Ok(code);
+        }
+
+        value
+            .parse::<u32>()
+            .map(Self::new)
+            .map_err(|_| ParseErrorCodeError)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseErrorCodeError;
+
+impl std::fmt::Display for ParseErrorCodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid error code")
+    }
+}
+
+impl std::error::Error for ParseErrorCodeError {}
