@@ -38,6 +38,8 @@ pub type WsRequestValue = WsRequestGeneric<Value>;
 pub struct WsResponseError {
     pub method: u32,
     pub code: u32,
+    #[serde(default)]
+    pub kind: String,
     pub seq: u32,
     pub log_id: String,
     pub params: Value,
@@ -130,6 +132,7 @@ pub fn internal_error_to_resp(
     let err = WsResponseError {
         method: ctx.method,
         code: code.to_u32(),
+        kind: code.kind().to_owned(),
         seq: ctx.seq,
         log_id,
         params: Value::Null,
@@ -165,6 +168,7 @@ pub fn request_error_to_resp(
     let err = WsResponseError {
         method: ctx.method,
         code: code.to_u32(),
+        kind: code.kind().to_owned(),
         seq: ctx.seq,
         log_id,
         params,

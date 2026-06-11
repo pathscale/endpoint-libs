@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use derive_more::Display;
 use endpoint_libs::libs::error_code::ErrorCode;
-use endpoint_libs::libs::handler::RequestHandler;
+use endpoint_libs::libs::handler::{RequestHandler, Response};
 #[cfg(feature = "error_aggregation")]
 use endpoint_libs::libs::log::error_aggregation::ErrorAggregationConfig;
 use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_logging};
@@ -95,8 +96,9 @@ pub struct MethodEcho;
 #[async_trait(?Send)]
 impl RequestHandler for MethodEcho {
     type Request = EchoRequest;
+    type Error = CustomError;
 
-    async fn handle(&self, ctx: RequestContext, req: EchoRequest) -> Result<EchoResponse> {
+    async fn handle(&self, ctx: RequestContext, req: EchoRequest) -> Response<EchoRequest> {
         tracing::info!(
             conn_id = %ctx.connection_id,
             message = %req.message,
@@ -116,15 +118,32 @@ impl RequestHandler for MethodEcho {
 
 pub struct MethodReceiveUserInfo;
 
+#[derive(Debug, Display)]
+pub enum ReceiveUserInfoError {
+    #[display("ReceiveUserInfo is not processed by this test server")]
+    Rejected,
+}
+
+impl From<ReceiveUserInfoError> for CustomError {
+    fn from(err: ReceiveUserInfoError) -> Self {
+        match err {
+            ReceiveUserInfoError::Rejected => {
+                CustomError::new(ErrorCode::BAD_REQUEST, err.to_string())
+            }
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl RequestHandler for MethodReceiveUserInfo {
     type Request = HoneyReceiveUserInfoRequest;
+    type Error = ReceiveUserInfoError;
 
     async fn handle(
         &self,
         ctx: RequestContext,
         req: HoneyReceiveUserInfoRequest,
-    ) -> Result<HoneyReceiveUserInfoResponse> {
+    ) -> Response<HoneyReceiveUserInfoRequest, ReceiveUserInfoError> {
         tracing::info!(
             conn_id = %ctx.connection_id,
             user_pub_id = %req.user_pub_id,
@@ -133,21 +152,12 @@ impl RequestHandler for MethodReceiveUserInfo {
             has_token = req.token.is_some(),
             "ReceiveUserInfo request received (test server — will reject)"
         );
-        let msg = format!(
-            "Test passed: received ReceiveUserInfo for user '{}' (id: {}){} — \
-             this is a test server and will not process the request",
-            req.username,
-            req.user_pub_id,
-            req.app_pub_id
-                .map(|id| format!(", app: {id}"))
-                .unwrap_or_default(),
-        );
         tracing::info!(
             conn_id = %ctx.connection_id,
             user_pub_id = %req.user_pub_id,
             "Rejecting ReceiveUserInfo with BAD_REQUEST"
         );
-        Err(CustomError::new(ErrorCode::BAD_REQUEST, msg).into())
+        Err(ReceiveUserInfoError::Rejected.into())
     }
 }
 

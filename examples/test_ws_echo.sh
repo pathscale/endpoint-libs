@@ -31,8 +31,8 @@ declare -a FULL_DESC=(
     "ReceiveUserInfo: with appPubId"
     "ReceiveUserInfo: with token"
     "ReceiveUserInfo: with appPubId and token"
-    "ReceiveUserInfo: error code is 100400 (BAD_REQUEST)"
-    "ReceiveUserInfo: username appears in error message"
+    "ReceiveUserInfo: code and kind match"
+    "ReceiveUserInfo: fixed message"
     "Error: unknown method returns error"
     "Error: missing params field (no response expected)"
     "Error: wrong params type"
@@ -63,12 +63,12 @@ declare -a FULL_ASSERT=(
     '.type == "Immediate"'
     '.params.message == "echo: "'
     '.params.message == "echo: hello world! @#$%"'
-    '.type == "Error" and (.params | test("Test passed"))'
-    '.type == "Error" and (.params | test("Test passed"))'
-    '.type == "Error" and (.params | test("Test passed"))'
-    '.type == "Error" and (.params | test("Test passed"))'
-    '.code == 100400'
-    '.params | test("bob")'
+    '.type == "Error" and .kind == "BadRequest"'
+    '.type == "Error" and .kind == "BadRequest"'
+    '.type == "Error" and .kind == "BadRequest"'
+    '.type == "Error" and .kind == "BadRequest"'
+    '.code == 100400 and .kind == "BadRequest"'
+    '.params == "ReceiveUserInfo is not processed by this test server"'
     '.type == "Error"'
     '.type == "Error"'
     '.type == "Error"'

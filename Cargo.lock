@@ -1327,6 +1327,7 @@ dependencies = [
  "crossfire",
  "dashmap",
  "deadpool-postgres",
+ "derive_more",
  "eyre",
  "futures",
  "hex",
