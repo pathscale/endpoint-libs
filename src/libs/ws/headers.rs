@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::*;
 
-use crate::libs::toolbox::{ArcToolbox, RequestContext, Toolbox};
+use crate::libs::error_code::ErrorCode;
+use crate::libs::handler::Response;
+use crate::libs::toolbox::{ArcToolbox, CustomError, RequestContext, Toolbox};
 use crate::model::EndpointSchema;
 use crate::model::Type;
 
-use super::WsConnection;
+use super::{WsConnection, WsRequest, request_error_to_resp};
 
 pub trait AuthController: Sync + Send {
     fn auth(
@@ -36,20 +38,84 @@ impl AuthController for SimpleAuthController {
 }
 
 pub trait SubAuthController: Sync + Send {
+    type Request: WsRequest + 'static;
+    type Error: Into<CustomError> + 'static;
+
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        req: Self::Request,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, AuthResponse<Self::Request, Self::Error>>;
+}
+
+#[allow(type_alias_bounds)]
+pub type AuthResponse<T: WsRequest, E = CustomError> = Response<T, E>;
+
+#[doc(hidden)]
+pub trait SubAuthControllerErased: Sync + Send {
     fn auth(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
         param: serde_json::Value,
         ctx: RequestContext,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<serde_json::Value>>;
+    ) -> LocalBoxFuture<'static, ()>;
 }
+
+impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
+    fn auth(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, ()> {
+        let toolbox = toolbox.clone();
+
+        async move {
+            let buf = serde_json::to_string(&param).unwrap();
+            let data: T::Request = match serde_json::from_value(param) {
+                Ok(data) => data,
+                Err(err) => {
+                    let jd = &mut serde_json::Deserializer::from_str(&buf);
+                    let data: std::result::Result<T::Request, _> =
+                        serde_path_to_error::deserialize(jd);
+                    let path = data.err().map(|err| err.path().to_string());
+                    toolbox.send(
+                        ctx.connection_id,
+                        request_error_to_resp(
+                            &ctx,
+                            ErrorCode::BAD_REQUEST,
+                            if let Some(path) = path {
+                                format!("{path}: {err}")
+                            } else {
+                                format!("{err}")
+                            },
+                        ),
+                    );
+                    return;
+                }
+            };
+
+            let resp = SubAuthController::auth(self, &toolbox, data, ctx.clone(), conn).await;
+            if let Some(resp) =
+                Toolbox::encode_handler_response::<T::Request, T::Error>(ctx.clone(), resp)
+            {
+                toolbox.send(ctx.connection_id, resp);
+            }
+        }
+        .boxed_local()
+    }
+}
+
 pub struct EndpointAuthController {
     pub auth_endpoints: HashMap<String, WsAuthController>,
 }
 pub struct WsAuthController {
     pub schema: EndpointSchema,
-    pub handler: Arc<dyn SubAuthController>,
+    pub handler: Arc<dyn SubAuthControllerErased>,
 }
 
 impl Default for EndpointAuthController {
@@ -157,7 +223,7 @@ impl AuthController for EndpointAuthController {
                 roles: roles.clone(),
                 ip_addr: conn.address.ip(),
             };
-            let resp = endpoint
+            endpoint
                 .handler
                 .clone()
                 .auth(
@@ -167,11 +233,7 @@ impl AuthController for EndpointAuthController {
                     conn,
                 )
                 .await;
-            debug!(ws_server = true, "Auth response: {:?}", resp);
-            let conn_id = ctx.connection_id;
-            if let Some(resp) = Toolbox::encode_ws_response(ctx, resp) {
-                toolbox.send(conn_id, resp);
-            }
+            debug!(ws_server = true, "Auth response sent");
             Ok(())
         }
         .boxed_local()

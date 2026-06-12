@@ -405,10 +405,10 @@ impl WebsocketServer {
 fn shard_count() -> usize {
     // 1. Explicit override.
     if let Ok(val) = std::env::var("WS_SHARDS") {
-        if let Ok(n) = val.trim().parse::<usize>() {
-            if n > 0 {
-                return n;
-            }
+        if let Ok(n) = val.trim().parse::<usize>()
+            && n > 0
+        {
+            return n;
         }
         warn!(
             ws_server = true,
@@ -528,7 +528,7 @@ impl WsServerConfig {
 fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
     #[cfg(feature = "ws")]
     {
-        return Some(Arc::new(HyperTungsteniteUpgrader));
+        Some(Arc::new(HyperTungsteniteUpgrader))
     }
     #[cfg(not(feature = "ws"))]
     {

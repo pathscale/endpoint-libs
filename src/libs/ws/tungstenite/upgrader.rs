@@ -384,10 +384,10 @@ fn add_cors_headers(
         None => {
             // Wildcard mode — static CORS headers are in the template.
             // Only Access-Control-Allow-Headers can vary (preflight echo).
-            if let Some(req_headers) = access_control_request_headers {
-                if let Ok(v) = req_headers.parse::<HeaderValue>() {
-                    resp.headers_mut().insert("Access-Control-Allow-Headers", v);
-                }
+            if let Some(req_headers) = access_control_request_headers
+                && let Ok(v) = req_headers.parse::<HeaderValue>()
+            {
+                resp.headers_mut().insert("Access-Control-Allow-Headers", v);
             }
         }
         Some(domains) => {

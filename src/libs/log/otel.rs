@@ -28,7 +28,7 @@ use opentelemetry_sdk::{
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
 
 /// Configuration for OpenTelemetry integration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OtelConfig {
     /// Whether to enable OTel log/trace forwarding
     pub enabled: bool,
@@ -38,17 +38,6 @@ pub struct OtelConfig {
     pub endpoint: Option<String>,
     /// Additional headers to include in OTLP requests (e.g., authentication)
     pub headers: HashMap<String, String>,
-}
-
-impl Default for OtelConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            service_name: None,
-            endpoint: None,
-            headers: HashMap::new(),
-        }
-    }
 }
 
 /// Guards for OpenTelemetry providers to ensure traces and logs are flushed on drop

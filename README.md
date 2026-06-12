@@ -58,8 +58,58 @@ Async WebSocket server built on `tokio-tungstenite` with TLS support via `rustls
 
 - Connection management and session tracking
 - Push/subscription infrastructure
-- Request handler trait and toolbox utilities
+- Request handler and auth subcontroller traits with typed public errors
 - HTTP header parsing helpers
+
+Auth endpoints registered through `EndpointAuthController::add_auth_endpoint` use the same
+typed error model as regular `RequestHandler` implementations. A `SubAuthController` declares
+its generated request type and endpoint-local public error type, then returns `AuthResponse`.
+
+```rust
+use std::sync::Arc;
+
+use endpoint_libs::libs::error_code::ErrorCode;
+use endpoint_libs::libs::handler::HandlerError;
+use endpoint_libs::libs::toolbox::{ArcToolbox, CustomError, RequestContext};
+use endpoint_libs::libs::ws::{AuthResponse, SubAuthController, WsConnection};
+use futures::future::LocalBoxFuture;
+use futures::FutureExt;
+
+pub struct MethodSignup;
+
+pub enum SignupError {
+    UsernameTaken,
+}
+
+impl From<SignupError> for CustomError {
+    fn from(err: SignupError) -> Self {
+        match err {
+            SignupError::UsernameTaken => CustomError::new(ErrorCode::CONFLICT, "username taken"),
+        }
+    }
+}
+
+impl SubAuthController for MethodSignup {
+    type Request = SignupRequest;
+    type Error = SignupError;
+
+    fn auth(
+        self: Arc<Self>,
+        _toolbox: &ArcToolbox,
+        req: SignupRequest,
+        _ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, AuthResponse<SignupRequest, SignupError>> {
+        async move {
+            let user = create_user(req).await.map_err(HandlerError::internal)?;
+            conn.set_user_id(user.id);
+            conn.set_roles(Arc::new(vec![user.role as u32]));
+            Ok(SignupResponse { user_id: user.id })
+        }
+        .boxed_local()
+    }
+}
+```
 
 ### `signal`
 
