@@ -31,7 +31,7 @@ declare -a FULL_DESC=(
     "ReceiveUserInfo: with appPubId"
     "ReceiveUserInfo: with token"
     "ReceiveUserInfo: with appPubId and token"
-    "ReceiveUserInfo: code and kind match"
+    "ReceiveUserInfo: code and params kind match"
     "ReceiveUserInfo: fixed message"
     "Error: unknown method returns error"
     "Error: missing params field (no response expected)"
@@ -63,15 +63,15 @@ declare -a FULL_ASSERT=(
     '.type == "Immediate"'
     '.params.message == "echo: "'
     '.params.message == "echo: hello world! @#$%"'
-    '.type == "Error" and .kind == "BadRequest"'
-    '.type == "Error" and .kind == "BadRequest"'
-    '.type == "Error" and .kind == "BadRequest"'
-    '.type == "Error" and .kind == "BadRequest"'
-    '.code == 100400 and .kind == "BadRequest"'
-    '.params == "ReceiveUserInfo is not processed by this test server"'
-    '.type == "Error"'
-    '.type == "Error"'
-    '.type == "Error"'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "Rejected"'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "Rejected"'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "Rejected"'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "Rejected"'
+    '.code == 100400 and (has("kind") | not) and .params.kind == "Rejected"'
+    '.params.message == "ReceiveUserInfo is not processed by this test server"'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "NotImplemented"'
+    '.type == "Error" and (has("kind") | not)'
+    '.type == "Error" and (has("kind") | not) and .params.kind == "BadRequest"'
 )
 
 # ---------------------------------------------------------------------------

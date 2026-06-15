@@ -84,7 +84,11 @@ pub enum SignupError {
 impl From<SignupError> for CustomError {
     fn from(err: SignupError) -> Self {
         match err {
-            SignupError::UsernameTaken => CustomError::new(ErrorCode::CONFLICT, "username taken"),
+            SignupError::UsernameTaken => {
+                CustomError::new(ErrorCode::CONFLICT)
+                    .with_message("username taken")
+                    .with_kind("UsernameTaken")
+            }
         }
     }
 }

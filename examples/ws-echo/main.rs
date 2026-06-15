@@ -127,9 +127,9 @@ pub enum ReceiveUserInfoError {
 impl From<ReceiveUserInfoError> for CustomError {
     fn from(err: ReceiveUserInfoError) -> Self {
         match err {
-            ReceiveUserInfoError::Rejected => {
-                CustomError::new(ErrorCode::BAD_REQUEST, err.to_string())
-            }
+            ReceiveUserInfoError::Rejected => CustomError::new(ErrorCode::BAD_REQUEST)
+                .with_message(err.to_string())
+                .with_kind("Rejected"),
         }
     }
 }

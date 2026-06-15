@@ -1,5 +1,4 @@
 use eyre::Result;
-use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -11,7 +10,8 @@ use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
 use super::{
-    StreamError, WebsocketServer, WsConnection, WsRequestValue, WsStream, request_error_to_resp,
+    StreamError, WebsocketServer, WsConnection, WsRequestValue, WsResponseError, WsResponseValue,
+    WsStream,
 };
 
 pub struct WsClientSession {
@@ -88,7 +88,16 @@ impl WsClientSession {
             Err(err) => {
                 self.server.toolbox.send(
                     context.connection_id,
-                    request_error_to_resp(&context, ErrorCode::BAD_REQUEST, err.to_string()),
+                    WsResponseValue::Error(WsResponseError {
+                        method: context.method,
+                        code: ErrorCode::BAD_REQUEST.to_u32(),
+                        seq: context.seq,
+                        log_id: context.log_id.to_string(),
+                        params: serde_json::json!({
+                            "kind": ErrorCode::BAD_REQUEST.kind(),
+                            "message": err.to_string(),
+                        }),
+                    }),
                 );
                 return Ok(true);
             }
@@ -101,7 +110,16 @@ impl WsClientSession {
         let Some(endpoint) = self.server.handlers.get(&req.method) else {
             self.server.toolbox.send(
                 context.connection_id,
-                request_error_to_resp(&context, ErrorCode::NOT_IMPLEMENTED, Value::Null),
+                WsResponseValue::Error(WsResponseError {
+                    method: context.method,
+                    code: ErrorCode::NOT_IMPLEMENTED.to_u32(),
+                    seq: context.seq,
+                    log_id: context.log_id.to_string(),
+                    params: serde_json::json!({
+                        "kind": ErrorCode::NOT_IMPLEMENTED.kind(),
+                        "message": "Method not implemented",
+                    }),
+                }),
             );
             return Ok(true);
         };
@@ -109,7 +127,16 @@ impl WsClientSession {
         if !check_roles(&context.roles, &endpoint.allowed_roles) {
             self.server.toolbox.send(
                 context.connection_id,
-                request_error_to_resp(&context, ErrorCode::FORBIDDEN, "Forbidden"),
+                WsResponseValue::Error(WsResponseError {
+                    method: context.method,
+                    code: ErrorCode::FORBIDDEN.to_u32(),
+                    seq: context.seq,
+                    log_id: context.log_id.to_string(),
+                    params: serde_json::json!({
+                        "kind": ErrorCode::FORBIDDEN.kind(),
+                        "message": "Forbidden",
+                    }),
+                }),
             );
             return Ok(true);
         }

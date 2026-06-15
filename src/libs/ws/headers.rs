@@ -13,7 +13,7 @@ use crate::libs::toolbox::{ArcToolbox, CustomError, RequestContext, Toolbox};
 use crate::model::EndpointSchema;
 use crate::model::Type;
 
-use super::{WsConnection, WsRequest, request_error_to_resp};
+use super::{WsConnection, WsRequest, WsResponseError, WsResponseValue};
 
 pub trait AuthController: Sync + Send {
     fn auth(
@@ -83,17 +83,23 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
                     let data: std::result::Result<T::Request, _> =
                         serde_path_to_error::deserialize(jd);
                     let path = data.err().map(|err| err.path().to_string());
+                    let message = if let Some(path) = path {
+                        format!("{path}: {err}")
+                    } else {
+                        format!("{err}")
+                    };
                     toolbox.send(
                         ctx.connection_id,
-                        request_error_to_resp(
-                            &ctx,
-                            ErrorCode::BAD_REQUEST,
-                            if let Some(path) = path {
-                                format!("{path}: {err}")
-                            } else {
-                                format!("{err}")
-                            },
-                        ),
+                        WsResponseValue::Error(WsResponseError {
+                            method: ctx.method,
+                            code: ErrorCode::BAD_REQUEST.to_u32(),
+                            seq: ctx.seq,
+                            log_id: ctx.log_id.to_string(),
+                            params: serde_json::json!({
+                                "kind": ErrorCode::BAD_REQUEST.kind(),
+                                "message": message,
+                            }),
+                        }),
                     );
                     return;
                 }

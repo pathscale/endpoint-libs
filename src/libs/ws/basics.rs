@@ -1,8 +1,8 @@
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde::*;
-use serde_json::Value;
 use serde_json::value::RawValue;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicU64;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::RequestHandlerErased;
 use crate::libs::log::{CustomEyreHandler, LogLevel};
-use crate::libs::toolbox::RequestContext;
+use crate::libs::toolbox::{CustomError, RequestContext};
 use crate::model::EndpointSchema;
 
 pub type ConnectionId = u32;
@@ -38,8 +38,6 @@ pub type WsRequestValue = WsRequestGeneric<Value>;
 pub struct WsResponseError {
     pub method: u32,
     pub code: u32,
-    #[serde(default)]
-    pub kind: String,
     pub seq: u32,
     pub log_id: String,
     pub params: Value,
@@ -132,10 +130,11 @@ pub fn internal_error_to_resp(
     let err = WsResponseError {
         method: ctx.method,
         code: code.to_u32(),
-        kind: code.kind().to_owned(),
         seq: ctx.seq,
         log_id,
-        params: Value::Null,
+        params: json!({
+            "kind": code.kind(),
+        }),
     };
 
     let location = match err0.handler().downcast_ref::<CustomEyreHandler>() {
@@ -158,21 +157,14 @@ pub fn internal_error_to_resp(
     WsResponseValue::Error(err)
 }
 
-pub fn request_error_to_resp(
-    ctx: &RequestContext,
-    code: ErrorCode,
-    params: impl Into<Value>,
-) -> WsResponseValue {
-    let log_id = ctx.log_id.to_string();
-    let params = params.into();
-    let err = WsResponseError {
+pub fn custom_error_to_resp(ctx: &RequestContext, err: CustomError) -> WsResponseValue {
+    let resp = WsResponseError {
         method: ctx.method,
-        code: code.to_u32(),
-        kind: code.kind().to_owned(),
+        code: err.code.to_u32(),
         seq: ctx.seq,
-        log_id,
-        params,
+        log_id: ctx.log_id.to_string(),
+        params: err.params,
     };
-    tracing::warn!(ws_server = true, "Request error: {:?}", err);
-    WsResponseValue::Error(err)
+    tracing::warn!(ws_server = true, "Request error: {:?}", resp);
+    WsResponseValue::Error(resp)
 }

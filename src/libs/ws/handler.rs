@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::libs::{
     error_code::ErrorCode,
     toolbox::{ArcToolbox, CustomError, RequestContext, Toolbox},
-    ws::{WsRequest, request_error_to_resp},
+    ws::{WsRequest, WsResponseError, WsResponseValue},
 };
 
 #[allow(type_alias_bounds)]
@@ -75,17 +75,23 @@ impl<T: RequestHandler> RequestHandlerErased for T {
                 let jd = &mut serde_json::Deserializer::from_str(&buf);
                 let data: std::result::Result<T::Request, _> = serde_path_to_error::deserialize(jd);
                 let path = data.err().map(|err| err.path().to_string());
+                let message = if let Some(path) = path {
+                    format!("{path}: {err}")
+                } else {
+                    format!("{err}")
+                };
                 toolbox.send(
                     ctx.connection_id,
-                    request_error_to_resp(
-                        &ctx,
-                        ErrorCode::BAD_REQUEST,
-                        if let Some(path) = path {
-                            format!("{path}: {err}")
-                        } else {
-                            format!("{err}")
-                        },
-                    ),
+                    WsResponseValue::Error(WsResponseError {
+                        method: ctx.method,
+                        code: ErrorCode::BAD_REQUEST.to_u32(),
+                        seq: ctx.seq,
+                        log_id: ctx.log_id.to_string(),
+                        params: serde_json::json!({
+                            "kind": ErrorCode::BAD_REQUEST.kind(),
+                            "message": message,
+                        }),
+                    }),
                 );
                 return;
             }

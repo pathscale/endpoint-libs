@@ -13,7 +13,7 @@ use crate::libs::handler::HandlerError;
 use crate::libs::log::LogLevel;
 use crate::libs::ws::{
     ConnectionId, WsConnection, WsLogResponse, WsRequest, WsResponseError, WsResponseValue,
-    WsStreamState, WsSuccessResponse, internal_error_to_resp, request_error_to_resp,
+    WsStreamState, WsSuccessResponse, custom_error_to_resp, internal_error_to_resp,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -34,44 +34,53 @@ pub struct CustomError {
 }
 
 impl CustomError {
-    pub fn new(code: impl Into<ErrorCode>, reason: impl Serialize) -> Self {
+    pub fn new(code: impl Into<ErrorCode>) -> Self {
+        let code = code.into();
         Self {
-            code: code.into(),
-            params: serde_json::to_value(reason).unwrap_or(Value::Null),
+            code,
+            params: Value::Object(Map::new()),
         }
     }
 
-    pub fn with_details(
-        code: impl Into<ErrorCode>,
-        message: impl Into<String>,
-        details: impl Serialize,
-    ) -> Self {
-        let mut params = match serde_json::to_value(details).unwrap_or(Value::Null) {
-            Value::Object(map) => map,
-            Value::Null => Map::new(),
-            value => {
-                let mut map = Map::new();
-                map.insert("details".to_owned(), value);
-                map
-            }
-        };
-        params.insert("message".to_owned(), Value::String(message.into()));
-
-        Self {
-            code: code.into(),
-            params: Value::Object(params),
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        if let Value::Object(map) = &mut self.params {
+            map.insert("message".to_owned(), Value::String(message.into()));
         }
+        self
+    }
+
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        if let Value::Object(map) = &mut self.params {
+            map.insert("kind".to_owned(), Value::String(kind.into()));
+        }
+        self
+    }
+
+    pub fn with_details(mut self, details: impl Serialize) -> Self {
+        let details = serde_json::to_value(details).unwrap_or(Value::Null);
+        let Value::Object(params) = &mut self.params else {
+            return self;
+        };
+
+        match details {
+            Value::Object(details) => {
+                for (key, value) in details {
+                    if key != "kind" && key != "message" {
+                        params.insert(key, value);
+                    }
+                }
+            }
+            Value::Null => {}
+            value => {
+                params.insert("details".to_owned(), value);
+            }
+        }
+        self
     }
 
     pub fn from_sql_error(err: &str, msg: impl Display) -> Result<Self> {
         let code = u32::from_str_radix(err, 36)?;
-        let error_code = ErrorCode::new(code);
-        let this = Self {
-            code: error_code,
-            params: msg.to_string().into(),
-        };
-
-        Ok(this)
+        Ok(Self::new(ErrorCode::new(code)).with_message(msg.to_string()))
     }
 }
 
@@ -215,10 +224,12 @@ impl Toolbox {
                     WsResponseValue::Error(WsResponseError {
                         method: ctx.method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),
-                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
                         seq: ctx.seq,
                         log_id: ctx.log_id.to_string(),
-                        params: Value::Null,
+                        params: serde_json::json!({
+                            "kind": ErrorCode::INTERNAL_ERROR.kind(),
+                            "message": "Failed to serialize response",
+                        }),
                     }),
                 );
                 return;
@@ -236,8 +247,20 @@ impl Toolbox {
     pub fn send_internal_error(&self, ctx: &RequestContext, code: ErrorCode, err: eyre::Error) {
         self.send(ctx.connection_id, internal_error_to_resp(ctx, code, err));
     }
-    pub fn send_request_error(&self, ctx: &RequestContext, code: ErrorCode, err: impl Into<Value>) {
-        self.send(ctx.connection_id, request_error_to_resp(ctx, code, err));
+    pub fn send_request_error(&self, ctx: &RequestContext, code: ErrorCode, err: impl Display) {
+        self.send(
+            ctx.connection_id,
+            WsResponseValue::Error(WsResponseError {
+                method: ctx.method,
+                code: code.to_u32(),
+                seq: ctx.seq,
+                log_id: ctx.log_id.to_string(),
+                params: serde_json::json!({
+                    "kind": code.kind(),
+                    "message": err.to_string(),
+                }),
+            }),
+        );
     }
     pub fn send_log(&self, ctx: &RequestContext, level: LogLevel, msg: impl Into<String>) {
         self.send(
@@ -275,10 +298,12 @@ impl Toolbox {
                     WsResponseValue::Error(WsResponseError {
                         method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),
-                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
                         seq,
                         log_id: log_id.to_string(),
-                        params: Value::Null,
+                        params: serde_json::json!({
+                            "kind": ErrorCode::INTERNAL_ERROR.kind(),
+                            "message": "Failed to serialize response",
+                        }),
                     })
                 }
             },
@@ -286,7 +311,7 @@ impl Toolbox {
                 return None;
             }
             Err(err) => match err.downcast::<CustomError>() {
-                Ok(err) => request_error_to_resp(&ctx, err.code, err.params),
+                Ok(err) => custom_error_to_resp(&ctx, err),
                 Err(err) => internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err),
             },
         };
@@ -322,16 +347,18 @@ impl Toolbox {
                     WsResponseValue::Error(WsResponseError {
                         method,
                         code: ErrorCode::INTERNAL_ERROR.to_u32(),
-                        kind: ErrorCode::INTERNAL_ERROR.kind().to_owned(),
                         seq,
                         log_id: log_id.to_string(),
-                        params: Value::Null,
+                        params: serde_json::json!({
+                            "kind": ErrorCode::INTERNAL_ERROR.kind(),
+                            "message": "Failed to serialize response",
+                        }),
                     })
                 }
             },
             Err(HandlerError::Public(err)) => {
                 let err = err.into();
-                request_error_to_resp(&ctx, err.code, err.params)
+                custom_error_to_resp(&ctx, err)
             }
             Err(HandlerError::Internal(err)) => {
                 internal_error_to_resp(&ctx, ErrorCode::INTERNAL_ERROR, err)
