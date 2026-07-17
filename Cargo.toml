@@ -50,7 +50,6 @@ ws = [
     "dep:tokio-tungstenite",
     "dep:tokio-rustls",
     "dep:rustls",
-    "dep:rustls-pemfile",
     "dep:reqwest",
     "dep:hyper",
     "dep:hyper-util",
@@ -104,8 +103,7 @@ ws-wtx = [
     "dep:base64",
     "dep:tokio-rustls",
     "dep:rustls",
-    "dep:rustls-pemfile",
-    "rustls/tls12", 
+    "rustls/tls12",
     "tokio-rustls/tls12",
 ]
 ws-wtx-http2 = ["ws-wtx", "wtx/http2"]
@@ -142,7 +140,6 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
     "connect",
 ], optional = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging"] }
-rustls-pemfile = { version = "2.1", optional = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "std"] }
 tokio = { version = "1.39", features = ["full"] }
 tokio-util = { version = "0.7", optional = true }
