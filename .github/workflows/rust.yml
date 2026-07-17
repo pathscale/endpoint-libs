@@ -70,7 +70,7 @@ jobs:
         run: cargo install cargo-all-features
 
       - name: Clippy check all feature combinations
-        run: cargo all-features clippy --all-targets --all-features -- -D warnings
+        run: cargo all-features clippy --all-targets -- -D warnings
 
   format_check:
 
@@ -101,3 +101,7 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # quick-xml DoS advisories: the fix requires quick-xml >=0.41, but the
+          # dev-dependency-only chain cert-provider -> rust-s3/aws-creds pins
+          # ^0.38. Re-evaluate when upstream releases with a newer quick-xml.
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195
