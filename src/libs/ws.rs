@@ -3,6 +3,7 @@ mod conn;
 pub mod handler;
 mod headers;
 mod listener;
+pub mod mcp;
 mod message;
 mod push;
 mod server;
