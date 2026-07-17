@@ -1,5 +1,7 @@
 use super::WsMessage as Message;
-use eyre::{ContextCompat, Result, bail, eyre};
+#[cfg(feature = "ws")]
+use eyre::eyre;
+use eyre::{ContextCompat, Result, bail};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -12,9 +14,11 @@ use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tracing::*;
 
+#[cfg(feature = "ws")]
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
+#[cfg(feature = "ws")]
 use crate::libs::utils::{get_conn_id, get_log_id};
 #[cfg(feature = "ws")]
 use crate::libs::ws::HyperTungsteniteUpgrader;
@@ -115,6 +119,7 @@ impl WebsocketServer {
         }
     }
 
+    #[cfg(feature = "ws")]
     async fn handle_ws_handshake_and_connection(
         self: Arc<Self>,
         addr: SocketAddr,
@@ -166,6 +171,19 @@ impl WebsocketServer {
         Ok(())
     }
 
+    #[cfg(not(feature = "ws"))]
+    async fn handle_ws_handshake_and_connection(
+        self: Arc<Self>,
+        _addr: SocketAddr,
+        _states: Arc<WebsocketStates>,
+        _stream: BoxedStream,
+    ) -> Result<()> {
+        bail!(
+            "WebSocket upgrades require a backend that can create WS streams (enable the `ws` feature)"
+        )
+    }
+
+    #[cfg(feature = "ws")]
     async fn post_upgrade_connection(
         self: Arc<Self>,
         addr: SocketAddr,

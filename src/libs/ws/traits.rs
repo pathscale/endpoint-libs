@@ -52,6 +52,9 @@ pub trait WsStream: Unpin + Send {
 /// An upgrade event yielded by the upgrader.
 /// Contains the on_upgrade future and the negotiated protocol.
 pub struct UpgradeEvent {
+    /// Only present with a hyper-based backend (`ws` or `ws-client`), which is
+    /// what provides the `hyper` dependency.
+    #[cfg(any(feature = "ws", feature = "ws-client"))]
     pub on_upgrade: hyper::upgrade::OnUpgrade,
     pub protocol: String,
 }
