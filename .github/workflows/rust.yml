@@ -96,6 +96,12 @@ jobs:
 
   security_audit:
     runs-on: ubicloud-standard-2
+    permissions:
+      contents: read
+      # audit-check reports its findings as a check run; without this the
+      # report API call fails with "Resource not accessible by integration"
+      # and the job errors even when no vulnerabilities are found.
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2

@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
@@ -10,7 +9,6 @@ use futures::future::BoxFuture;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::pki_types::pem::PemObject;
-use rustls_pemfile::certs;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
@@ -89,12 +87,10 @@ fn load_certs<'a, T: AsRef<Path>>(
     let mut r_certs = vec![];
     for p in path {
         let p = p.as_ref();
-        let f = File::open(p).with_context(|| format!("Failed to open {}", p.display()))?;
-
-        let reader = &mut std::io::BufReader::new(f);
-        let certs_results = certs(reader);
-
-        let certs: Vec<CertificateDer> = certs_results.filter_map(|result| result.ok()).collect();
+        let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(p)
+            .with_context(|| format!("Failed to open {}", p.display()))?
+            .filter_map(|result| result.ok())
+            .collect();
 
         r_certs.extend(certs);
     }
