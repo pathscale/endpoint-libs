@@ -9,6 +9,9 @@ use crate::libs::ws::WsMessage as Message;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
+use super::mcp::{
+    self, JsonRpcError, JsonRpcId, JsonRpcRequest, McpAction, McpCallCtx, McpState, jsonrpc_error,
+};
 use super::{
     StreamError, WebsocketServer, WsConnection, WsRequestValue, WsResponseError, WsResponseValue,
     WsStream,
@@ -57,6 +60,22 @@ impl WsClientSession {
     fn handle_message(&mut self, msg: Message) -> Result<bool> {
         let addr = &self.conn_info.address;
         let mut context = RequestContext::from_conn(&self.conn_info);
+
+        // MCP: route JSON-RPC 2.0 frames to the MCP adapter when enabled.
+        // Detection is unambiguous: legacy frames ({method: u32, seq, params})
+        // can never carry a top-level "jsonrpc": "2.0" member.
+        if let Some(mcp) = &self.server.mcp {
+            let payload = match &msg {
+                Message::Text(t) => Some(t.as_str()),
+                Message::Binary(b) => std::str::from_utf8(b).ok(),
+                _ => None,
+            };
+            if let Some(frame) = payload.and_then(mcp::try_parse_jsonrpc) {
+                let mcp = Arc::clone(mcp);
+                self.handle_mcp_frame(mcp, frame, context);
+                return Ok(true);
+            }
+        }
 
         #[allow(unreachable_patterns)]
         let obj: Result<WsRequestValue, _> = match msg {
@@ -153,6 +172,76 @@ impl WsClientSession {
         });
 
         Ok(true)
+    }
+
+    /// Handles one parsed JSON-RPC frame: lifecycle methods are answered
+    /// inline from [`McpState`]; `tools/call` dispatches to the endpoint's
+    /// request handler via [`RequestHandlerErased::handle_mcp`].
+    ///
+    /// [`RequestHandlerErased::handle_mcp`]: crate::libs::handler::RequestHandlerErased::handle_mcp
+    fn handle_mcp_frame(
+        &mut self,
+        mcp: Arc<McpState>,
+        frame: Result<JsonRpcRequest, serde_json::Value>,
+        mut context: RequestContext,
+    ) {
+        let conn_id = context.connection_id;
+        let req = match frame {
+            Ok(req) => req,
+            Err(error_frame) => {
+                self.server
+                    .toolbox
+                    .send_raw(conn_id, error_frame.to_string());
+                return;
+            }
+        };
+
+        context.user_id = self.conn_info.get_user_id();
+        context.roles = self.conn_info.get_roles();
+
+        match mcp.route(req, &context.roles) {
+            McpAction::Respond(frame) => {
+                self.server.toolbox.send_raw(conn_id, frame.to_string());
+            }
+            McpAction::Ignore => {}
+            McpAction::ToolCall {
+                id,
+                method_code,
+                arguments,
+            } => {
+                context.method = method_code;
+                // Numeric ids that fit u32 double as the legacy seq for logging.
+                if let Some(JsonRpcId::Num(n)) = &id
+                    && let Ok(seq) = u32::try_from(*n)
+                {
+                    context.seq = seq;
+                }
+
+                let Some(endpoint) = self.server.handlers.get(&method_code) else {
+                    // Unreachable in practice: McpState is built from handlers.
+                    self.server.toolbox.send_raw(
+                        conn_id,
+                        jsonrpc_error(
+                            &id,
+                            JsonRpcError::new(mcp::METHOD_NOT_FOUND, "Method not found"),
+                        )
+                        .to_string(),
+                    );
+                    return;
+                };
+
+                let handler = endpoint.handler.clone();
+                let toolbox = self.server.toolbox.clone();
+                tokio::task::spawn_local(async move {
+                    TOOLBOX
+                        .scope(
+                            toolbox.clone(),
+                            handler.handle_mcp(&toolbox, context, McpCallCtx { id }, arguments),
+                        )
+                        .await;
+                });
+            }
+        }
     }
 
     async fn run_loop(&mut self) -> Result<()> {

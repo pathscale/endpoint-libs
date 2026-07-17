@@ -131,15 +131,19 @@ impl RequestContext {
 
 type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
 type SendFnArc = Arc<SendFn>;
+type SendRawFn = dyn Fn(ConnectionId, String) -> bool + Send + Sync;
+type SendRawFnArc = Arc<SendRawFn>;
 
 pub struct Toolbox {
     pub send_msg: OnceLock<SendFnArc>,
+    pub send_raw_msg: OnceLock<SendRawFnArc>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
 impl Toolbox {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             send_msg: OnceLock::new(),
+            send_raw_msg: OnceLock::new(),
         })
     }
 
@@ -149,6 +153,7 @@ impl Toolbox {
         oneshot: bool,
         drop_on_buffer_full: bool,
     ) {
+        let raw_states = Arc::clone(&states);
         let send_fn: SendFnArc = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
@@ -170,6 +175,23 @@ impl Toolbox {
                 "set_ws_states called twice — ignoring second call"
             );
         }
+        // Pre-serialized frames (JSON-RPC/MCP responses) bypass WsResponseValue.
+        let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
+            let state = if let Some(state) = raw_states.get(&conn_id) {
+                state
+            } else {
+                return false;
+            };
+            Self::send_serialized_ws_msg(
+                &state.message_queue,
+                serialized,
+                oneshot,
+                conn_id,
+                drop_on_buffer_full,
+            );
+            true
+        });
+        let _ = self.send_raw_msg.set(send_raw_fn);
     }
 
     pub fn send_ws_msg(
@@ -186,6 +208,16 @@ impl Toolbox {
                 return;
             }
         };
+        Self::send_serialized_ws_msg(sender, serialized, oneshot, conn_id, drop_on_full)
+    }
+
+    pub fn send_serialized_ws_msg(
+        sender: &tokio::sync::mpsc::Sender<Message>,
+        serialized: String,
+        oneshot: bool,
+        conn_id: ConnectionId,
+        drop_on_full: bool,
+    ) {
         match sender.try_send(serialized.into()) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -211,6 +243,13 @@ impl Toolbox {
     pub fn send(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
         match self.send_msg.get() {
             Some(f) => f(conn_id, resp),
+            None => false,
+        }
+    }
+    /// Sends a pre-serialized frame (e.g. a JSON-RPC/MCP response) as-is.
+    pub fn send_raw(&self, conn_id: ConnectionId, serialized: String) -> bool {
+        match self.send_raw_msg.get() {
+            Some(f) => f(conn_id, serialized),
             None => false,
         }
     }

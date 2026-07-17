@@ -203,6 +203,10 @@ rcgen = "0.14"
 cert-provider = {git = "https://github.com/dVeon-loch/cert-provider.git", features = ["dns01"]}
 
 [[example]]
+name = "mcp_echo"
+required-features = ["ws-http1"]
+
+[[example]]
 name = "ws_echo_rustls"
 required-features = ["ws"]
 

@@ -20,13 +20,14 @@ use crate::libs::utils::{get_conn_id, get_log_id};
 use crate::libs::ws::HyperTungsteniteUpgrader;
 #[cfg(any(feature = "ws", feature = "ws-wtx"))]
 use crate::libs::ws::TlsListener;
+use crate::libs::ws::mcp::{McpServerInfo, McpState};
 #[cfg(feature = "ws")]
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
     BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
     WsStream, WsUpgrader,
 };
-use crate::model::EndpointSchema;
+use crate::model::{EndpointSchema, TypeRegistry};
 
 use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
 
@@ -38,6 +39,9 @@ pub struct WebsocketServer {
     pub config: WsServerConfig,
     pub cached_date: RwLock<String>,
     pub upgrader: Option<Arc<dyn WsUpgrader>>,
+    /// MCP surface state; `None` (the default) disables MCP entirely and the
+    /// server behaves exactly as before. See [`WebsocketServer::enable_mcp`].
+    pub mcp: Option<Arc<McpState>>,
 }
 
 impl WebsocketServer {
@@ -56,7 +60,24 @@ impl WebsocketServer {
             cached_date: RwLock::new(httpdate::fmt_http_date(std::time::SystemTime::now())),
             config,
             upgrader: default_upgrader(),
+            mcp: None,
         }
+    }
+
+    /// Enables the MCP (JSON-RPC 2.0) surface on this server.
+    ///
+    /// Call after all `add_handler()` calls and before `listen()`: tool
+    /// metadata is built once from the handlers registered so far. Fails on
+    /// unresolved type references or duplicate tool names.
+    pub fn enable_mcp(&mut self, registry: &TypeRegistry, info: McpServerInfo) -> Result<()> {
+        let state = McpState::build(&self.handlers, registry, info)?;
+        debug!(
+            ws_server = true,
+            "MCP enabled with {} tools",
+            state.tools.len()
+        );
+        self.mcp = Some(Arc::new(state));
+        Ok(())
     }
     pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
         self.auth_controller = Arc::new(controller);
