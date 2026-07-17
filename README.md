@@ -50,6 +50,7 @@ The crate is feature-gated. The default feature set is `types` only.
 Endpoint schema types shared between services and `endpoint-gen`:
 
 - `Type`, `Field`, `EnumVariant` — the type system used to describe endpoint request/response schemas
+- `TypeRegistry` and `Type::to_json_schema` — conversion of endpoint schemas to JSON Schema (used for MCP tool definitions, see below)
 - Blockchain primitive types: `BlockchainAddress`, `BlockchainTransactionHash`, `U256`, `H256`
 
 ### `ws`
@@ -113,6 +114,64 @@ impl SubAuthController for MethodSignup {
         .boxed_local()
     }
 }
+```
+
+### MCP (Model Context Protocol) support
+
+The WebSocket server can optionally expose every registered endpoint as an
+**MCP tool** over JSON-RPC 2.0, alongside the legacy `{method, seq, params}`
+protocol. MCP is **off by default** and fully additive: with it disabled the
+server behaves exactly as before, and even with it enabled, legacy frames are
+routed unchanged — both protocols work on the same connection.
+
+Supported MCP methods: `initialize`, `ping`, `tools/list` (filtered by the
+connection's roles), `tools/call`, and `notifications/*`. Tool metadata
+(`inputSchema` / `outputSchema`) is generated from the endpoint schemas via
+`Type::to_json_schema` (`model::json_schema`, available under the default
+`types` feature).
+
+```rust
+use endpoint_libs::libs::ws::mcp::McpServerInfo;
+use endpoint_libs::model::TypeRegistry;
+
+let mut server = WebsocketServer::new(config);
+server.set_auth_controller(MyAuthController);
+server.add_handler(MethodEcho);
+// ... all other add_handler() calls ...
+
+// With endpoint-gen generated code, use the generated `type_registry()`.
+// Endpoints that only use primitive types can pass an empty registry.
+let registry: TypeRegistry = type_registry();
+server.enable_mcp(
+    &registry,
+    McpServerInfo { name: "my-service".into(), version: env!("CARGO_PKG_VERSION").into() },
+)?;
+
+server.listen().await
+```
+
+Behavior notes:
+
+- **Frame detection** — a frame is treated as JSON-RPC iff it carries a
+  top-level `"jsonrpc": "2.0"` member, which legacy frames can never contain.
+- **Tool names** — endpoint names in snake_case (`UserListSymbols` →
+  `user_list_symbols`).
+- **Roles** — `tools/list` only shows tools the connection's roles allow;
+  calling a forbidden tool answers identically to an unknown tool.
+- **Errors** — public handler errors (`CustomError`) become MCP tool results
+  with `isError: true`; invalid params map to `-32602`, unknown methods to
+  `-32601`, internal errors to `-32603` (with `logId` in `error.data`).
+- **Streaming** — endpoints with a `stream_response` deliver only their
+  immediate response over MCP; stream frames are not forwarded (tools are
+  annotated accordingly in their description).
+- `enable_mcp` fails at startup on unresolved `StructRef`/`EnumRef` names or
+  duplicate tool names, rather than serving broken schemas.
+
+A runnable end-to-end example (MCP handshake + legacy frame on one
+connection) is provided:
+
+```sh
+cargo run --example mcp_echo --features ws-http1
 ```
 
 ### `signal`
