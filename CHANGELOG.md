@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.9.0] - 2026-07-17
+
+### Documentation
+
+- Document the opt-in MCP surface in the README
+
+### Features
+
+- Add Type -> JSON Schema conversion for MCP tool schemas
+- Add JSON-RPC 2.0 envelope and MCP server state module
+- Wire MCP surface into the WebSocket server (opt-in)
+
+### Miscellaneous Tasks
+
+- Fix invalid YAML indentation that silently disabled the Rust workflow
+
 ## [1.7.12] - 2026-04-28
 
 ### Features
