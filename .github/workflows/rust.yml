@@ -26,8 +26,6 @@ jobs:
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: "true"
-        add-job-id-key: "false"
-        add-rust-environment-hash-key: "false"
 
     - name: Install Rust
       uses: actions-rs/toolchain@v1
@@ -59,9 +57,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-            cache-on-failure: "true"
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
+          cache-on-failure: "true"
 
       - name: Install Rust
         uses: actions-rs/toolchain@v1
@@ -85,9 +81,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-            cache-on-failure: "true"
-          add-job-id-key: "false"
-          add-rust-environment-hash-key: "false"
+          cache-on-failure: "true"
 
       - name: Install Rust
         uses: actions-rs/toolchain@v1
