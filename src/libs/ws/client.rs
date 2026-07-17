@@ -53,8 +53,8 @@ pub struct WsConnectResponse {
 // ---------------------------------------------------------------------------
 
 enum WsStream {
-    H1(WebSocketStream<MaybeTlsStream<TcpStream>>),
-    H2(WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>),
+    H1(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+    H2(Box<WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>>),
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ impl WsClient {
             .context("Failed to connect to endpoint")?;
         Ok((
             Self {
-                stream: WsStream::H1(ws_stream),
+                stream: WsStream::H1(Box::new(ws_stream)),
                 seq: 0,
             },
             response,
@@ -124,8 +124,8 @@ impl WsClient {
 
     async fn stream_close(&mut self) -> Result<()> {
         match &mut self.stream {
-            WsStream::H1(s) => s.close(None).await?,
-            WsStream::H2(s) => s.close(None).await?,
+            WsStream::H1(s) => s.as_mut().close(None).await?,
+            WsStream::H2(s) => s.as_mut().close(None).await?,
         }
         Ok(())
     }
@@ -385,7 +385,7 @@ async fn connect_h1(
 
     Ok((
         WsClient {
-            stream: WsStream::H1(ws_stream),
+            stream: WsStream::H1(Box::new(ws_stream)),
             seq: 0,
         },
         conn_resp,
@@ -543,7 +543,7 @@ where
 
     Ok((
         WsClient {
-            stream: WsStream::H2(ws),
+            stream: WsStream::H2(Box::new(ws)),
             seq: 0,
         },
         conn_resp,
