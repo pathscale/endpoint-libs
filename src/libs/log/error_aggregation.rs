@@ -57,6 +57,15 @@ pub struct ErrorAggregationConfig {
     pub normalize: bool, // Whether to normalize messages for deduplication
 }
 
+impl Default for ErrorAggregationConfig {
+    fn default() -> Self {
+        Self {
+            limit: 100,
+            normalize: true,
+        }
+    }
+}
+
 /// Internal storage representation
 #[derive(Debug)]
 struct ErrorStorage {
@@ -132,7 +141,7 @@ impl ErrorAggregationContainer {
         if let Some(mut cmp) = sort_by {
             entries.sort_by(|a, b| cmp(a, b));
         } else {
-            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         }
 
         entries.into_iter().skip(offset).take(limit).collect()
@@ -144,7 +153,7 @@ impl ErrorAggregationContainer {
         let map = storage.get_map();
 
         let mut stats: Vec<ErrorStats> = map.values().cloned().collect();
-        stats.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        stats.sort_by_key(|s| std::cmp::Reverse(s.last_seen));
         stats.into_iter().skip(offset).take(limit).collect()
     }
 
