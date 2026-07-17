@@ -219,11 +219,6 @@ name = "ws_echo_server"
 path = "examples/ws-echo/main.rs"
 required-features = ["ws"]
 
-[[example]]
-name = "ws_echo_server_wtx"
-path = "examples/ws-echo/main.rs"
-required-features = ["ws-wtx"]
-
 [package.metadata.cargo-all-features]
 
 # Always include these features in combinations.
@@ -235,17 +230,8 @@ always_include_features = ["types"]
 denylist = [
     "full",           # full is redundant to include in the matrix
     "log_throttling", # log_throttling is currently not working
-]
-
-# ws and ws-wtx are mutually exclusive backends — skip permutations including both
-# (includes compound features that transitively enable ws)
-skip_feature_sets = [
-    ["ws", "ws-wtx"],
-    ["ws-http1", "ws-wtx"],
-    ["ws-tls12", "ws-wtx"],
-    ["ws", "ws-wtx-http2"],
-    ["ws-http1", "ws-wtx-http2"],
-    ["ws-tls12", "ws-wtx-http2"],
+    "ws-wtx",         # deprecated: contains a compile_error! directing users to `ws`
+    "ws-wtx-http2",   # deprecated: depends on ws-wtx
 ]
 
 # If your crate has a large number of optional dependencies, skip them for speed
@@ -259,7 +245,10 @@ skip_feature_sets = [
 # The maximum number of features to try at once. Does not count features from `always_include_features`.
 # This is useful for reducing the number of combinations run for a crate with a large amount of features,
 # since in most cases a bug just needs a small set of 2-3 features to reproduce.
-# max_combination_size = 4
+# With 11 matrix features the unbounded matrix is 2048 combinations (hours per CI
+# job); capping at 3 gives 232 combinations while still covering every pairwise
+# and most triple-feature interactions.
+max_combination_size = 3
 
 # Only include certain features in the build matrix
 #(incompatible with `denylist`, `skip_optional_dependencies`, and `extra_features`)
