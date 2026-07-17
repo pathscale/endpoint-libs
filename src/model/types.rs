@@ -88,7 +88,9 @@ pub enum Type {
     String,
     Bytea,
     UUID,
-    NanoId { len: usize },
+    NanoId {
+        len: usize,
+    },
     IpAddr,
     Struct {
         name: String,
