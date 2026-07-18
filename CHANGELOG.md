@@ -1,6 +1,22 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [1.9.1] - 2026-07-18
+
+### Bug Fixes
+
+- Gate hyper/tungstenite usage so ws-core and ws-client build without ws
+- Resolve clippy -D warnings failures across feature combos
+- Make security_audit job pass and clear actionable audit warnings
+
+### Miscellaneous Tasks
+
+- Fix clippy invocation and resolve security audit failures
+
+### Build
+
+- Exclude deprecated ws-wtx features from the feature matrix
+
 ## [1.9.0] - 2026-07-17
 
 ### Documentation
