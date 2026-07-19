@@ -174,6 +174,12 @@ connection) is provided:
 cargo run --example mcp_echo --features ws-http1
 ```
 
+Migrating an existing backend from 1.7.x? See the step-by-step guide in
+[docs/mcp-migration.md](docs/mcp-migration.md) (covers the typed-error
+migration, RON descriptions, codegen, activation, and verification), and
+[pathscale/api.support.cafe#3](https://github.com/pathscale/api.support.cafe/pull/3)
+for a complete worked example.
+
 ### `signal`
 
 Unix signal handling (`SIGTERM`/`SIGINT`) with a global `CancellationToken` for coordinating graceful shutdown across async tasks.
