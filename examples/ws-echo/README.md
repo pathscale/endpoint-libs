@@ -42,11 +42,7 @@ The optional fields `appPubId` and `token` can also be included:
 From the repo root — available with either backend:
 
 ```sh
-# Hyper + tungstenite backend (default)
 cargo run --example ws_echo_server --features ws
-
-# WTX backend
-cargo run --example ws_echo_server_wtx --features ws-wtx
 ```
 
 The server generates a self-signed TLS certificate at startup and listens on **port 8443**. Test with `websocat` (note the `wss://` scheme and `-k` flag to skip certificate verification):

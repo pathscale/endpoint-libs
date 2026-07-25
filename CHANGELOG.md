@@ -1,6 +1,43 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+### Removed
+
+- **The `ws-wtx` and `ws-wtx-http2` features, and the entire wtx WebSocket
+  backend** (`src/libs/ws/wtx/`). Also drops four now-orphaned optional
+  dependencies: `wtx`, `httparse`, `sha1` and `base64`.
+
+  **This cannot break a working build.** Enabling `ws-wtx` on 2.0.x was already
+  a hard compile error — an unconditional `compile_error!` deprecating the
+  backend, and separately `E0046`/`E0407` because `wtx/upgrader.rs` still
+  implemented the pre-2.0 `WsUpgrader::upgrade` rather than `upgrade_stream`
+  after the transport-seam rename. Verified before removal: `cargo check
+  --no-default-features --features ws-wtx` fails on 2.0.1. No configuration
+  existed in which this code compiled, so no consumer can have depended on it.
+  A build that named the feature was already broken; it now gets "feature does
+  not exist" instead of a `compile_error!`.
+
+  Removed in a minor rather than held for 3.0 for that reason — the usual
+  semver caution around dropping a feature protects working consumers, and
+  there were none. Use `ws` (hyper + tungstenite), which has provided HTTP/2
+  multiplexing since the deprecation.
+
+### Fixed
+
+- **`cargo clippy --all-features` and `cargo test --all-features` work again.**
+  They were permanently red — `--all-features` necessarily enabled the mutually
+  exclusive `ws-wtx` backend. With it gone, `--all-features` compiles clean
+  (no errors, no warnings). `cargo all-features` remains what CI runs and stays
+  the authority on the feature matrix; the `ws-wtx`/`ws-wtx-http2` entries have
+  been dropped from its `denylist`.
+- A shadowed `protocol_versions` binding in `src/libs/ws/tls.rs` (the `ws-wtx`
+  arm silently overrode the `ws-tls12` arm) and a dead `ws_echo_server_wtx`
+  target in `examples/test_ws_echo_tls.sh` that referenced an example file
+  which does not exist.
+
 ## [2.0.1] - 2026-07-26
 
 ### Changed

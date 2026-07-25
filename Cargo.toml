@@ -101,18 +101,6 @@ log_throttling = ["dep:tracing-throttle"]
 s3-sync = ["cert-provider/s3-sync"]
 ws-http1 = ["ws", "hyper/http1"]
 ws-tls12 = ["ws", "rustls/tls12", "tokio-rustls/tls12"]
-ws-wtx = [
-    "ws-core",
-    "dep:wtx",
-    "dep:httparse",
-    "dep:sha1",
-    "dep:base64",
-    "dep:tokio-rustls",
-    "dep:rustls",
-    "rustls/tls12",
-    "tokio-rustls/tls12",
-]
-ws-wtx-http2 = ["ws-wtx", "wtx/http2"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -171,19 +159,9 @@ hyper = { version = "1", features = ["http2", "server", "client"], optional = tr
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 httpdate = { version = "1.0", optional = true }
-httparse = { version = "1.10", optional = true }
-sha1 = { version = "0.11", optional = true }
-base64 = { version = "0.22", optional = true }
 tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 webpki-roots = { version = "1.0.7", optional = true }
 crossfire = { version = "3.1", features = ["tokio"], optional = true }
-wtx = { version = "0.44", default-features = false, features = [
-    "web-socket",
-    "web-socket-handshake",
-    "crypto-ring",
-    "tokio",
-    "tokio-rustls",
-], optional = true }
 # Force bundled CA roots for hyper-rustls (used by instant-acme inside cert-provider)
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["webpki-tokio"] }
 
@@ -238,8 +216,6 @@ always_include_features = ["types"]
 denylist = [
     "full",           # full is redundant to include in the matrix
     "log_throttling", # log_throttling is currently not working
-    "ws-wtx",         # deprecated: contains a compile_error! directing users to `ws`
-    "ws-wtx-http2",   # deprecated: depends on ws-wtx
 ]
 
 # If your crate has a large number of optional dependencies, skip them for speed
