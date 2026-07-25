@@ -1,3 +1,4 @@
+use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::ws::WsMessage as Message;
 use dashmap::DashMap;
 use eyre::Result;
@@ -100,7 +101,16 @@ pub struct RequestContext {
     pub method: u32,
     pub log_id: u64,
     pub roles: Arc<Vec<u32>>,
+    /// Best-effort IP, kept for compatibility: most consumers only log it.
+    ///
+    /// Populated from [`PeerIdentity::ip_addr`], so local peers report loopback.
+    /// Prefer [`Self::peer`] when the distinction matters.
     pub ip_addr: IpAddr,
+    /// Who issued this request. Carries attestation for local transports.
+    pub peer: PeerIdentity,
+    /// Request-scoped data. `BeforeRequest` hooks attach verified claims here;
+    /// handlers read them back.
+    pub extensions: Extensions,
 }
 
 impl RequestContext {
@@ -113,6 +123,8 @@ impl RequestContext {
             log_id: 0,
             roles: Arc::new(Vec::new()),
             ip_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            peer: PeerIdentity::Unknown,
+            extensions: Extensions::new(),
         }
     }
     pub fn from_conn(conn: &WsConnection) -> Self {
@@ -124,7 +136,9 @@ impl RequestContext {
             method: 0,
             log_id: conn.log_id,
             roles,
-            ip_addr: conn.address.ip(),
+            ip_addr: conn.peer.ip_addr(),
+            peer: conn.peer.clone(),
+            extensions: conn.extensions.clone(),
         }
     }
 }

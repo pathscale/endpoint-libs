@@ -5,6 +5,7 @@ pub mod log_reader;
 pub mod scheduler;
 #[cfg(feature = "signal")]
 pub mod signal;
+pub mod peer;
 pub mod types;
 pub mod utils;
 #[cfg(feature = "ws-core")]

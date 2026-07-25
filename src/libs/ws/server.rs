@@ -17,6 +17,7 @@ use tracing::*;
 #[cfg(feature = "ws")]
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
+use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 #[cfg(feature = "ws")]
 use crate::libs::utils::{get_conn_id, get_log_id};
@@ -195,7 +196,8 @@ impl WebsocketServer {
             connection_id: get_conn_id(),
             user_id: Default::default(),
             roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            address: addr,
+            peer: PeerIdentity::Network(addr),
+            extensions: Extensions::new(),
             log_id: get_log_id(),
         });
         debug!(
@@ -239,7 +241,7 @@ impl WebsocketServer {
         stream: Box<dyn WsStream>,
         rx: mpsc::Receiver<Message>,
     ) {
-        let addr = conn.address;
+        let addr = conn.peer.display();
         let context = RequestContext::from_conn(&conn);
         let conn_id = context.connection_id;
 

@@ -179,7 +179,10 @@ impl AuthController for AllowAllAuthController {
             let conn_id = conn.connection_id;
             tracing::info!(
                 conn_id = %conn_id,
-                ip = %conn.address,
+                // 2.0: `conn.address` (SocketAddr) → `conn.peer` (PeerIdentity),
+                // which also describes local transports. Display is compact and
+                // includes attestation for local peers.
+                peer = %conn.peer,
                 header_len = header.len(),
                 "New connection — granting role 1 (allow-all auth)"
             );
