@@ -248,10 +248,22 @@ Two things to know before you diff against it:
   (`/{serviceName}/{endpoint_snake_name}`), `operationId` = `{service}_{snake_name}`,
   and `x-roles` (not `x-required-roles`). Rationale in §3.1: the RON namespace is
   `(service_name, service_id)`, and a flat `/rpc/{Name}` scheme collides across
-  services while the `/rpc/` segment carries no information. If any further
-  divergence between plan and fixture turns up during implementation, the
-  *fixture's* convention wins unless it's demonstrably wrong — it is the deployed
-  artifact.
+  services while the `/rpc/` segment carries no information.
+- **It is not an oracle, and nothing is deployed from it.** An earlier revision gave
+  the fixture the tiebreak "it is the deployed artifact" — that was written while the
+  file still lived in `api.support.cafe/docs/openapi.yaml`. It doesn't any more, and it
+  never described a running surface anyway: the server speaks WebSocket, and these paths
+  are synthetic (§3.1). It is a hand-written file that predates the emitter, and no test
+  consumes it yet.
+
+  So the tiebreak is the ground rule, not the file: **the RON is the source of truth.**
+  Where fixture and emitter disagree, work out which is right from the RON. The fixture's
+  standing is that its *conventions* were reviewed and adopted into §3.1/§3.2 — those are
+  now the plan's, and the plan is what an implementer follows. Its *contents* have no
+  authority; it was generated from an older RON state by hand.
+
+  Phase 2 should end with this file regenerated from the emitter and a test asserting the
+  §3.1 conventions against it. Only then is it a golden in the real sense.
 
 ---
 
