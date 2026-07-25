@@ -5,13 +5,11 @@ examples/ws-echo/target/
 examples/ws-echo/.wrangler/
 examples/ws-echo/target/
 
-/.claude
+/.claude/settings.local.json
 /.gemini
 /.qwen
 /.opencode
 /.serena
 /.kiro
-CLAUDE*.md
-AGENTS.md
 
 /.idea
