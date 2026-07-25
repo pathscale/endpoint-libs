@@ -1,6 +1,27 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.0.1] - 2026-07-26
+
+### Changed
+
+- `WsClient` and `WsClient::from_stream` are now available from **`ws-core`**
+  alone. Previously the whole client module sat behind `ws-client`, which pulls
+  tokio-tungstenite, rustls and hyper — so a sidecar speaking only a local
+  transport (XPC, Unix socket, named pipe) compiled a TLS/WebSocket stack it
+  never used.
+
+  `WsClient::new` (the TCP/TLS constructor), `WsClientBuilder`, and the connect
+  helpers remain behind `ws-client`. The transport-agnostic half — `from_stream`
+  plus the request/reply, sequence-correlation and MCP framing logic — no longer
+  requires it.
+
+  Purely additive: existing `ws-client` users see no change.
+
+- The tungstenite `WireMessage` conversions now build under `ws-client` as well
+  as `ws`. They were gated on the server-side feature, so a client-only build
+  could not convert its own messages.
+
 ## [2.0.0] - 2026-07-26
 
 Promotes 2.0.0-alpha.1 to a stable release. **The library code is byte-identical

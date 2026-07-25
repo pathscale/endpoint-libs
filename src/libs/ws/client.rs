@@ -1,27 +1,49 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use bytes::Bytes;
-use eyre::{Context, Result, bail, ensure, eyre};
-use futures::SinkExt;
-use futures::StreamExt;
-use http_body_util::Empty;
-use hyper::StatusCode;
-use hyper::client::conn::http2;
-use hyper::header::HeaderValue;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::pki_types::ServerName;
+use eyre::{Context, Result, bail, eyre};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-use tokio_tungstenite::MaybeTlsStream;
-use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message as TMessage;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
+
+// --- tungstenite/hyper/rustls: only for the TCP/TLS constructor ------------
+#[cfg(feature = "ws-client")]
+use std::net::SocketAddr;
+#[cfg(feature = "ws-client")]
+use std::sync::Arc;
+#[cfg(feature = "ws-client")]
+use bytes::Bytes;
+#[cfg(feature = "ws-client")]
+use eyre::ensure;
+#[cfg(feature = "ws-client")]
+use futures::SinkExt;
+#[cfg(feature = "ws-client")]
+use futures::StreamExt;
+#[cfg(feature = "ws-client")]
+use http_body_util::Empty;
+#[cfg(feature = "ws-client")]
+use hyper::StatusCode;
+#[cfg(feature = "ws-client")]
+use hyper::client::conn::http2;
+#[cfg(feature = "ws-client")]
+use hyper::header::HeaderValue;
+#[cfg(feature = "ws-client")]
+use hyper_util::rt::{TokioExecutor, TokioIo};
+#[cfg(feature = "ws-client")]
+use rustls::pki_types::ServerName;
+#[cfg(feature = "ws-client")]
+use tokio::net::TcpStream;
+#[cfg(feature = "ws-client")]
+use tokio_rustls::TlsConnector;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::MaybeTlsStream;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::WebSocketStream;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::connect_async;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::tungstenite::Message as TMessage;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+#[cfg(feature = "ws-client")]
+use tokio_tungstenite::tungstenite::protocol::Role;
 
 use crate::libs::log::LogLevel;
 use crate::libs::ws::WireMessage as Message;
@@ -33,6 +55,7 @@ use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGene
 
 /// Which HTTP version to use when connecting.
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(feature = "ws-client")]
 pub enum WsVersionMode {
     /// HTTP/1.1 upgrade handshake (existing behaviour).
     #[default]
@@ -44,6 +67,7 @@ pub enum WsVersionMode {
 }
 
 /// Response metadata returned by [`WsClientBuilder::build`].
+#[cfg(feature = "ws-client")]
 pub struct WsConnectResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
@@ -54,7 +78,9 @@ pub struct WsConnectResponse {
 // ---------------------------------------------------------------------------
 
 enum WsStream {
+    #[cfg(feature = "ws-client")]
     H1(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
+    #[cfg(feature = "ws-client")]
     H2(Box<WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>>),
     /// Any transport-agnostic message channel — a framed Unix socket, a named pipe,
     /// an XPC connection. Added in 2.0 alongside [`WsClient::from_stream`].
@@ -72,6 +98,7 @@ pub struct WsClient {
 
 impl WsClient {
     // Existing HTTP/1.1 constructor — unchanged externally.
+    #[cfg(feature = "ws-client")]
     pub async fn new(
         connect_addr: &str,
         protocol_header: &str,
@@ -133,7 +160,9 @@ impl WsClient {
         // Backend edge: the client speaks WireMessage; tungstenite's type exists
         // only inside these helpers.
         match &mut self.stream {
+            #[cfg(feature = "ws-client")]
             WsStream::H1(s) => s.send(TMessage::from(msg)).await?,
+            #[cfg(feature = "ws-client")]
             WsStream::H2(s) => s.send(TMessage::from(msg)).await?,
             WsStream::Message(s) => s
                 .send(msg)
@@ -145,10 +174,12 @@ impl WsClient {
 
     async fn stream_next(&mut self) -> Option<Result<Message>> {
         match &mut self.stream {
+            #[cfg(feature = "ws-client")]
             WsStream::H1(s) => s
                 .next()
                 .await
                 .map(|res| res.map(Into::into).map_err(Into::into)),
+            #[cfg(feature = "ws-client")]
             WsStream::H2(s) => s
                 .next()
                 .await
@@ -162,7 +193,9 @@ impl WsClient {
 
     async fn stream_close(&mut self) -> Result<()> {
         match &mut self.stream {
+            #[cfg(feature = "ws-client")]
             WsStream::H1(s) => s.as_mut().close(None).await?,
+            #[cfg(feature = "ws-client")]
             WsStream::H2(s) => s.as_mut().close(None).await?,
             WsStream::Message(s) => {
                 // No protocol-level close handshake on a plain message channel:
@@ -274,6 +307,7 @@ impl WsClient {
 // WsClientBuilder
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "ws-client")]
 pub struct WsClientBuilder {
     mode: WsVersionMode,
     protocol_header: String,
@@ -281,6 +315,7 @@ pub struct WsClientBuilder {
     danger_accept_invalid_certs: bool,
 }
 
+#[cfg(feature = "ws-client")]
 impl WsClientBuilder {
     pub fn new() -> Self {
         Self {
@@ -341,6 +376,7 @@ impl WsClientBuilder {
     }
 }
 
+#[cfg(feature = "ws-client")]
 impl Default for WsClientBuilder {
     fn default() -> Self {
         Self::new()
@@ -351,6 +387,7 @@ impl Default for WsClientBuilder {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "ws-client")]
 struct ParsedUrl {
     tls: bool,
     host: String,
@@ -358,6 +395,7 @@ struct ParsedUrl {
     path: String,
 }
 
+#[cfg(feature = "ws-client")]
 fn parse_ws_url(url: &str) -> Result<ParsedUrl> {
     let (tls, rest) = if let Some(r) = url.strip_prefix("wss://") {
         (true, r)
@@ -389,6 +427,7 @@ fn parse_ws_url(url: &str) -> Result<ParsedUrl> {
     })
 }
 
+#[cfg(feature = "ws-client")]
 async fn connect_h1(
     addr: &str,
     protocol_header: &str,
@@ -435,6 +474,7 @@ async fn connect_h1(
     ))
 }
 
+#[cfg(feature = "ws-client")]
 async fn connect_h2(
     addr: &str,
     protocol_header: &str,
@@ -511,6 +551,7 @@ async fn connect_h2(
     }
 }
 
+#[cfg(feature = "ws-client")]
 async fn h2_upgrade<T>(
     io: T,
     host: &str,
@@ -593,6 +634,7 @@ where
     ))
 }
 
+#[cfg(feature = "ws-client")]
 async fn make_tls_stream(
     tcp: TcpStream,
     host: &str,
@@ -617,6 +659,7 @@ async fn make_tls_stream(
         .context("TLS handshake failed")
 }
 
+#[cfg(feature = "ws-client")]
 fn make_dangerous_tls_config() -> rustls::ClientConfig {
     rustls::ClientConfig::builder()
         .dangerous()
@@ -625,8 +668,10 @@ fn make_dangerous_tls_config() -> rustls::ClientConfig {
 }
 
 #[derive(Debug)]
+#[cfg(feature = "ws-client")]
 struct AcceptAllVerifier;
 
+#[cfg(feature = "ws-client")]
 impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
     fn verify_server_cert(
         &self,

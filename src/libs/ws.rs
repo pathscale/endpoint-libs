@@ -16,9 +16,8 @@ pub mod toolbox;
 mod traits;
 pub mod transport;
 
-#[cfg(feature = "ws-client")]
 mod client;
-#[cfg(feature = "ws")]
+#[cfg(any(feature = "ws", feature = "ws-client"))]
 pub(crate) mod tungstenite;
 #[cfg(feature = "ws-wtx")]
 pub(crate) mod wtx;
@@ -37,9 +36,8 @@ pub use tls::*;
 pub use traits::*;
 pub use transport::*;
 
-#[cfg(feature = "ws-client")]
 pub use client::*;
-#[cfg(feature = "ws")]
+#[cfg(any(feature = "ws", feature = "ws-client"))]
 pub use tungstenite::*;
 #[cfg(feature = "ws-wtx")]
 pub use wtx::WtxUpgrader;
