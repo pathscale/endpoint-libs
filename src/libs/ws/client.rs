@@ -18,12 +18,13 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::Message as TMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tracing::*;
 
 use crate::libs::log::LogLevel;
+use crate::libs::ws::WireMessage as Message;
 use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGeneric};
 
 // ---------------------------------------------------------------------------
@@ -106,6 +107,9 @@ impl WsClient {
     // --- Private stream helpers -------------------------------------------
 
     async fn stream_send(&mut self, msg: Message) -> Result<()> {
+        // Backend edge: the client speaks WireMessage; tungstenite's type exists
+        // only inside these helpers.
+        let msg: TMessage = msg.into();
         match &mut self.stream {
             WsStream::H1(s) => s.send(msg).await?,
             WsStream::H2(s) => s.send(msg).await?,
@@ -116,10 +120,11 @@ impl WsClient {
     async fn stream_next(
         &mut self,
     ) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
-        match &mut self.stream {
+        let next = match &mut self.stream {
             WsStream::H1(s) => s.next().await,
             WsStream::H2(s) => s.next().await,
-        }
+        };
+        next.map(|res| res.map(Into::into))
     }
 
     async fn stream_close(&mut self) -> Result<()> {

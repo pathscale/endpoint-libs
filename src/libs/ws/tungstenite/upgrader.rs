@@ -350,11 +350,16 @@ struct HyperWsStream {
 #[async_trait(?Send)]
 impl WsStream for HyperWsStream {
     async fn send(&mut self, msg: Message) -> Result<(), StreamError> {
-        self.inner.send(msg).await.map_err(map_err)
+        // Backend edge: convert the canonical WireMessage into tungstenite's type
+        // here and nowhere else.
+        self.inner.send(msg.into()).await.map_err(map_err)
     }
 
     async fn recv(&mut self) -> Option<Result<Message, StreamError>> {
-        self.inner.next().await.map(|r| r.map_err(map_err))
+        self.inner
+            .next()
+            .await
+            .map(|r| r.map(Into::into).map_err(map_err))
     }
 }
 
