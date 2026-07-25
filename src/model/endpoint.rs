@@ -112,6 +112,35 @@ pub struct EndpointErrorSchema {
     pub fields: Vec<Field>,
 }
 
+impl EndpointErrorSchema {
+    /// Creates an error schema with no message and no fields.
+    ///
+    /// This type is `#[non_exhaustive]`, so out-of-crate callers must build it here
+    /// rather than with a struct literal.
+    pub fn new(name: impl Into<String>, code: EndpointErrorCodeRef) -> Self {
+        Self {
+            name: name.into(),
+            code,
+            message: String::new(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Sets the human-readable message.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
+    }
+
+    /// Sets the structured fields carried by this error.
+    #[must_use]
+    pub fn with_fields(mut self, fields: Vec<Field>) -> Self {
+        self.fields = fields;
+        self
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, PartialOrd, Eq, Ord)]
 pub struct EndpointErrorCodeRef {
     pub ty: Type,

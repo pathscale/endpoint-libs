@@ -1,6 +1,49 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.0.0-alpha.1] - 2026-07-25
+
+Makes the schema/handler/MCP machinery transport-agnostic. The wire protocols are
+unchanged — legacy `{method, seq, params}` frames and MCP JSON-RPC are byte-identical
+to 1.9, so deployed frontends need no changes.
+
+See `docs/2.0-migration.md` for the per-symbol migration table.
+
+### Breaking
+
+- `WsMessage` is no longer a re-export of `tungstenite::Message`; the canonical type is
+  `WireMessage`. The `WsMessage` alias covers type positions but NOT tungstenite's
+  inherent methods (`.into_text()`, `.into_data()`).
+- `WsConnection.address: SocketAddr` replaced by `WsConnection.peer: PeerIdentity`. A
+  `#[deprecated]` `address()` accessor returns a loopback placeholder for local peers.
+- `WsStream` trait renamed to `MessageStream` (alias retained).
+- `Type`, `Field`, `EnumVariant`, `EndpointSchema` and `EndpointErrorSchema` are now
+  `#[non_exhaustive]`: out-of-crate matches need a wildcard arm, and construction goes
+  through `::new()` + `with_*` rather than struct literals.
+
+### Features
+
+- Transport seam: `Transport` (blanket Sink+Stream alias), `TransportStream`,
+  `serve_connection`, `serve_with`, `SessionListener`, `WsClient::from_stream`.
+- `framed-transport` feature: `framed_json()` — length-delimited `WireMessage` framing
+  over any byte stream, with a documented wire format for non-Rust peers.
+- Hooks: `BeforeRequest`, `AfterRequest`, `OnConnect`, active on both the legacy and
+  MCP dispatch paths.
+- `PeerIdentity` / `LocalPeer` / `Attestation` carry verified peer code identity into
+  handlers and logs.
+- `Extensions`, a type-keyed map on connections and requests.
+- `Field.meta` / `EndpointSchema.meta`: reserved, empty, and the reason OpenAPI and
+  AsyncAPI emission can ship as a 2.1 minor rather than a 3.0.
+- `examples/uds_echo.rs`: the endpoint machinery over a Unix socket, no TCP/TLS/HTTP.
+
+### Notes
+
+- `cargo test --all-features` cannot pass (`ws` and `ws-wtx` are mutually exclusive by
+  `compile_error!`). Use `cargo all-features test`, which CI runs.
+- The deprecated `ws-wtx` backend is untouched and still does not build.
+- `WsClient::from_stream` currently requires the `ws-client` feature, which pulls
+  tungstenite. Narrowing that is additive and deferred.
+
 ## [1.9.1] - 2026-07-18
 
 ### Bug Fixes
