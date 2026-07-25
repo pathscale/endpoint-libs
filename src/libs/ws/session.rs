@@ -10,16 +10,17 @@ use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
 
 use super::mcp::{
-    self, JsonRpcError, JsonRpcId, JsonRpcRequest, McpAction, McpCallCtx, McpState, jsonrpc_error,
+    self, JsonRpcError, JsonRpcId, JsonRpcRequest, McpAction, McpCallCtx, McpState,
+    encode_tool_error, jsonrpc_error, jsonrpc_result,
 };
 use super::{
-    StreamError, WebsocketServer, WsConnection, WsRequestValue, WsResponseError, WsResponseValue,
-    WsStream,
+    MessageStream, RequestOutcome, StreamError, WebsocketServer, WsConnection, WsRequestValue,
+    WsResponseError, WsResponseValue,
 };
 
 pub struct WsClientSession {
     conn_info: Arc<WsConnection>,
-    conn: Box<dyn WsStream>,
+    conn: Box<dyn MessageStream>,
     rx: mpsc::Receiver<Message>,
     server: Arc<WebsocketServer>,
 }
@@ -27,7 +28,7 @@ pub struct WsClientSession {
 impl WsClientSession {
     pub fn new(
         conn_info: Arc<WsConnection>,
-        conn: Box<dyn WsStream>,
+        conn: Box<dyn MessageStream>,
         rx: mpsc::Receiver<Message>,
         server: Arc<WebsocketServer>,
     ) -> Self {
@@ -39,7 +40,7 @@ impl WsClientSession {
         }
     }
 
-    pub fn conn(&self) -> &dyn WsStream {
+    pub fn conn(&self) -> &dyn MessageStream {
         self.conn.as_ref()
     }
 
@@ -162,12 +163,45 @@ impl WsClientSession {
 
         let handler = endpoint.handler.clone();
         let toolbox = self.server.toolbox.clone();
+        let hooks = self.server.hooks.clone();
+        let schema = endpoint.schema.clone();
         tokio::task::spawn_local(async move {
+            let mut context = context;
+            // Hooks run inside the spawned task so a slow hook cannot stall the
+            // session loop, and after check_roles so they only see calls that were
+            // already allowed to reach this endpoint.
+            if let Err(custom) = hooks
+                .run_before(&mut context, &schema, &req.params)
+                .await
+            {
+                let code = custom.code.to_u32();
+                toolbox.send(
+                    context.connection_id,
+                    WsResponseValue::Error(WsResponseError {
+                        method: context.method,
+                        code,
+                        seq: context.seq,
+                        log_id: context.log_id.to_string(),
+                        params: custom.params.clone(),
+                    }),
+                );
+                hooks
+                    .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                    .await;
+                return;
+            }
+
             TOOLBOX
                 .scope(
                     toolbox.clone(),
-                    handler.handle(&toolbox, context, req.params),
+                    handler.handle(&toolbox, context.clone(), req.params),
                 )
+                .await;
+
+            // The erased handler reports its own outcome through the toolbox, so
+            // AfterRequest observes completion rather than the specific result here.
+            hooks
+                .run_after(&context, &schema, &RequestOutcome::Ok)
                 .await;
         });
 
@@ -232,12 +266,39 @@ impl WsClientSession {
 
                 let handler = endpoint.handler.clone();
                 let toolbox = self.server.toolbox.clone();
+                let hooks = self.server.hooks.clone();
+                let schema = endpoint.schema.clone();
                 tokio::task::spawn_local(async move {
+                    let mut context = context;
+                    // Same placement as the legacy path, but the rejection has to go
+                    // back in the MCP envelope — a tool error, not a WsResponseError.
+                    if let Err(custom) = hooks.run_before(&mut context, &schema, &arguments).await {
+                        let code = custom.code.to_u32();
+                        toolbox.send_raw(
+                            conn_id,
+                            jsonrpc_result(&id, encode_tool_error(custom.code, &custom.params))
+                                .to_string(),
+                        );
+                        hooks
+                            .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                            .await;
+                        return;
+                    }
+
                     TOOLBOX
                         .scope(
                             toolbox.clone(),
-                            handler.handle_mcp(&toolbox, context, McpCallCtx { id }, arguments),
+                            handler.handle_mcp(
+                                &toolbox,
+                                context.clone(),
+                                McpCallCtx { id },
+                                arguments,
+                            ),
                         )
+                        .await;
+
+                    hooks
+                        .run_after(&context, &schema, &RequestOutcome::Ok)
                         .await;
                 });
             }
