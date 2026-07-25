@@ -1,125 +1,53 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.1.0] - 2026-07-25
 
-## [Unreleased]
+### Bug Fixes
 
-### Removed
+- Restore cargo fmt and all-features clippy to green
 
-- **The `ws-wtx` and `ws-wtx-http2` features, and the entire wtx WebSocket
-  backend** (`src/libs/ws/wtx/`). Also drops four now-orphaned optional
-  dependencies: `wtx`, `httparse`, `sha1` and `base64`.
+### Documentation
 
-  **This cannot break a working build.** Enabling `ws-wtx` on 2.0.x was already
-  a hard compile error — an unconditional `compile_error!` deprecating the
-  backend, and separately `E0046`/`E0407` because `wtx/upgrader.rs` still
-  implemented the pre-2.0 `WsUpgrader::upgrade` rather than `upgrade_stream`
-  after the transport-seam rename. Verified before removal: `cargo check
-  --no-default-features --features ws-wtx` fails on 2.0.1. No configuration
-  existed in which this code compiled, so no consumer can have depended on it.
-  A build that named the feature was already broken; it now gets "feature does
-  not exist" instead of a `compile_error!`.
-
-  Removed in a minor rather than held for 3.0 for that reason — the usual
-  semver caution around dropping a feature protects working consumers, and
-  there were none. Use `ws` (hyper + tungstenite), which has provided HTTP/2
-  multiplexing since the deprecation.
-
-### Fixed
-
-- **`cargo clippy --all-features` and `cargo test --all-features` work again.**
-  They were permanently red — `--all-features` necessarily enabled the mutually
-  exclusive `ws-wtx` backend. With it gone, `--all-features` compiles clean
-  (no errors, no warnings). `cargo all-features` remains what CI runs and stays
-  the authority on the feature matrix; the `ws-wtx`/`ws-wtx-http2` entries have
-  been dropped from its `denylist`.
-- A shadowed `protocol_versions` binding in `src/libs/ws/tls.rs` (the `ws-wtx`
-  arm silently overrode the `ws-tls12` arm) and a dead `ws_echo_server_wtx`
-  target in `examples/test_ws_echo_tls.sh` that referenced an example file
-  which does not exist.
-
-## [2.0.1] - 2026-07-26
-
-### Changed
-
-- `WsClient` and `WsClient::from_stream` are now available from **`ws-core`**
-  alone. Previously the whole client module sat behind `ws-client`, which pulls
-  tokio-tungstenite, rustls and hyper — so a sidecar speaking only a local
-  transport (XPC, Unix socket, named pipe) compiled a TLS/WebSocket stack it
-  never used.
-
-  `WsClient::new` (the TCP/TLS constructor), `WsClientBuilder`, and the connect
-  helpers remain behind `ws-client`. The transport-agnostic half — `from_stream`
-  plus the request/reply, sequence-correlation and MCP framing logic — no longer
-  requires it.
-
-  Purely additive: existing `ws-client` users see no change.
-
-- The tungstenite `WireMessage` conversions now build under `ws-client` as well
-  as `ws`. They were gated on the server-side feature, so a client-only build
-  could not convert its own messages.
-
-## [2.0.0] - 2026-07-26
-
-Promotes 2.0.0-alpha.1 to a stable release. **The library code is byte-identical
-to the alpha** — the only changes since that tag are agent-facing documentation.
-
-The alpha ran in production across six services (api.support.cafe,
-auth.honey.id, api.honey.id, nofilter.io, pays.online, web3.trading) before this
-release was cut. All six ported with **zero source changes**, which is the
-evidence behind the migration guide's claim that the break is small.
-
-### Upgrading from 2.0.0-alpha.1
-
-Change the dependency to `endpoint-libs = "2.0"`. Nothing else. The exact
-pre-release pin (`= "2.0.0-alpha.1"`) is no longer needed, since a plain `"2.0"`
-requirement matches a stable release.
-
-Breaking changes vs 1.9 are unchanged from the alpha — see the 2.0.0-alpha.1
-entry below and `docs/2.0-migration.md`.
-
-## [2.0.0-alpha.1] - 2026-07-25
-
-Makes the schema/handler/MCP machinery transport-agnostic. The wire protocols are
-unchanged — legacy `{method, seq, params}` frames and MCP JSON-RPC are byte-identical
-to 1.9, so deployed frontends need no changes.
-
-See `docs/2.0-migration.md` for the per-symbol migration table.
-
-### Breaking
-
-- `WsMessage` is no longer a re-export of `tungstenite::Message`; the canonical type is
-  `WireMessage`. The `WsMessage` alias covers type positions but NOT tungstenite's
-  inherent methods (`.into_text()`, `.into_data()`).
-- `WsConnection.address: SocketAddr` replaced by `WsConnection.peer: PeerIdentity`. A
-  `#[deprecated]` `address()` accessor returns a loopback placeholder for local peers.
-- `WsStream` trait renamed to `MessageStream` (alias retained).
-- `Type`, `Field`, `EnumVariant`, `EndpointSchema` and `EndpointErrorSchema` are now
-  `#[non_exhaustive]`: out-of-crate matches need a wildcard arm, and construction goes
-  through `::new()` + `with_*` rather than struct literals.
+- Add the release-order runbook
+- Reconcile PLAN-2.1 after concurrent edits
+- Correct PLAN-2.1 3.5 — the fixture is not an oracle
 
 ### Features
 
-- Transport seam: `Transport` (blanket Sink+Stream alias), `TransportStream`,
-  `serve_connection`, `serve_with`, `SessionListener`, `WsClient::from_stream`.
-- `framed-transport` feature: `framed_json()` — length-delimited `WireMessage` framing
-  over any byte stream, with a documented wire format for non-Rust peers.
-- Hooks: `BeforeRequest`, `AfterRequest`, `OnConnect`, active on both the legacy and
-  MCP dispatch paths.
-- `PeerIdentity` / `LocalPeer` / `Attestation` carry verified peer code identity into
-  handlers and logs.
-- `Extensions`, a type-keyed map on connections and requests.
-- `Field.meta` / `EndpointSchema.meta`: reserved, empty, and the reason OpenAPI and
-  AsyncAPI emission can ship as a 2.1 minor rather than a 3.0.
-- `examples/uds_echo.rs`: the endpoint machinery over a Unix socket, no TCP/TLS/HTTP.
+- Add shared API-document plumbing
+- Apply field-level meta in document schemas, bump to 2.1.0
 
-### Notes
+### Refactor
 
-- `cargo test --all-features` cannot pass (`ws` and `ws-wtx` are mutually exclusive by
-  `compile_error!`). Use `cargo all-features test`, which CI runs.
-- The deprecated `ws-wtx` backend is untouched and still does not build.
-- `WsClient::from_stream` currently requires the `ws-client` feature, which pulls
-  tungstenite. Narrowing that is additive and deferred.
+- [**breaking**] Remove the non-compiling ws-wtx backend
+
+## [2.0.1] - 2026-07-25
+
+### Features
+
+- Make WsClient::from_stream available from ws-core
+
+## [2.0.0] - 2026-07-25
+
+### Documentation
+
+- Adopt the AGENTS.md agent standard + guardrails
+- Scope the force-push rule to the default branch
+
+## [2.0.0-alpha.1] - 2026-07-25
+
+### Documentation
+
+- Add MCP migration guide for 1.7.x consumers
+
+### Features
+
+- [**breaking**] Invert WsMessage into a backend-independent WireMessage
+- [**breaking**] Replace SocketAddr peers with PeerIdentity + Extensions
+- [**breaking**] Future-proof the schema model so OpenAPI can land in 2.1
+- Add the transport seam — serve over anything, not just WebSockets
+- Add request hooks on both dispatch paths, plus OnConnect
 
 ## [1.9.1] - 2026-07-18
 
