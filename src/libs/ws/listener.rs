@@ -1,3 +1,4 @@
+use crate::libs::peer::PeerIdentity;
 use std::net::SocketAddr;
 
 use eyre::Result;
@@ -38,4 +39,23 @@ impl ConnectionListener for TcpListener {
     fn handshake(&self, channel: Self::Channel1) -> BoxFuture<'_, Result<Self::Channel2>> {
         async move { Ok(channel) }.boxed()
     }
+}
+
+/// Accepts already-framed connections for [`WebsocketServer::serve_with`].
+///
+/// This is the seam a platform-transport crate implements: a Unix socket listener, a
+/// Windows named-pipe server, or an XPC mach-service listener each yield a
+/// [`MessageStream`] plus the [`PeerIdentity`] they were able to establish — including
+/// any code-signature attestation, which is the whole point of the local transports.
+///
+/// Distinct from [`ConnectionListener`], which yields *raw byte streams* for the
+/// TCP/TLS path and knows nothing about messages or peers.
+#[async_trait::async_trait]
+pub trait SessionListener: Send + Sync + 'static {
+    /// Wait for the next peer.
+    ///
+    /// Returning `Err` stops `serve_with`, so implementations should handle
+    /// per-connection failures internally and only surface errors that make the
+    /// listener itself unusable.
+    async fn accept(&self) -> eyre::Result<(Box<dyn crate::libs::ws::MessageStream>, PeerIdentity)>;
 }

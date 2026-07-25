@@ -33,6 +33,12 @@ ws-core = [
     "dep:httpdate",
     "dep:crossfire",
 ]
+framed-transport = [
+    # Length-delimited WireMessage framing over any byte stream (Unix sockets,
+    # named pipes, inherited socketpairs). No WebSocket, no TLS, no HTTP.
+    "ws-core",
+    "dep:tokio-util",
+]
 ws-client = [
     # WS client (WsClient, WsClientBuilder) - standalone
     "ws-core",
@@ -198,6 +204,11 @@ tracing-throttle = { version = "0.4", features = ["async", "test-helpers"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rcgen = "0.14"
 cert-provider = {git = "https://github.com/dVeon-loch/cert-provider.git", features = ["dns01"]}
+
+[[example]]
+name = "uds_echo"
+path = "examples/uds_echo.rs"
+required-features = ["full", "framed-transport", "ws-client"]
 
 [[example]]
 name = "mcp_echo"
