@@ -205,6 +205,76 @@ A `tracing` layer that captures recent error-level log events into an in-memory 
 
 Rate-limiting layer for `tracing` events to suppress repeated log spam.
 
+## Transports (2.0)
+
+The server core is transport-agnostic. The WebSocket path (`listen()`) is unchanged;
+these entry points let the same handlers, roles, typed errors and MCP surface run over
+a Unix socket, a Windows named pipe, or macOS XPC.
+
+```rust
+// Server: one already-established connection, any transport.
+server.serve_connection(peer, states, stream, /* auth token */ None).await;
+
+// Server: accept loop over any listener.
+server.serve_with(my_listener).await?;   // my_listener: SessionListener
+
+// Client: the mirror image.
+let client = WsClient::from_stream(stream);
+```
+
+Both sides need a `MessageStream`. For byte-stream transports, the `framed-transport`
+feature supplies one:
+
+```rust
+use endpoint_libs::libs::ws::transport::{TransportStream, framed_json};
+
+let stream: Box<dyn MessageStream> =
+    Box::new(TransportStream::new(framed_json(unix_stream)));
+```
+
+`examples/uds_echo.rs` is a complete worked example over a Unix domain socket:
+
+```bash
+cargo run --example uds_echo --features full,framed-transport,ws-client
+```
+
+### `framed_json` wire format
+
+One length-delimited frame per message — implementable by a non-Rust peer in a few
+lines:
+
+```text
++---------------+--------+--------------------------+
+| u32 BE length | u8 kind| payload (length-1 bytes) |
++---------------+--------+--------------------------+
+```
+
+`length` counts the kind byte plus payload. `kind` is `0=Text, 1=Binary, 2=Ping,
+3=Pong, 4=Close`. `Text` is UTF-8; `Close` is empty or `u16 BE code` + UTF-8 reason.
+Default max frame is 16 MiB (`framed_json_with_max_frame` to change it).
+
+### Peer identity and attestation
+
+`WsConnection.peer` / `RequestContext.peer` carry a `PeerIdentity`:
+`Network(SocketAddr)` for TCP/TLS, or `Local(LocalPeer { pid, uid, attestation })`.
+`Attestation::Verified { mechanism, subject }` records *code* identity a transport
+verified — an XPC code-signing requirement, an executable digest, a SID. This crate
+defines the vocabulary; the platform implementations live in a sibling crate.
+
+### Hooks
+
+`BeforeRequest` (may reject and may attach claims to `ctx.extensions`), `AfterRequest`
+(observes outcomes), and `OnConnect` (refuses a peer once, rather than per request).
+All three run on both the legacy and MCP dispatch paths.
+
+```rust
+server.add_before_hook(MyMissionTokenCheck);
+server.add_on_connect_hook(RefuseUnattestedPeers);
+```
+
+> **Note:** `MessageStream`'s futures are not `Send`, so `serve_connection`,
+> `serve_with` and a `from_stream` client must run inside a `tokio::task::LocalSet`.
+
 ## Logging Setup
 
 The `setup_logging` function (available without any optional features) provides a batteries-included `tracing` subscriber with:
