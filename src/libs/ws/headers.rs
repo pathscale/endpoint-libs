@@ -227,7 +227,9 @@ impl AuthController for EndpointAuthController {
                 method: endpoint.schema.code,
                 log_id: conn.log_id,
                 roles: roles.clone(),
-                ip_addr: conn.address.ip(),
+                ip_addr: conn.peer.ip_addr(),
+                peer: conn.peer.clone(),
+                extensions: conn.extensions.clone(),
             };
             endpoint
                 .handler

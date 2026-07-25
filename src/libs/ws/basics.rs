@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::libs::error_code::ErrorCode;
+use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::handler::RequestHandlerErased;
 use crate::libs::log::{CustomEyreHandler, LogLevel};
 use crate::libs::toolbox::{CustomError, RequestContext};
@@ -48,12 +49,26 @@ pub struct WsConnection {
     pub connection_id: ConnectionId,
     pub user_id: AtomicU64,
     pub roles: Arc<RwLock<Arc<Vec<u32>>>>,
-    pub address: SocketAddr,
+    /// Who is on the other end. Replaces the pre-2.0 `address: SocketAddr`, which
+    /// could not describe a local (Unix socket / named pipe / XPC) peer.
+    pub peer: PeerIdentity,
+    /// Connection-scoped data. Local transports attach attestation details here;
+    /// `OnConnect` hooks may attach anything else.
+    pub extensions: Extensions,
     pub log_id: u64,
 }
 impl WsConnection {
     pub fn get_user_id(&self) -> u64 {
         self.user_id.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The peer's socket address.
+    ///
+    /// Returns a loopback placeholder (`127.0.0.1:0`) for local and unknown peers,
+    /// which have no socket address at all.
+    #[deprecated(note = "use `.peer` — a SocketAddr cannot describe a local peer")]
+    pub fn address(&self) -> SocketAddr {
+        self.peer.socket_addr()
     }
 
     pub fn get_roles(&self) -> Arc<Vec<u32>> {

@@ -44,7 +44,7 @@ impl WsClientSession {
     }
 
     pub async fn run(mut self) {
-        let addr = self.conn_info.address;
+        let addr = self.conn_info.peer.display();
         let conn_id = self.conn_info.connection_id;
         if let Err(err) = self.run_loop().await {
             error!(
@@ -58,7 +58,7 @@ impl WsClientSession {
     }
 
     fn handle_message(&mut self, msg: Message) -> Result<bool> {
-        let addr = &self.conn_info.address;
+        let addr = self.conn_info.peer.display();
         let mut context = RequestContext::from_conn(&self.conn_info);
 
         // MCP: route JSON-RPC 2.0 frames to the MCP adapter when enabled.
