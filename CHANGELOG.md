@@ -1,6 +1,25 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.0.0] - 2026-07-26
+
+Promotes 2.0.0-alpha.1 to a stable release. **The library code is byte-identical
+to the alpha** — the only changes since that tag are agent-facing documentation.
+
+The alpha ran in production across six services (api.support.cafe,
+auth.honey.id, api.honey.id, nofilter.io, pays.online, web3.trading) before this
+release was cut. All six ported with **zero source changes**, which is the
+evidence behind the migration guide's claim that the break is small.
+
+### Upgrading from 2.0.0-alpha.1
+
+Change the dependency to `endpoint-libs = "2.0"`. Nothing else. The exact
+pre-release pin (`= "2.0.0-alpha.1"`) is no longer needed, since a plain `"2.0"`
+requirement matches a stable release.
+
+Breaking changes vs 1.9 are unchanged from the alpha — see the 2.0.0-alpha.1
+entry below and `docs/2.0-migration.md`.
+
 ## [2.0.0-alpha.1] - 2026-07-25
 
 Makes the schema/handler/MCP machinery transport-agnostic. The wire protocols are
