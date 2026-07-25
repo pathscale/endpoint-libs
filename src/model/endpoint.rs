@@ -1,4 +1,4 @@
-use crate::model::{Field, Type};
+use crate::model::{Field, MetaMap, Type};
 use convert_case::{Case, Casing};
 use eyre::{ContextCompat, Result};
 use serde::de::{Error, Unexpected};
@@ -8,6 +8,7 @@ use std::fmt::Write;
 
 /// `EndpointSchema` is a struct that represents a single endpoint in the API.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[non_exhaustive]
 pub struct EndpointSchema {
     /// The name of the endpoint (e.g. `UserListSymbols`)
     pub name: String,
@@ -39,6 +40,11 @@ pub struct EndpointSchema {
     /// Public error variants that handlers may return for this endpoint.
     #[serde(default)]
     pub errors: Vec<EndpointErrorSchema>,
+
+    /// Emitter annotations — see [`MetaMap`](crate::model::MetaMap). Empty in 2.0;
+    /// consumed by the OpenAPI/AsyncAPI emitters in 2.1.
+    #[serde(default, skip_serializing_if = "MetaMap::is_empty")]
+    pub meta: MetaMap,
 }
 
 impl EndpointSchema {
@@ -59,7 +65,15 @@ impl EndpointSchema {
             json_schema: Default::default(),
             roles: Vec::new(),
             errors: Vec::new(),
+            meta: MetaMap::default(),
         }
+    }
+
+    /// Attach emitter annotations. See [`MetaMap`](crate::model::MetaMap).
+    #[must_use]
+    pub fn with_meta(mut self, meta: MetaMap) -> Self {
+        self.meta = meta;
+        self
     }
 
     /// Adds a stream response type field to the endpoint.
@@ -88,6 +102,7 @@ impl EndpointSchema {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[non_exhaustive]
 pub struct EndpointErrorSchema {
     pub name: String,
     pub code: EndpointErrorCodeRef,
@@ -211,4 +226,90 @@ pub fn encode_header<T: Serialize>(v: T, schema: EndpointSchema) -> Result<Strin
         )?;
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod forward_compat_tests {
+    use super::*;
+    use crate::model::MetaMap;
+
+    /// The contract 2.1 depends on: generated code deserializes committed schema JSON
+    /// (`serde_json::from_str`, see endpointgen's rust.rs emitter), so a *newer*
+    /// endpointgen emitting fields this version does not know about must not break an
+    /// older endpoint-libs. If this test ever fails, adding anything to the schema
+    /// model has become a breaking change and OpenAPI support becomes a 3.0.
+    #[test]
+    fn unknown_future_fields_are_ignored() {
+        let json = r#"{
+            "name": "UserListSymbols",
+            "code": 10020,
+            "parameters": [],
+            "returns": [],
+            "roles": ["Admin"],
+            "x_future_openapi_binding": {"path": "/rpc/UserListSymbols"},
+            "some_field_from_2_5": 42
+        }"#;
+        let schema: EndpointSchema = serde_json::from_str(json).expect("unknown fields must not break deserialization");
+        assert_eq!(schema.name, "UserListSymbols");
+        assert_eq!(schema.code, 10020);
+        assert!(schema.meta.is_empty());
+    }
+
+    /// Old committed schema JSON (no `meta` key at all) must still load.
+    #[test]
+    fn absent_meta_defaults_empty() {
+        let json = r#"{"name":"A","code":1,"parameters":[],"returns":[],"roles":[]}"#;
+        let schema: EndpointSchema = serde_json::from_str(json).unwrap();
+        assert!(schema.meta.is_empty());
+    }
+
+    /// `meta` must survive a serialize → deserialize cycle byte-for-byte, including
+    /// keys this version assigns no meaning to. The 2.1 emitters read these.
+    #[test]
+    fn meta_round_trips_including_unknown_keys() {
+        let mut meta = MetaMap::default();
+        meta.insert("example", serde_json::json!({"symbol": "BTC"}));
+        meta.insert("x-openapi-tags", serde_json::json!(["trading"]));
+        meta.insert("deprecated", serde_json::json!(true));
+
+        let schema = EndpointSchema::new("A", 1, vec![], vec![]).with_meta(meta.clone());
+        let text = serde_json::to_string(&schema).unwrap();
+        let back: EndpointSchema = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(back.meta, meta);
+        assert_eq!(
+            back.meta.get("x-openapi-tags"),
+            Some(&serde_json::json!(["trading"]))
+        );
+    }
+
+    /// Empty `meta` must not appear in the output at all, so 2.0 artifacts stay
+    /// byte-identical to 1.9 ones and `endpointgen --check` sees no spurious drift.
+    #[test]
+    fn empty_meta_is_not_serialized() {
+        let schema = EndpointSchema::new("A", 1, vec![], vec![]);
+        let text = serde_json::to_string(&schema).unwrap();
+        assert!(!text.contains("meta"), "empty meta leaked into output: {text}");
+
+        let field = Field::new("x", Type::String);
+        let text = serde_json::to_string(&field).unwrap();
+        assert!(!text.contains("meta"), "empty field meta leaked: {text}");
+    }
+
+    /// Field-level meta is what carries per-parameter OpenAPI enrichment.
+    #[test]
+    fn field_meta_round_trips_and_preserves_derives() {
+        let mut meta = MetaMap::default();
+        meta.insert("minimum", serde_json::json!(0));
+        let field = Field::new("amount", Type::Int64).with_meta(meta);
+
+        let back: Field = serde_json::from_str(&serde_json::to_string(&field).unwrap()).unwrap();
+        assert_eq!(back.meta.get("minimum"), Some(&serde_json::json!(0)));
+
+        // Field derives Hash/Ord/Eq; MetaMap's manual impls must keep that working.
+        let mut set = std::collections::BTreeSet::new();
+        set.insert(field.clone());
+        assert!(set.contains(&field));
+        assert_ne!(field, Field::new("amount", Type::Int64));
+    }
 }
