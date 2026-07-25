@@ -1,8 +1,10 @@
+pub mod api_document;
 pub mod endpoint;
 pub mod json_schema;
 pub mod pg_func;
 pub mod service;
 pub mod types;
+pub use api_document::*;
 pub use endpoint::*;
 pub use json_schema::*;
 pub use pg_func::*;

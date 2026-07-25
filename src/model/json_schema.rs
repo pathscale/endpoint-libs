@@ -95,7 +95,7 @@ fn ref_to(def_name: &str) -> Value {
 /// Builds an object schema over `fields`, in camelCase (matching the
 /// `#[serde(rename_all = "camelCase")]` on generated structs). Fields whose
 /// type is `Optional` are excluded from `required`.
-fn fields_to_object_schema(
+pub(crate) fn fields_to_object_schema(
     fields: &[Field],
     registry: &TypeRegistry,
     defs: &mut BTreeMap<String, Value>,
