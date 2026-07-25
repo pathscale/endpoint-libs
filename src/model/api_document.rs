@@ -102,7 +102,11 @@ impl SchemaComponents {
         endpoint: &EndpointSchema,
         registry: &TypeRegistry,
     ) -> Result<Value> {
-        self.object_schema(&endpoint.parameters, registry)
+        self.object_schema(
+            &endpoint.parameters,
+            registry,
+            &format!("endpoint {} parameters", endpoint.name),
+        )
     }
 
     /// Object schema over an endpoint's `returns`. See [`Self::request_schema`].
@@ -111,7 +115,11 @@ impl SchemaComponents {
         endpoint: &EndpointSchema,
         registry: &TypeRegistry,
     ) -> Result<Value> {
-        self.object_schema(&endpoint.returns, registry)
+        self.object_schema(
+            &endpoint.returns,
+            registry,
+            &format!("endpoint {} returns", endpoint.name),
+        )
     }
 
     /// Builds an object schema whose `$ref`s point into the shared components.
@@ -123,12 +131,56 @@ impl SchemaComponents {
         &self,
         fields: &[crate::model::types::Field],
         registry: &TypeRegistry,
+        context: &str,
     ) -> Result<Value> {
         let mut throwaway = BTreeMap::new();
         let mut schema = fields_to_object_schema(fields, registry, &mut throwaway)?;
         relocate_refs(&mut schema, COMPONENTS_SCHEMAS_PREFIX);
+        apply_field_meta(&mut schema, fields, context)?;
         Ok(schema)
     }
+}
+
+/// Applies each field's `meta` to its property in an object schema.
+///
+/// Deliberately done here rather than inside `fields_to_object_schema`: that
+/// helper also builds MCP tool schemas, and those must stay byte-identical.
+/// Field annotations are a document concern.
+///
+/// A field whose schema is a bare `$ref` is a hard error rather than a silent
+/// no-op: sibling keys next to a `$ref` are ignored by most JSON Schema 2020-12
+/// tooling, so emitting them would produce a document that looks annotated and
+/// is not. Annotate the referenced definition instead.
+fn apply_field_meta(
+    schema: &mut Value,
+    fields: &[crate::model::types::Field],
+    context: &str,
+) -> Result<()> {
+    use convert_case::{Case, Casing};
+
+    for field in fields {
+        if field.meta.is_empty() {
+            continue;
+        }
+        let key = field.name.to_case(Case::Camel);
+        let Some(property) = schema.get_mut("properties").and_then(|p| p.get_mut(&key)) else {
+            continue;
+        };
+        if property.get("$ref").is_some() {
+            bail!(
+                "{context}: field `{}` carries meta but its schema is a bare $ref; \
+                 annotate the referenced definition instead — sibling keys next to \
+                 $ref are ignored by JSON Schema 2020-12 tooling",
+                field.name
+            );
+        }
+        apply_meta(
+            property,
+            &field.meta,
+            &format!("{context}: field `{}`", field.name),
+        )?;
+    }
+    Ok(())
 }
 
 /// Rewrites `#/$defs/X` to `{prefix}X` throughout `value`, in place.
@@ -535,6 +587,43 @@ mod tests {
         assert!(err.contains("exmaple"), "{err}");
         // The message should tell the author how to fix it.
         assert!(err.contains("x-"), "{err}");
+    }
+
+    #[test]
+    fn field_meta_lands_on_the_property() {
+        let registry = TypeRegistry::new();
+        let mut field = Field::new("cursor", Type::String);
+        field.meta.insert("example", json!("abc123"));
+        field.meta.insert("x-opaque", json!(true));
+
+        let endpoint = EndpointSchema::new("Search", 1, vec![field], vec![]);
+        let components =
+            SchemaComponents::collect(std::slice::from_ref(&endpoint), &registry).unwrap();
+
+        let request = components.request_schema(&endpoint, &registry).unwrap();
+        assert_eq!(request["properties"]["cursor"]["example"], "abc123");
+        assert_eq!(request["properties"]["cursor"]["x-opaque"], true);
+    }
+
+    #[test]
+    fn field_meta_on_a_bare_ref_is_rejected() {
+        // Sibling keys next to $ref are ignored by tooling; failing loudly beats
+        // emitting a document that looks annotated but isn't.
+        let registry = registry_with(&[user_struct()]);
+        let mut field = Field::new("user", Type::StructRef("User".into()));
+        field.meta.insert("example", json!({ "id": 1 }));
+
+        let endpoint = EndpointSchema::new("GetUser", 1, vec![], vec![field]);
+        let components =
+            SchemaComponents::collect(std::slice::from_ref(&endpoint), &registry).unwrap();
+
+        let err = components
+            .response_schema(&endpoint, &registry)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("GetUser"), "{err}");
+        assert!(err.contains("user"), "{err}");
+        assert!(err.contains("$ref"), "{err}");
     }
 
     #[test]
