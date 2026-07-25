@@ -29,8 +29,9 @@ use crate::libs::ws::mcp::{McpServerInfo, McpState};
 #[cfg(feature = "ws")]
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
-    BoxedStream, ConnectionListener, MessageStream, SessionListener, TcpListener,
-    WsClientSession, WsConnection, WsRequest, WsUpgrader,
+    AfterRequest, BeforeRequest, BoxedStream, ConnectionListener, Hooks, MessageStream,
+    OnConnect, SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
+    WsUpgrader,
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
@@ -47,6 +48,9 @@ pub struct WebsocketServer {
     /// MCP surface state; `None` (the default) disables MCP entirely and the
     /// server behaves exactly as before. See [`WebsocketServer::enable_mcp`].
     pub mcp: Option<Arc<McpState>>,
+    /// Interception hooks. Empty by default — an empty `Hooks` adds one branch per
+    /// request and nothing else.
+    pub hooks: Hooks,
 }
 
 impl WebsocketServer {
@@ -66,6 +70,7 @@ impl WebsocketServer {
             config,
             upgrader: default_upgrader(),
             mcp: None,
+            hooks: Hooks::default(),
         }
     }
 
@@ -84,6 +89,23 @@ impl WebsocketServer {
         self.mcp = Some(Arc::new(state));
         Ok(())
     }
+    /// Register a hook that runs before every request, on both the legacy and MCP
+    /// paths. Hooks run in registration order; the first error rejects the request.
+    pub fn add_before_hook(&mut self, hook: impl BeforeRequest + 'static) {
+        self.hooks.before.push(Arc::new(hook));
+    }
+
+    /// Register a hook that observes every completed request.
+    pub fn add_after_hook(&mut self, hook: impl AfterRequest + 'static) {
+        self.hooks.after.push(Arc::new(hook));
+    }
+
+    /// Register a hook that runs once per connection, after auth. Returning `Err`
+    /// refuses the connection.
+    pub fn add_on_connect_hook(&mut self, hook: impl OnConnect + 'static) {
+        self.hooks.on_connect.push(Arc::new(hook));
+    }
+
     pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
         self.auth_controller = Arc::new(controller);
     }
@@ -205,12 +227,25 @@ impl WebsocketServer {
         stream: Box<dyn MessageStream>,
         auth_protocol: Option<String>,
     ) {
+        // OnConnect runs before the connection is registered, so a refused peer
+        // never gets a slot in `states` and cannot be sent to.
+        let mut extensions = Extensions::new();
+        if let Err(err) = self.hooks.run_on_connect(&peer, &mut extensions).await {
+            warn!(
+                ws_server = true,
+                peer = %peer,
+                error_code = ?err.code,
+                "connection refused by OnConnect hook"
+            );
+            return;
+        }
+
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
             roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             peer,
-            extensions: Extensions::new(),
+            extensions,
             log_id: get_log_id(),
         });
         debug!(

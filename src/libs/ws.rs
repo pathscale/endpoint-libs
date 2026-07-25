@@ -1,6 +1,7 @@
 mod basics;
 mod conn;
 pub mod handler;
+pub mod hooks;
 mod headers;
 mod listener;
 pub mod mcp;
@@ -25,6 +26,7 @@ pub(crate) mod wtx;
 pub use basics::*;
 pub use conn::*;
 pub use headers::*;
+pub use hooks::*;
 pub use listener::*;
 pub use message::*;
 pub use server::*;
