@@ -1,7 +1,65 @@
 use serde::*;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+
+/// Emitter-facing annotations attached to a [`Field`] or
+/// [`EndpointSchema`](crate::model::EndpointSchema).
+///
+/// Unused by endpoint-libs itself. It exists so that later releases can carry
+/// examples, JSON Schema constraints, tags, deprecation markers and
+/// protocol-binding hints into the OpenAPI/AsyncAPI emitters **without a breaking
+/// change to the schema model**. Unknown keys must round-trip untouched.
+///
+/// This is a newtype rather than a bare `BTreeMap` because `Field` derives `Hash`,
+/// `Ord` and `Eq`, which `serde_json::Value` does not implement. The manual impls
+/// below compare and hash values by their canonical JSON text.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct MetaMap(pub BTreeMap<String, serde_json::Value>);
+
+impl MetaMap {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.0.get(key)
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: serde_json::Value) {
+        self.0.insert(key.into(), value);
+    }
+}
+
+/// Deterministic because `BTreeMap` iterates in key order and `Value`'s `Display`
+/// is a canonical JSON rendering.
+impl Hash for MetaMap {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for (key, value) in &self.0 {
+            key.hash(state);
+            value.to_string().hash(state);
+        }
+    }
+}
+
+impl Ord for MetaMap {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .cmp(other.0.iter().map(|(k, v)| (k, v.to_string())))
+    }
+}
+
+impl PartialOrd for MetaMap {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// `Field` is a struct that represents the parameters and returns in an endpoint schema.
 #[derive(Clone, Debug, Hash, Serialize, Deserialize, Ord, PartialOrd, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Field {
     /// The name of the field (e.g. `user_id`)
     pub name: String,
@@ -12,6 +70,10 @@ pub struct Field {
 
     /// The type of the field (e.g. `Type::BigInt`)
     pub ty: Type,
+
+    /// Emitter annotations — see [`MetaMap`]. Empty in 2.0.
+    #[serde(default, skip_serializing_if = "MetaMap::is_empty")]
+    pub meta: MetaMap,
 }
 
 impl Field {
@@ -22,6 +84,7 @@ impl Field {
             name: name.into(),
             description: "".into(),
             ty,
+            meta: MetaMap::default(),
         }
     }
 
@@ -35,12 +98,21 @@ impl Field {
             name: name.into(),
             description: description.into(),
             ty,
+            meta: MetaMap::default(),
         }
+    }
+
+    /// Attach emitter annotations. See [`MetaMap`].
+    #[must_use]
+    pub fn with_meta(mut self, meta: MetaMap) -> Self {
+        self.meta = meta;
+        self
     }
 }
 
 /// `EnumVariant` is a struct that represents the variants of an enum.
 #[derive(Clone, Debug, Hash, Serialize, Deserialize, Ord, PartialOrd, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct EnumVariant {
     /// The name of the variant (e.g. `UniSwap`)
     pub name: String,
@@ -79,6 +151,7 @@ impl EnumVariant {
 
 /// `Type` is an enum that represents the types of the fields in an endpoint schema.
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, PartialOrd, Eq, Ord)]
+#[non_exhaustive]
 pub enum Type {
     UInt32,
     Int32,
