@@ -56,6 +56,9 @@ pub struct WsConnectResponse {
 enum WsStream {
     H1(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
     H2(Box<WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>>),
+    /// Any transport-agnostic message channel — a framed Unix socket, a named pipe,
+    /// an XPC connection. Added in 2.0 alongside [`WsClient::from_stream`].
+    Message(Box<dyn crate::libs::ws::MessageStream>),
 }
 
 // ---------------------------------------------------------------------------
@@ -104,33 +107,68 @@ impl WsClient {
         ))
     }
 
+    /// Build a client over any [`MessageStream`], bypassing TCP/TLS entirely.
+    ///
+    /// The transport-agnostic counterpart to [`Self::new`], and the client-side mirror
+    /// of [`WebsocketServer::serve_connection`](crate::libs::ws::WebsocketServer::serve_connection).
+    /// All the request/reply machinery — sequence correlation, response routing, MCP
+    /// framing — is shared with the WebSocket path; only the byte plumbing differs.
+    ///
+    /// Use with [`framed_json`](crate::libs::ws::transport::framed_json) over a Unix
+    /// socket or inherited socketpair, or with a platform transport's own
+    /// `MessageStream` implementation.
+    ///
+    /// Must be driven inside a `tokio::task::LocalSet` — `MessageStream`'s futures are
+    /// not `Send`.
+    pub fn from_stream(stream: Box<dyn crate::libs::ws::MessageStream>) -> Self {
+        Self {
+            stream: WsStream::Message(stream),
+            seq: 0,
+        }
+    }
+
     // --- Private stream helpers -------------------------------------------
 
     async fn stream_send(&mut self, msg: Message) -> Result<()> {
         // Backend edge: the client speaks WireMessage; tungstenite's type exists
         // only inside these helpers.
-        let msg: TMessage = msg.into();
         match &mut self.stream {
-            WsStream::H1(s) => s.send(msg).await?,
-            WsStream::H2(s) => s.send(msg).await?,
+            WsStream::H1(s) => s.send(TMessage::from(msg)).await?,
+            WsStream::H2(s) => s.send(TMessage::from(msg)).await?,
+            WsStream::Message(s) => s
+                .send(msg)
+                .await
+                .map_err(|err| eyre!("message stream send failed: {err}"))?,
         }
         Ok(())
     }
 
-    async fn stream_next(
-        &mut self,
-    ) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
-        let next = match &mut self.stream {
-            WsStream::H1(s) => s.next().await,
-            WsStream::H2(s) => s.next().await,
-        };
-        next.map(|res| res.map(Into::into))
+    async fn stream_next(&mut self) -> Option<Result<Message>> {
+        match &mut self.stream {
+            WsStream::H1(s) => s
+                .next()
+                .await
+                .map(|res| res.map(Into::into).map_err(Into::into)),
+            WsStream::H2(s) => s
+                .next()
+                .await
+                .map(|res| res.map(Into::into).map_err(Into::into)),
+            WsStream::Message(s) => s
+                .recv()
+                .await
+                .map(|res| res.map_err(|err| eyre!("message stream recv failed: {err}"))),
+        }
     }
 
     async fn stream_close(&mut self) -> Result<()> {
         match &mut self.stream {
             WsStream::H1(s) => s.as_mut().close(None).await?,
             WsStream::H2(s) => s.as_mut().close(None).await?,
+            WsStream::Message(s) => {
+                // No protocol-level close handshake on a plain message channel:
+                // send the Close frame and let the transport tear down.
+                let _ = s.send(Message::Close(None)).await;
+            }
         }
         Ok(())
     }
@@ -145,7 +183,7 @@ impl WsClient {
             params,
         })?;
         debug!("send req: {}", req);
-        self.stream_send(Message::Text(req.into())).await
+        self.stream_send(Message::Text(req)).await
     }
 
     /// Send a fully pre-serialized request message.

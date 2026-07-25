@@ -43,11 +43,23 @@ impl std::error::Error for StreamError {
     }
 }
 
+/// An object-safe, bidirectional message channel — what the session loop consumes.
+///
+/// Renamed from `WsStream` in 2.0 (the alias below keeps old code compiling): it is
+/// no longer WebSocket-specific. A Unix socket, a named pipe, or an XPC connection
+/// implements this just as well, either directly or via
+/// [`TransportStream`](super::TransportStream).
+///
+/// Note `?Send`: implementations' futures need not be `Send`, which matches the
+/// `spawn_local` dispatch model. Drivers must run inside a `LocalSet`.
 #[async_trait(?Send)]
-pub trait WsStream: Unpin + Send {
+pub trait MessageStream: Unpin + Send {
     async fn send(&mut self, msg: Message) -> Result<(), StreamError>;
     async fn recv(&mut self) -> Option<Result<Message, StreamError>>;
 }
+
+/// Compatibility alias for the pre-2.0 name.
+pub use MessageStream as WsStream;
 
 /// An upgrade event yielded by the upgrader.
 /// Contains the on_upgrade future and the negotiated protocol.

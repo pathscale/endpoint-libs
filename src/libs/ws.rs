@@ -13,6 +13,7 @@ mod subs;
 mod tls;
 pub mod toolbox;
 mod traits;
+pub mod transport;
 
 #[cfg(feature = "ws-client")]
 mod client;
@@ -32,6 +33,7 @@ pub use subs::*;
 #[cfg(any(feature = "ws", feature = "ws-wtx"))]
 pub use tls::*;
 pub use traits::*;
+pub use transport::*;
 
 #[cfg(feature = "ws-client")]
 pub use client::*;

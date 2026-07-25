@@ -14,12 +14,12 @@ use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tracing::*;
 
-#[cfg(feature = "ws")]
+// Used by serve_connection, which is transport-agnostic (ws-core), so these must
+// not be gated on the tungstenite backend.
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
-#[cfg(feature = "ws")]
 use crate::libs::utils::{get_conn_id, get_log_id};
 #[cfg(feature = "ws")]
 use crate::libs::ws::HyperTungsteniteUpgrader;
@@ -29,8 +29,8 @@ use crate::libs::ws::mcp::{McpServerInfo, McpState};
 #[cfg(feature = "ws")]
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
-    BoxedStream, ConnectionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
-    WsStream, WsUpgrader,
+    BoxedStream, ConnectionListener, MessageStream, SessionListener, TcpListener,
+    WsClientSession, WsConnection, WsRequest, WsUpgrader,
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
@@ -184,26 +184,39 @@ impl WebsocketServer {
         )
     }
 
-    #[cfg(feature = "ws")]
-    async fn post_upgrade_connection(
+    /// Run auth and the session loop for one already-established connection.
+    ///
+    /// This is the transport-agnostic server entry point. It knows nothing about TCP,
+    /// TLS or HTTP upgrades: give it a [`MessageStream`] and a [`PeerIdentity`] and it
+    /// does the rest. The WebSocket path reaches it through
+    /// `post_upgrade_connection`; local transports (Unix socket, named pipe, XPC) call
+    /// it directly.
+    ///
+    /// `auth_protocol` is whatever the transport uses to carry credentials at connect
+    /// time — the WebSocket subprotocol string today, a handed-over token for local
+    /// transports. It is passed to [`AuthController::auth`] unchanged.
+    ///
+    /// Must be called inside a `tokio::task::LocalSet`: [`MessageStream`]'s futures
+    /// are not `Send`.
+    pub async fn serve_connection(
         self: Arc<Self>,
-        addr: SocketAddr,
+        peer: PeerIdentity,
         states: Arc<WebsocketStates>,
-        stream: Box<dyn WsStream>,
-        protocol: String,
+        stream: Box<dyn MessageStream>,
+        auth_protocol: Option<String>,
     ) {
         let conn = Arc::new(WsConnection {
             connection_id: get_conn_id(),
             user_id: Default::default(),
             roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
-            peer: PeerIdentity::Network(addr),
+            peer,
             extensions: Extensions::new(),
             log_id: get_log_id(),
         });
         debug!(
             ws_server = true,
-            ?addr,
-            "New connection handshaken {:?}",
+            peer = %conn.peer,
+            "New connection established {:?}",
             conn
         );
 
@@ -211,7 +224,11 @@ impl WebsocketServer {
         states.insert(conn.connection_id, tx, conn.clone());
 
         let auth_result = Arc::clone(&self.auth_controller)
-            .auth(&self.toolbox, protocol, Arc::clone(&conn))
+            .auth(
+                &self.toolbox,
+                auth_protocol.unwrap_or_default(),
+                Arc::clone(&conn),
+            )
             .await;
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
@@ -220,7 +237,7 @@ impl WebsocketServer {
             error!(
                 ws_server=true,
                 error_code=?ErrorCode::BAD_REQUEST,
-                ip_addr=%raw_ctx.ip_addr,
+                peer=%conn.peer,
                 user_id=raw_ctx.user_id,
                 conn_id=raw_ctx.connection_id,
                 roles=?raw_ctx.roles,
@@ -234,11 +251,30 @@ impl WebsocketServer {
             .await;
     }
 
+    /// The WebSocket-specific wrapper: everything TCP/TLS/upgrade-shaped stops here,
+    /// and the generic path continues in [`Self::serve_connection`].
+    #[cfg(feature = "ws")]
+    async fn post_upgrade_connection(
+        self: Arc<Self>,
+        addr: SocketAddr,
+        states: Arc<WebsocketStates>,
+        stream: Box<dyn MessageStream>,
+        protocol: String,
+    ) {
+        self.serve_connection(
+            PeerIdentity::Network(addr),
+            states,
+            stream,
+            Some(protocol),
+        )
+        .await;
+    }
+
     pub async fn handle_session_connection(
         self: Arc<Self>,
         conn: Arc<WsConnection>,
         states: Arc<WebsocketStates>,
-        stream: Box<dyn WsStream>,
+        stream: Box<dyn MessageStream>,
         rx: mpsc::Receiver<Message>,
     ) {
         let addr = conn.peer.display();
@@ -261,6 +297,46 @@ impl WebsocketServer {
             ?conn_id,
             "Connection closed and removed from states (check logs above for any errors)"
         );
+    }
+
+    /// Accept connections from any [`SessionListener`] and serve each one.
+    ///
+    /// The transport-agnostic counterpart to [`Self::listen`]. Unlike `listen`, this
+    /// runs on a single runtime — the shard-per-core model is a property of the TCP
+    /// path and buys nothing for a 1:1 sidecar channel.
+    ///
+    /// Must be called inside a `tokio::task::LocalSet` (see
+    /// [`Self::serve_connection`]).
+    pub async fn serve_with<L>(self, listener: L) -> Result<()>
+    where
+        L: SessionListener + 'static,
+    {
+        let this = Arc::new(self);
+        let states = Arc::new(WebsocketStates::new());
+        this.toolbox.set_ws_states(
+            states.clone_states(),
+            this.config.header_only,
+            this.config.drop_conn_on_buffer_full,
+        );
+
+        loop {
+            let (stream, peer) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(err) => {
+                    error!(ws_server = true, error = %err, "listener accept failed; stopping");
+                    return Err(err);
+                }
+            };
+            debug!(ws_server = true, peer = %peer, "accepted connection");
+
+            let this = Arc::clone(&this);
+            let states = Arc::clone(&states);
+            tokio::task::spawn_local(async move {
+                // Local transports carry credentials out of band (an inherited fd is
+                // already a capability), so there is no subprotocol string to pass.
+                this.serve_connection(peer, states, stream, None).await;
+            });
+        }
     }
 
     pub async fn listen(self) -> Result<()> {
