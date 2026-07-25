@@ -228,7 +228,10 @@ where
             .map_err(FramedError::Io)
     }
 
-    fn start_send(mut self: std::pin::Pin<&mut Self>, item: WireMessage) -> Result<(), Self::Error> {
+    fn start_send(
+        mut self: std::pin::Pin<&mut Self>,
+        item: WireMessage,
+    ) -> Result<(), Self::Error> {
         std::pin::Pin::new(&mut self.inner)
             .start_send(encode(item))
             .map_err(FramedError::Io)

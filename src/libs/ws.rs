@@ -1,8 +1,8 @@
 mod basics;
 mod conn;
 pub mod handler;
-pub mod hooks;
 mod headers;
+pub mod hooks;
 mod listener;
 pub mod mcp;
 mod message;
@@ -37,7 +37,7 @@ pub use traits::*;
 pub use transport::*;
 
 pub use client::*;
-#[cfg(any(feature = "ws", feature = "ws-client"))]
+#[cfg(feature = "ws")]
 pub use tungstenite::*;
 #[cfg(feature = "ws-wtx")]
 pub use wtx::WtxUpgrader;

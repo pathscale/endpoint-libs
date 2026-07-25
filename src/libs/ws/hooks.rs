@@ -34,7 +34,9 @@ use crate::model::EndpointSchema;
 pub enum RequestOutcome {
     Ok,
     /// The handler (or a `BeforeRequest` hook) returned a public error.
-    PublicErr { code: u32 },
+    PublicErr {
+        code: u32,
+    },
     /// The handler failed internally; the client saw a generic error.
     InternalErr,
 }
@@ -57,7 +59,12 @@ pub trait BeforeRequest: Send + Sync {
 /// Runs after a request completes, for observation only.
 #[async_trait(?Send)]
 pub trait AfterRequest: Send + Sync {
-    async fn after(&self, ctx: &RequestContext, endpoint: &EndpointSchema, outcome: &RequestOutcome);
+    async fn after(
+        &self,
+        ctx: &RequestContext,
+        endpoint: &EndpointSchema,
+        outcome: &RequestOutcome,
+    );
 }
 
 /// Runs once per connection, after auth, before any message is processed.

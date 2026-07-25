@@ -170,10 +170,7 @@ impl WsClientSession {
             // Hooks run inside the spawned task so a slow hook cannot stall the
             // session loop, and after check_roles so they only see calls that were
             // already allowed to reach this endpoint.
-            if let Err(custom) = hooks
-                .run_before(&mut context, &schema, &req.params)
-                .await
-            {
+            if let Err(custom) = hooks.run_before(&mut context, &schema, &req.params).await {
                 let code = custom.code.to_u32();
                 toolbox.send(
                     context.connection_id,

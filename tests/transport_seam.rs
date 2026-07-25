@@ -146,7 +146,9 @@ fn spawn_server(
 ) -> impl std::future::Future<Output = ()> {
     let server = Arc::new(server);
     let states = Arc::new(WebsocketStates::new());
-    server.toolbox.set_ws_states(states.clone_states(), false, false);
+    server
+        .toolbox
+        .set_ws_states(states.clone_states(), false, false);
     let stream: Box<dyn MessageStream> = Box::new(TransportStream::new(framed_json(server_io)));
     server.serve_connection(attested_peer(), states, stream, None)
 }
@@ -263,9 +265,7 @@ async fn mcp_initialize_and_tool_call_work_over_the_same_transport() {
 
 use endpoint_libs::libs::error_code::ErrorCode;
 use endpoint_libs::libs::peer::Extensions;
-use endpoint_libs::libs::ws::{
-    AfterRequest, BeforeRequest, OnConnect, RequestOutcome,
-};
+use endpoint_libs::libs::ws::{AfterRequest, BeforeRequest, OnConnect, RequestOutcome};
 use endpoint_libs::model::EndpointSchema;
 use std::sync::Mutex;
 
@@ -317,7 +317,10 @@ impl AfterRequest for RecordOutcomes {
             RequestOutcome::InternalErr => "internal".to_owned(),
             _ => "other".to_owned(),
         };
-        self.0.lock().unwrap().push(format!("{}:{label}", endpoint.name));
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("{}:{label}", endpoint.name));
     }
 }
 
@@ -412,20 +415,30 @@ async fn before_hook_gates_the_legacy_path_and_passes_claims() {
 
             // Allowed: the handler sees what the hook put in extensions.
             let resp: ClaimsResponse = client
-                .request(ClaimsRequest { message: "fine".into() })
+                .request(ClaimsRequest {
+                    message: "fine".into(),
+                })
                 .await
                 .expect("allowed request failed");
             assert_eq!(resp.message, "seen:fine");
 
             // Denied: the handler never runs; the hook's code and params come back.
             client
-                .send_req(ClaimsRequest::METHOD_ID, ClaimsRequest { message: "denied".into() })
+                .send_req(
+                    ClaimsRequest::METHOD_ID,
+                    ClaimsRequest {
+                        message: "denied".into(),
+                    },
+                )
                 .await
                 .expect("send");
             let raw = client.recv_raw().await.expect("recv");
             assert_eq!(raw["code"], ErrorCode::FORBIDDEN.to_u32(), "frame: {raw}");
             assert_eq!(raw["params"]["kind"], "PolicyDenied", "frame: {raw}");
-            assert_eq!(raw["params"]["message"], "blocked by policy", "frame: {raw}");
+            assert_eq!(
+                raw["params"]["message"], "blocked by policy",
+                "frame: {raw}"
+            );
 
             // AfterRequest saw both, with the rejection reported as a public error.
             let seen = recorder.0.lock().unwrap().clone();
@@ -469,7 +482,10 @@ async fn before_hook_gates_the_mcp_path_with_a_tool_error() {
                 .expect("recv");
 
             assert_eq!(resp["id"], 7, "frame: {resp}");
-            assert_eq!(resp["result"]["isError"], true, "expected a tool error: {resp}");
+            assert_eq!(
+                resp["result"]["isError"], true,
+                "expected a tool error: {resp}"
+            );
             let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
             assert!(
                 text.contains("blocked by policy") || text.contains("PolicyDenied"),
@@ -477,7 +493,10 @@ async fn before_hook_gates_the_mcp_path_with_a_tool_error() {
             );
 
             let seen = recorder.0.lock().unwrap().clone();
-            assert_eq!(seen, vec![format!("Claims:public:{}", ErrorCode::FORBIDDEN.to_u32())]);
+            assert_eq!(
+                seen,
+                vec![format!("Claims:public:{}", ErrorCode::FORBIDDEN.to_u32())]
+            );
         })
         .await;
 }
@@ -507,7 +526,10 @@ async fn on_connect_hook_can_refuse_a_peer() {
     let local = LocalSet::new();
     local
         .run_until(async {
-            let config = WsServerConfig { insecure: true, ..Default::default() };
+            let config = WsServerConfig {
+                insecure: true,
+                ..Default::default()
+            };
             let mut server = WebsocketServer::new(config);
             server.set_auth_controller(AllowAllAuthController);
             server.add_handler(MethodEcho);
@@ -516,7 +538,9 @@ async fn on_connect_hook_can_refuse_a_peer() {
             // spawn_server supplies an *attested* peer, so this one is admitted.
             let mut client = connect(server);
             let resp: EchoResponse = client
-                .request(EchoRequest { message: "hi".into() })
+                .request(EchoRequest {
+                    message: "hi".into(),
+                })
                 .await
                 .expect("attested peer should be admitted");
             assert_eq!(resp.message, "echo[local/test-harness]: hi");

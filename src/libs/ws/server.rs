@@ -29,9 +29,8 @@ use crate::libs::ws::mcp::{McpServerInfo, McpState};
 #[cfg(feature = "ws")]
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
-    AfterRequest, BeforeRequest, BoxedStream, ConnectionListener, Hooks, MessageStream,
-    OnConnect, SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
-    WsUpgrader,
+    AfterRequest, BeforeRequest, BoxedStream, ConnectionListener, Hooks, MessageStream, OnConnect,
+    SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest, WsUpgrader,
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
@@ -296,13 +295,8 @@ impl WebsocketServer {
         stream: Box<dyn MessageStream>,
         protocol: String,
     ) {
-        self.serve_connection(
-            PeerIdentity::Network(addr),
-            states,
-            stream,
-            Some(protocol),
-        )
-        .await;
+        self.serve_connection(PeerIdentity::Network(addr), states, stream, Some(protocol))
+            .await;
     }
 
     pub async fn handle_session_connection(

@@ -5,10 +5,6 @@ use tracing::*;
 
 // --- tungstenite/hyper/rustls: only for the TCP/TLS constructor ------------
 #[cfg(feature = "ws-client")]
-use std::net::SocketAddr;
-#[cfg(feature = "ws-client")]
-use std::sync::Arc;
-#[cfg(feature = "ws-client")]
 use bytes::Bytes;
 #[cfg(feature = "ws-client")]
 use eyre::ensure;
@@ -28,6 +24,10 @@ use hyper::header::HeaderValue;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 #[cfg(feature = "ws-client")]
 use rustls::pki_types::ServerName;
+#[cfg(feature = "ws-client")]
+use std::net::SocketAddr;
+#[cfg(feature = "ws-client")]
+use std::sync::Arc;
 #[cfg(feature = "ws-client")]
 use tokio::net::TcpStream;
 #[cfg(feature = "ws-client")]

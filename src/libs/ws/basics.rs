@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use crate::libs::error_code::ErrorCode;
-use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::handler::RequestHandlerErased;
 use crate::libs::log::{CustomEyreHandler, LogLevel};
+use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::toolbox::{CustomError, RequestContext};
 use crate::model::EndpointSchema;
 

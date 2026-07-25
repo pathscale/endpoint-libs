@@ -103,7 +103,11 @@ impl SessionListener for UdsListener {
         // not the *code* — hence Attestation::None. Upgrading this to
         // Attestation::Verified is exactly what the sibling crate adds.
         let peer = PeerIdentity::Local(LocalPeer {
-            pid: stream.peer_cred().ok().and_then(|c| c.pid()).map(|p| p as u32),
+            pid: stream
+                .peer_cred()
+                .ok()
+                .and_then(|c| c.pid())
+                .map(|p| p as u32),
             uid: stream.peer_cred().ok().map(|c| c.uid()),
             attestation: Attestation::None,
         });

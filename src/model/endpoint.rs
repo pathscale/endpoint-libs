@@ -278,7 +278,8 @@ mod forward_compat_tests {
             "x_future_openapi_binding": {"path": "/rpc/UserListSymbols"},
             "some_field_from_2_5": 42
         }"#;
-        let schema: EndpointSchema = serde_json::from_str(json).expect("unknown fields must not break deserialization");
+        let schema: EndpointSchema =
+            serde_json::from_str(json).expect("unknown fields must not break deserialization");
         assert_eq!(schema.name, "UserListSymbols");
         assert_eq!(schema.code, 10020);
         assert!(schema.meta.is_empty());
@@ -318,7 +319,10 @@ mod forward_compat_tests {
     fn empty_meta_is_not_serialized() {
         let schema = EndpointSchema::new("A", 1, vec![], vec![]);
         let text = serde_json::to_string(&schema).unwrap();
-        assert!(!text.contains("meta"), "empty meta leaked into output: {text}");
+        assert!(
+            !text.contains("meta"),
+            "empty meta leaked into output: {text}"
+        );
 
         let field = Field::new("x", Type::String);
         let text = serde_json::to_string(&field).unwrap();

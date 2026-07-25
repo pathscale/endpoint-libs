@@ -57,5 +57,6 @@ pub trait SessionListener: Send + Sync + 'static {
     /// Returning `Err` stops `serve_with`, so implementations should handle
     /// per-connection failures internally and only surface errors that make the
     /// listener itself unusable.
-    async fn accept(&self) -> eyre::Result<(Box<dyn crate::libs::ws::MessageStream>, PeerIdentity)>;
+    async fn accept(&self)
+    -> eyre::Result<(Box<dyn crate::libs::ws::MessageStream>, PeerIdentity)>;
 }

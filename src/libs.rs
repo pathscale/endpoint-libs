@@ -1,11 +1,11 @@
 pub mod log;
 #[cfg(feature = "log_reader")]
 pub mod log_reader;
+pub mod peer;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 #[cfg(feature = "signal")]
 pub mod signal;
-pub mod peer;
 pub mod types;
 pub mod utils;
 #[cfg(feature = "ws-core")]
