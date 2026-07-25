@@ -9,6 +9,10 @@ natively, and Claude Code loads it through the `@AGENTS.md` import in
 
 ## Invariants (don't break these)
 
+- **Releasing this crate has a required order.** `honey_id-types` re-exports its
+  `WsRequest`/`WsResponse` traits and must be published after it; the six backends
+  bump both together. Getting it wrong puts two incompatible copies of endpoint-libs
+  in a consumer's graph. See [`docs/release-order.md`](docs/release-order.md).
 - **`npm` is the package manager** — its lockfile is authoritative. Don't introduce a second one by running npm/yarn/pnpm here.
 - **Two toolchains live here.** A change to one side does not imply the other still builds — check both before calling it done.
 - **Docs describe what is true now.** If you change behaviour, update the README and any affected doc in the same change.
