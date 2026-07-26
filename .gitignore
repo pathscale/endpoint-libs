@@ -12,5 +12,5 @@ examples/ws-echo/target/
 /.serena
 /.kiro
 
-/.idea.DS_Store
+/.idea
 .DS_Store
