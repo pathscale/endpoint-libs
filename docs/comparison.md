@@ -83,9 +83,11 @@ Three things, together, that nothing in the list above provides as a set:
    HTTP requests and responses. It has no vocabulary for "a persistent socket carrying
    `{method, seq, params}` frames correlated by `seq`, sharing that socket with MCP
    JSON-RPC". The standards that *can* — AsyncAPI, OpenRPC — have an order of magnitude
-   less Rust tooling. This is why 2.1 emits AsyncAPI as the authoritative document and
-   OpenAPI as an explicitly-labelled projection, rather than adopting OpenAPI as the
-   source of truth.
+   less Rust tooling. This is why 2.1 emits AsyncAPI as the accurate one of the two
+   specification documents and OpenAPI as an explicitly-labelled projection, rather than
+   adopting OpenAPI as the source of truth. Note that both are *additional* outputs: the
+   RON remains the source of truth, and `services.json` remains the artifact internal
+   tooling is built against.
 
 3. **Roles and typed public errors are in the schema.** No crate in the table above
    generates role gating or a typed public error contract from a declarative definition.

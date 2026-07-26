@@ -14,9 +14,12 @@ and tool schemas, and this crate serves them.
   connection/session management, push and subscription infrastructure, and typed handlers.
 - **Roles and typed public errors** — endpoints declare which roles may call them; handlers
   return a typed error enum that becomes a stable public error contract.
-- **MCP built in** — every endpoint can be exposed as a Model Context Protocol tool over
-  JSON-RPC 2.0 on the same socket, filtered by the caller's roles. Off by default, fully
-  additive.
+- **Every endpoint is an MCP tool, for free** — one `enable_mcp()` call exposes your whole
+  RPC surface as Model Context Protocol tools over JSON-RPC 2.0, on the same socket, with
+  `inputSchema`/`outputSchema` generated from the endpoint definitions and `tools/list`
+  filtered by the caller's roles. You write no tool definitions, no JSON Schema, and no
+  second server. Off by default and fully additive — see
+  [MCP support](#mcp-model-context-protocol-support).
 - **Schema model** — `Type`/`Field`/`EndpointSchema` plus `to_json_schema`, emitting JSON
   Schema 2020-12; the basis for MCP tool schemas and the OpenAPI/AsyncAPI documents.
 - **Transport-agnostic core (2.0)** — the WebSocket backend is one implementation of a
@@ -224,6 +227,39 @@ migration, RON descriptions, codegen, activation, and verification), and
 [pathscale/api.support.cafe#3](https://github.com/pathscale/api.support.cafe/pull/3)
 for a complete worked example.
 
+### Machine-readable descriptions of your API
+
+Three of these, serving different audiences. They are **parallel outputs, not a
+progression** — nothing here deprecates anything else:
+
+| Artifact | Always emitted? | Audience |
+|---|---|---|
+| `docs/services.json` | **yes** | Internal tooling. Our own format, our own rules. |
+| `docs/<service>_mcp_tools.json` | **yes** | Review — what a server reports via `tools/list`. |
+| `docs/asyncapi.json` | opt-in (`--asyncapi`) | External consumers who want a standard. |
+| `docs/openapi.json` | opt-in (`--openapi`) | OpenAPI tooling — clients, doc renderers, bridges. |
+
+**`services.json` is the one to build internal tooling against.** It is always written,
+it is a format we define and control, and it changes when we decide it changes — no
+specification committee, no version negotiation, no vocabulary that almost fits. Shape:
+
+```json
+{ "services": [ { "name": "userApi", "id": 1,
+                  "endpoints": [ { "name": "...", "code": 10000, "description": "...",
+                                   "parameters": [...], "returns": [...], "errors": [...],
+                                   "roles": [...], "stream_response": null } ] } ],
+  "enums": [...], "structs": [...] }
+```
+
+Note it contains **only `frontend_facing` endpoints**, by design — it is the
+public-surface view. The AsyncAPI document defaults to every endpoint unless you pass
+`--public-only`.
+
+Reach for AsyncAPI when something *outside* your control needs to read the protocol and a
+bespoke format would be friction — a third-party integrator, a code generator, a
+standards-shaped toolchain. Inside our own stack, `services.json` is less friction, and
+that is the right trade.
+
 ### API specification documents (2.1)
 
 `model::api_document` turns the endpoint model into document-scope JSON Schema, shared by
@@ -245,7 +281,7 @@ opt-in (`--openapi`, `--asyncapi`).
 > **The OpenAPI document is a projection for tooling, not a servable API.** This transport
 > has no URLs, so paths are synthesized as `/{serviceName}/{endpoint_snake_name}`. Point an
 > HTTP client at them and nothing will answer. The **AsyncAPI** document is the
-> authoritative description of the wire protocol — including the `framed_json` byte layout
+> authoritative one *of the two specification documents* — including the `framed_json` byte layout
 > under `x-framing`, which is the only machine-readable copy of that format.
 
 MCP tool schemas deliberately do **not** go through this path: `to_mcp_input_schema` and
