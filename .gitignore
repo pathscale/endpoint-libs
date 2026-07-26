@@ -13,3 +13,4 @@ examples/ws-echo/target/
 /.kiro
 
 /.idea.DS_Store
+.DS_Store
