@@ -52,6 +52,16 @@ at build time (it is a binary), so it can move independently of `honey_id-types`
 4. **The six backends** — bump **both** `endpoint-libs` and `honey_id-types`
    together, in one commit. Never one without the other.
 
+## Checking it automatically
+
+[`scripts/check-chain.sh`](../scripts/check-chain.sh) runs every check in this document
+across all the repos at once, plus the `version.toml`/`Cargo.lock` agreement and
+`endpoint-gen --check` per backend. Read-only; `--quick` skips the cargo builds.
+
+```bash
+./scripts/check-chain.sh
+```
+
 ## The check that proves it
 
 After any bump, in each consumer:
