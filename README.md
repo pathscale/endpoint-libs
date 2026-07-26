@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.0/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.0)
+[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.1/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.1)
 
 The runtime half of a schema-first RPC pipeline: you describe endpoints once in RON,
 [`endpoint-gen`](https://github.com/pathscale/EndpointGen) generates the Rust models, docs

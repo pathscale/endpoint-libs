@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.1.1] - 2026-07-26
+
+### Documentation
+
+- Make the crates.io page accurate, and say when not to use this
+- Present services.json and AsyncAPI as parallel outputs, lead with MCP
+
+### Miscellaneous Tasks
+
+- Ignore .DS_Store
+- Repair the /.idea gitignore entry
+
 ## [2.1.0] - 2026-07-25
 
 ### Bug Fixes
