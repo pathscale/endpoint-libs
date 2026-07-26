@@ -6,8 +6,8 @@
 #   ./scripts/check-chain.sh            # check everything
 #   ./scripts/check-chain.sh --quick    # skip cargo build/test (metadata only)
 #
-# Exits non-zero if anything is inconsistent. See docs/release-order.md for why
-# each of these matters.
+# Exits non-zero if anything is inconsistent. See docs/chain.md for why each of
+# these matters, and docs/release-order.md for the release runbook.
 
 set -uo pipefail
 
@@ -31,7 +31,7 @@ have() { [[ -d "$(repo "$1")" ]]; }
 # ── 1. Exactly one endpoint-libs per dependency graph ────────────────────────
 # Two copies means honey_id-types' re-exported WsRequest/WsResponse traits are
 # different types with the same name, and the resulting error names two
-# different endpoint-libs paths. See docs/release-order.md.
+# different endpoint-libs paths. See docs/chain.md.
 head_ "One endpoint-libs per graph"
 for r in "${TOOLS[@]}" "${BACKENDS[@]}"; do
     have "$r" || { skip "$r (not checked out)"; continue; }
@@ -42,7 +42,7 @@ for r in "${TOOLS[@]}" "${BACKENDS[@]}"; do
     case "$n" in
         0) skip "$r does not depend on endpoint-libs" ;;
         1) pass "$r resolves exactly 1 ($vers)" ;;
-        *) fail "$r resolves $n copies: ${vers}— traits re-exported through honey_id-types will not unify. See docs/release-order.md" ;;
+        *) fail "$r resolves $n copies: ${vers}— traits re-exported through honey_id-types will not unify. See docs/chain.md" ;;
     esac
 done
 
@@ -120,5 +120,5 @@ if (( FAILURES == 0 )); then
     printf '\033[32mChain is consistent.\033[0m\n'
     exit 0
 fi
-printf '\033[31m%d inconsistency(ies).\033[0m See docs/release-order.md.\n' "$FAILURES"
+printf '\033[31m%d inconsistency(ies).\033[0m See docs/chain.md.\n' "$FAILURES"
 exit 1
