@@ -6,40 +6,65 @@
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
 [![Security audit](https://deps.rs/crate/endpoint-libs/2.1.0/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.0)
 
-Common library used across Pathscale projects. Contains generic utilities and shared types that are not specific to any single service, including a WebSocket server implementation, endpoint schema types for use with [endpoint-gen](https://github.com/pathscale/endpoint-gen), structured logging setup, and more.
+The runtime half of a schema-first RPC pipeline: you describe endpoints once in RON,
+[`endpoint-gen`](https://github.com/pathscale/EndpointGen) generates the Rust models, docs
+and tool schemas, and this crate serves them.
 
-## Releasing
+- **WebSocket RPC server** — `{method, seq, params}` frames over a persistent socket, with
+  connection/session management, push and subscription infrastructure, and typed handlers.
+- **Roles and typed public errors** — endpoints declare which roles may call them; handlers
+  return a typed error enum that becomes a stable public error contract.
+- **MCP built in** — every endpoint can be exposed as a Model Context Protocol tool over
+  JSON-RPC 2.0 on the same socket, filtered by the caller's roles. Off by default, fully
+  additive.
+- **Schema model** — `Type`/`Field`/`EndpointSchema` plus `to_json_schema`, emitting JSON
+  Schema 2020-12; the basis for MCP tool schemas and the OpenAPI/AsyncAPI documents.
+- **Transport-agnostic core (2.0)** — the WebSocket backend is one implementation of a
+  transport seam. Length-delimited framing over Unix sockets, named pipes or inherited
+  socketpairs is a feature flag away, with no TLS or HTTP compiled in.
 
-Releases are managed with [`cargo-release`](https://github.com/crate-ci/cargo-release) and [`git-cliff`](https://github.com/orhun/git-cliff). Both must be installed:
+### When this is *not* the right crate
 
-```sh
-cargo install cargo-release git-cliff
-```
+Be honest about the fit — it is a narrow one:
 
-To cut a release:
+- **You want a REST/HTTP API.** Use `axum` with [`utoipa`](https://crates.io/crates/utoipa)
+  or [`aide`](https://crates.io/crates/aide), or [`dropshot`](https://crates.io/crates/dropshot)
+  if you want the spec to be the contract. They are far more mature at that job.
+- **You want gRPC.** [`tonic`](https://crates.io/crates/tonic) is the answer and it is not
+  close.
+- **You want general-purpose Rust-to-Rust RPC** with no config file and no browser client.
+  [`tarpc`](https://crates.io/crates/tarpc) is cleaner, and its `Transport` design is what
+  the 2.0 seam here was modelled on.
+- **You want standards-first JSON-RPC.** [`jsonrpsee`](https://crates.io/crates/jsonrpsee)
+  is the mature choice.
 
-```sh
-./scripts/release.sh [--skip-bump] <patch|minor|major>
-```
+This crate earns its place only when you want *one declarative source of truth* driving
+generated types, generated docs, generated MCP tools, role gating and typed errors together
+— and when a WebSocket message protocol, not HTTP, is what you are actually serving. See
+[`docs/comparison.md`](docs/comparison.md) for the full survey.
 
-The script will:
-1. Run `cargo release --execute <level>` — bumps the version in `Cargo.toml`, updates the deps.rs badge in this README, regenerates `CHANGELOG.md`, and commits everything as `chore(release): vX.Y.Z`.
-2. Open your `$EDITOR` with the auto-generated tag notes (from `git-cliff`) for review.
-3. Create an annotated tag using the edited notes as the tag body (shown as GitHub Release notes).
-4. Push the commit and tag.
-5. Prompt whether to publish to crates.io.
+## Version compatibility
 
-To preview what `cargo-release` would do without making changes:
+Minor versions do **not** need to match across `endpoint-libs`, `endpoint-gen` and
+`honey_id-types`. They are separate crates on separate cadences — as of this writing
+endpoint-libs 2.1, endpoint-gen 1.13 and honey_id-types 2.0 interoperate in production.
 
-```sh
-cargo release patch  # omit --execute for a dry run
-```
+What is actually enforced:
 
-## Version Compatibility
+- **`endpoint-gen`** records the `endpoint-libs` version it was built against and checks
+  it at generation time against `[libs] version` in your `config/version.toml`. A
+  mismatch fails generation with an explicit message rather than emitting subtly wrong
+  code.
+- **`honey_id-types`** re-exports this crate's `WsRequest`/`WsResponse` traits. Bumping
+  one without the other can put two incompatible copies of `endpoint-libs` in a single
+  dependency graph; the resulting error names two different `endpoint-libs` paths and is
+  otherwise baffling. The check that catches it is one line:
 
-When using `endpoint-libs` alongside `endpoint-gen` or `honey_id-types` in the same project, **minor versions must match** between all of them. Patch versions are stable across these crates but should ideally be kept in sync as well.
+  ```sh
+  grep -c 'name = "endpoint-libs"' Cargo.lock   # must be exactly 1
+  ```
 
-For example, `endpoint-libs 1.3.x` must be paired with `endpoint-gen 1.3.x` and `honey_id-types 1.3.x`.
+The release order for the whole chain is in [`docs/release-order.md`](docs/release-order.md).
 
 ## Features
 
@@ -52,6 +77,25 @@ Endpoint schema types shared between services and `endpoint-gen`:
 - `Type`, `Field`, `EnumVariant` — the type system used to describe endpoint request/response schemas
 - `TypeRegistry` and `Type::to_json_schema` — conversion of endpoint schemas to JSON Schema (used for MCP tool definitions, see below)
 - Blockchain primitive types: `BlockchainAddress`, `BlockchainTransactionHash`, `U256`, `H256`
+
+### `ws-core`
+
+Shared WebSocket infrastructure — `WireMessage`, server, session, traits, toolbox — with
+no backend, no TLS and no HTTP. Everything the other `ws-*` features build on. `WsClient`
+and `WsClient::from_stream` are available here too, so a sidecar speaking only a local
+transport does not compile a TLS/WebSocket stack it never uses.
+
+### `ws-client`
+
+The connecting half: `WsClient::new` (TCP/TLS), `WsClientBuilder` and the connect helpers.
+Standalone — you can build a client without the server.
+
+### `framed-transport`
+
+Length-delimited `WireMessage` framing over any byte stream: Unix sockets, named pipes,
+inherited socketpairs. No WebSocket, no TLS, no HTTP. Wire format under
+[Transports (2.0)](#transports-20) below, and machine-readable in the generated AsyncAPI
+document.
 
 ### `ws`
 
@@ -179,6 +223,54 @@ Migrating an existing backend from 1.7.x? See the step-by-step guide in
 migration, RON descriptions, codegen, activation, and verification), and
 [pathscale/api.support.cafe#3](https://github.com/pathscale/api.support.cafe/pull/3)
 for a complete worked example.
+
+### API specification documents (2.1)
+
+`model::api_document` turns the endpoint model into document-scope JSON Schema, shared by
+every emitter so there is one implementation rather than three drifting copies:
+
+- `SchemaComponents::collect` walks a set of endpoints with one shared `defs` map, so every
+  referenced struct and enum is emitted exactly once and operations share `$ref`s.
+- `relocate_refs` moves `#/$defs/X` to wherever a given format keeps its definitions
+  (`#/components/schemas/X` for both OpenAPI and AsyncAPI). Idempotent, and it only touches
+  strings under a `$ref` key.
+- `apply_meta` carries `Field.meta` / `EndpointSchema.meta` annotations through: `x-` keys
+  verbatim as specification extensions, a fixed list of JSON Schema keywords verbatim, and
+  anything else a hard error naming the endpoint and field. A typo'd `exmaple` that silently
+  vanished would be invisible until someone read the spec and believed it.
+
+`endpoint-gen` uses this to emit **OpenAPI 3.1** and **AsyncAPI 3.0** documents, both
+opt-in (`--openapi`, `--asyncapi`).
+
+> **The OpenAPI document is a projection for tooling, not a servable API.** This transport
+> has no URLs, so paths are synthesized as `/{serviceName}/{endpoint_snake_name}`. Point an
+> HTTP client at them and nothing will answer. The **AsyncAPI** document is the
+> authoritative description of the wire protocol — including the `framed_json` byte layout
+> under `x-framing`, which is the only machine-readable copy of that format.
+
+MCP tool schemas deliberately do **not** go through this path: `to_mcp_input_schema` and
+`to_mcp_output_schema` keep their own self-contained `$defs` so each tool schema stands
+alone, which consumers depend on. A test asserts that stays true.
+
+### `database`
+
+Pooled PostgreSQL access: `tokio-postgres` behind `deadpool`, a background data thread,
+and `postgres-from-row` mapping.
+
+### `ws-http1` / `ws-tls12`
+
+Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HTTP/2;
+`ws-tls12` accepts TLS 1.2 in addition to 1.3. Default is HTTP/2 and TLS 1.3 only.
+
+### `s3-sync`
+
+Forwards to `cert-provider/s3-sync`, for certificate material synced from S3.
+
+### `full`
+
+`types` + `ws` + `database` + `signal` + `scheduler` + `log_reader` +
+`error_aggregation` + `log_throttling` + `ws-http1` + `ws-tls12`. Convenience only, and it
+does **not** include `ws-client` or `framed-transport` — prefer naming what you use.
 
 ### `signal`
 
@@ -333,3 +425,32 @@ Note: Values in `OtelConfig` override environment variables. To prevent recursiv
 ## Config Loading
 
 A `load_config` utility parses a JSON config file, defaulting to `etc/config.json` or overridden via `--config`/`CONFIG` env var. Supports an optional `--config-entry` for selecting a sub-key within the config object.
+
+---
+
+## Releasing
+
+Releases are managed with [`cargo-release`](https://github.com/crate-ci/cargo-release) and [`git-cliff`](https://github.com/orhun/git-cliff). Both must be installed:
+
+```sh
+cargo install cargo-release git-cliff
+```
+
+To cut a release:
+
+```sh
+./scripts/release.sh [--skip-bump] <patch|minor|major>
+```
+
+The script will:
+1. Run `cargo release --execute <level>` — bumps the version in `Cargo.toml`, updates the deps.rs badge in this README, regenerates `CHANGELOG.md`, and commits everything as `chore(release): vX.Y.Z`.
+2. Open your `$EDITOR` with the auto-generated tag notes (from `git-cliff`) for review.
+3. Create an annotated tag using the edited notes as the tag body (shown as GitHub Release notes).
+4. Push the commit and tag.
+5. Prompt whether to publish to crates.io.
+
+To preview what `cargo-release` would do without making changes:
+
+```sh
+cargo release patch  # omit --execute for a dry run
+```
