@@ -12,7 +12,7 @@ natively, and Claude Code loads it through the `@AGENTS.md` import in
 - **Verify the whole chain, not just this repo.** endpoint-gen, honey_id-types,
   endpoint-validator and the six backends all break silently when this crate moves.
   `./scripts/check-chain.sh` verifies all of it; run it before calling a change done.
-  Cross-repo context: [`~/code/CLAUDE.md`](../CLAUDE.md).
+  Cross-repo context: [`docs/chain.md`](docs/chain.md).
 - **Releasing this crate has a required order.** `honey_id-types` re-exports its
   `WsRequest`/`WsResponse` traits and must be published after it; the six backends
   bump both together. Getting it wrong puts two incompatible copies of endpoint-libs

@@ -54,6 +54,9 @@ at build time (it is a binary), so it can move independently of `honey_id-types`
 
 ## Checking it automatically
 
+Broader cross-repo guidance — the traps, and what to verify when changing any node —
+is in [`chain.md`](chain.md).
+
 [`scripts/check-chain.sh`](../scripts/check-chain.sh) runs every check in this document
 across all the repos at once, plus the `version.toml`/`Cargo.lock` agreement and
 `endpoint-gen --check` per backend. Read-only; `--quick` skips the cargo builds.
