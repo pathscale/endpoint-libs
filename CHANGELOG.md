@@ -1,6 +1,18 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [2.1.3] - 2026-07-26
+
+### Documentation
+
+- Lead with what the crate is for, not what it is made of
+
+## [2.1.2] - 2026-07-26
+
+### Documentation
+
+- Add a capability comparison table
+
 ## [2.1.1] - 2026-07-26
 
 ### Documentation

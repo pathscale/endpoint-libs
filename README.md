@@ -4,11 +4,21 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.2/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.2)
+[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.3/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.3)
 
-The runtime half of a schema-first RPC pipeline: you describe endpoints once in RON,
-[`endpoint-gen`](https://github.com/pathscale/EndpointGen) generates the Rust models, docs
-and tool schemas, and this crate serves them.
+`endpoint-libs` exists to make it fast and easy to launch MCP services — killing
+boilerplate, tightening security, and raising the quality of both hand-written and
+AI-generated code.
+
+You describe your endpoints once in RON.
+[`endpoint-gen`](https://github.com/pathscale/EndpointGen) generates the Rust models, the
+docs, the MCP tool schemas, and the machine-readable description that
+[`endpoint-validator`](https://crates.io/crates/endpoint-validator) drives end-to-end
+tests from. This crate is the runtime that serves them.
+
+Together they are a schema-first RPC pipeline: **`endpoint-gen` generates,
+`endpoint-libs` serves, `endpoint-validator` verifies** — one declarative source of truth
+behind all three.
 
 - **WebSocket RPC server** — `{method, seq, params}` frames over a persistent socket, with
   connection/session management, push and subscription infrastructure, and typed handlers.
