@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.1/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.1)
+[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.2/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.2)
 
 The runtime half of a schema-first RPC pipeline: you describe endpoints once in RON,
 [`endpoint-gen`](https://github.com/pathscale/EndpointGen) generates the Rust models, docs
@@ -25,6 +25,32 @@ and tool schemas, and this crate serves them.
 - **Transport-agnostic core (2.0)** — the WebSocket backend is one implementation of a
   transport seam. Length-delimited framing over Unix sockets, named pipes or inherited
   socketpairs is a feature flag away, with no TLS or HTTP compiled in.
+
+### How it compares
+
+What the pipeline does that the alternatives do not. "Codegen direction" is the row that
+matters most: everything in the OpenAPI column derives a spec *from* handwritten handlers,
+so it deletes no boilerplate.
+
+| | endpoint-libs + endpoint-gen | tonic | tarpc | jsonrpsee | utoipa / aide / dropshot |
+|---|---|---|---|---|---|
+| Codegen direction | **spec → code** | spec → code | none | none | code → spec |
+| One external file drives everything | **yes** (RON) | proto | no | no | no |
+| Generated typed handlers | **yes** | yes | via macro | via macro | no |
+| Generated docs | **yes** | no | no | no | **yes** |
+| **MCP tools generated** | **yes, built in** | no | no | no | via `rmcp-openapi` |
+| Roles / RBAC in the schema | **yes** | no | no | no | no |
+| Typed public error contract | **yes** | partial | no | no | no |
+| Describes a WS message protocol | **yes** (AsyncAPI) | n/a | n/a | partial | **no** |
+| Emits OpenAPI / AsyncAPI | **yes** (opt-in) | no | no | no | OpenAPI only |
+| Transport-agnostic core | yes (2.0) | no (h2) | **yes** | yes | no |
+| Ecosystem maturity | small (8.6k dl) | **338M** | 8.9M | 22.8M | **37M** (utoipa) |
+
+The last row is not a typo, and it is the honest counterweight to the rest of the table:
+this is a small crate. Every alternative has more users, more integrations and more
+answers written about it. Pick the rows that matter to you, not the count of bold cells.
+
+Full reasoning, sources and download figures: [`docs/comparison.md`](docs/comparison.md).
 
 ### When this is *not* the right crate
 
