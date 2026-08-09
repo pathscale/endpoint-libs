@@ -1,6 +1,6 @@
 [package]
 name = "endpoint-libs"
-version = "2.1.4"
+version = "2.1.5"
 edition = "2024"
 authors = ["Veon <dveonloch@protonmail.com>"]
 description = "Launch MCP services fast: describe endpoints once in RON, and endpoint-gen generates the Rust models, docs and MCP tool schemas that this crate serves over WebSocket RPC, with roles and typed errors built in."
