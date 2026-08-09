@@ -51,7 +51,7 @@ types = [
     "dep:opentelemetry-appender-tracing",
     "dep:tonic",
 ]
-wire-core = ["dep:async-trait"]
+wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
     # Shared WS infrastructure (WsMessage, server, session, traits, etc.)
     "wire-core",

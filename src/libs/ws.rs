@@ -12,6 +12,7 @@ pub mod hooks;
 mod listener;
 #[cfg(feature = "ws-core")]
 pub mod mcp;
+pub mod mcp_wire;
 mod message;
 #[cfg(feature = "ws-core")]
 mod push;
