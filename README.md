@@ -129,8 +129,8 @@ transport does not compile a TLS/WebSocket stack it never uses.
 The minimal built-in local wire surface for always-on application control. It enables
 `WireMessage`, `TransportStream`, and length-delimited `framed_json` without the endpoint
 server, WebSocket, HTTP, TLS, database, scheduler, or diagnostics layers. Agent-control
-messages use MCP-compatible JSON-RPC semantics; application-specific generated endpoints
-define the semantic inspect/action/lifecycle tools.
+messages use the built-in `mcp_wire` JSON-RPC envelopes; application-specific generated
+endpoints define the semantic inspect/action/lifecycle tools.
 
 ### `ws-client`
 
