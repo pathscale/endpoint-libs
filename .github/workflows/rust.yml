@@ -110,6 +110,4 @@ jobs:
           # quick-xml DoS advisories: the fix requires quick-xml >=0.41, but the
           # dev-dependency-only chain cert-provider -> rust-s3/aws-creds pins
           # ^0.38. Re-evaluate when upstream releases with a newer quick-xml.
-          # rkyv 0.7 is only an inactive optional dependency of rust_decimal;
-          # endpoint-libs does not enable rust_decimal's rkyv integration.
-          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195,RUSTSEC-2026-0235
+          ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195

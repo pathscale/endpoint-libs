@@ -125,7 +125,6 @@ bytes = "1.7"
 chrono = {version = "0.4.44", default-features = false, features = ["oldtime", "std", "now"]}
 urlencoding = "2.1"
 hex = "0.4"
-rust_decimal = { version = "1.42.1", default-features = false, features = ["serde", "std"] }
 tracing-appender = "0.2"
 serde_path_to_error = "0.1"
 alloy-primitives = { version = "1.3.0", features = [
