@@ -30,7 +30,8 @@ use crate::libs::ws::mcp::{McpServerInfo, McpState};
 use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
     AfterRequest, BeforeRequest, BoxedStream, ConnectionListener, Hooks, MessageStream, OnConnect,
-    SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest, WsUpgrader,
+    OnDisconnect, SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
+    WsUpgrader,
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
@@ -88,6 +89,13 @@ impl WebsocketServer {
         self.mcp = Some(Arc::new(state));
         Ok(())
     }
+
+    fn validate_protocol_mode(&self) -> Result<()> {
+        if self.config.mcp_only && self.mcp.is_none() {
+            bail!("mcp_only requires enable_mcp before serving connections");
+        }
+        Ok(())
+    }
     /// Register a hook that runs before every request, on both the legacy and MCP
     /// paths. Hooks run in registration order; the first error rejects the request.
     pub fn add_before_hook(&mut self, hook: impl BeforeRequest + 'static) {
@@ -103,6 +111,11 @@ impl WebsocketServer {
     /// refuses the connection.
     pub fn add_on_connect_hook(&mut self, hook: impl OnConnect + 'static) {
         self.hooks.on_connect.push(Arc::new(hook));
+    }
+
+    /// Register a hook that runs once when a connection's session loop ends.
+    pub fn add_on_disconnect_hook(&mut self, hook: impl OnDisconnect + 'static) {
+        self.hooks.on_disconnect.push(Arc::new(hook));
     }
 
     pub fn set_auth_controller(&mut self, controller: impl AuthController + 'static) {
@@ -309,6 +322,7 @@ impl WebsocketServer {
         let addr = conn.peer.display();
         let context = RequestContext::from_conn(&conn);
         let conn_id = context.connection_id;
+        let disconnect_hooks = self.hooks.clone();
 
         debug!(
             ws_server = true,
@@ -320,6 +334,9 @@ impl WebsocketServer {
         session.run().await;
 
         states.remove(context.connection_id);
+        disconnect_hooks
+            .run_on_disconnect(context.connection_id, &context.peer)
+            .await;
         info!(
             ws_server = true,
             ?addr,
@@ -340,6 +357,7 @@ impl WebsocketServer {
     where
         L: SessionListener + 'static,
     {
+        self.validate_protocol_mode()?;
         let this = Arc::new(self);
         let states = Arc::new(WebsocketStates::new());
         this.toolbox.set_ws_states(
@@ -369,6 +387,7 @@ impl WebsocketServer {
     }
 
     pub async fn listen(self) -> Result<()> {
+        self.validate_protocol_mode()?;
         debug!(ws_server = true, "Listening on {}", self.config.address);
 
         // Resolve the address and get the socket address
@@ -640,6 +659,9 @@ pub struct WsServerConfig {
     pub allow_cors_urls: Arc<Option<Vec<String>>>,
     #[serde(default = "WsServerConfig::default_server_name")]
     pub server_name: String,
+    /// Reject every non-JSON-RPC frame. Requires [`WebsocketServer::enable_mcp`].
+    #[serde(default)]
+    pub mcp_only: bool,
 }
 
 impl Default for WsServerConfig {
@@ -656,6 +678,7 @@ impl Default for WsServerConfig {
             header_only: false,
             allow_cors_urls: Arc::new(None),
             server_name: Self::default_server_name(),
+            mcp_only: false,
         }
     }
 }
@@ -677,5 +700,32 @@ fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
     #[cfg(not(feature = "ws"))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod protocol_mode_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_only_requires_the_mcp_router() {
+        let mut server = WebsocketServer::new(WsServerConfig {
+            mcp_only: true,
+            ..Default::default()
+        });
+        assert!(server.validate_protocol_mode().is_err());
+
+        server
+            .enable_mcp(
+                &TypeRegistry::new(),
+                McpServerInfo {
+                    name: "test".into(),
+                    version: "0".into(),
+                },
+            )
+            .expect("empty MCP surface should initialize");
+        server
+            .validate_protocol_mode()
+            .expect("MCP-only server should validate after enable_mcp");
     }
 }
