@@ -22,11 +22,6 @@ pub fn hex_decode(s: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// format decimal by specific significant figures
-pub fn decimal_sf(num: rust_decimal::Decimal, sig_figs: usize) -> rust_decimal::Decimal {
-    num.round_sf(sig_figs as _).unwrap()
-}
-
 /// Aligns the precision of one `f64` value to match another `f64` value.
 pub fn align_precision(a: f64, b: f64) -> f64 {
     let precision_b = count_dp(b);
