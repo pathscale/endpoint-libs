@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::toolbox::{CustomError, RequestContext};
+use crate::libs::ws::ConnectionId;
 use crate::model::EndpointSchema;
 
 /// How a request finished. Passed to [`AfterRequest`].
@@ -86,17 +87,27 @@ pub trait OnConnect: Send + Sync {
     ) -> Result<(), CustomError>;
 }
 
+/// Runs once after a connection's session loop ends.
+#[async_trait(?Send)]
+pub trait OnDisconnect: Send + Sync {
+    async fn on_disconnect(&self, connection_id: ConnectionId, peer: &PeerIdentity);
+}
+
 /// The registered hooks, snapshotted into each spawned dispatch task.
 #[derive(Clone, Default)]
 pub struct Hooks {
     pub(crate) before: Vec<Arc<dyn BeforeRequest>>,
     pub(crate) after: Vec<Arc<dyn AfterRequest>>,
     pub(crate) on_connect: Vec<Arc<dyn OnConnect>>,
+    pub(crate) on_disconnect: Vec<Arc<dyn OnDisconnect>>,
 }
 
 impl Hooks {
     pub fn is_empty(&self) -> bool {
-        self.before.is_empty() && self.after.is_empty() && self.on_connect.is_empty()
+        self.before.is_empty()
+            && self.after.is_empty()
+            && self.on_connect.is_empty()
+            && self.on_disconnect.is_empty()
     }
 
     /// Run every `BeforeRequest` in registration order, stopping at the first error.
@@ -135,6 +146,12 @@ impl Hooks {
         }
         Ok(())
     }
+
+    pub(crate) async fn run_on_disconnect(&self, connection_id: ConnectionId, peer: &PeerIdentity) {
+        for hook in &self.on_disconnect {
+            hook.on_disconnect(connection_id, peer).await;
+        }
+    }
 }
 
 impl std::fmt::Debug for Hooks {
@@ -143,6 +160,7 @@ impl std::fmt::Debug for Hooks {
             .field("before", &self.before.len())
             .field("after", &self.after.len())
             .field("on_connect", &self.on_connect.len())
+            .field("on_disconnect", &self.on_disconnect.len())
             .finish()
     }
 }

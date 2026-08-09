@@ -78,6 +78,21 @@ impl WsClientSession {
             }
         }
 
+        if self.server.config.mcp_only {
+            self.server.toolbox.send_raw(
+                context.connection_id,
+                jsonrpc_error(
+                    &None,
+                    JsonRpcError::new(
+                        mcp::INVALID_REQUEST,
+                        "This WebSocket accepts MCP JSON-RPC 2.0 frames only",
+                    ),
+                )
+                .to_string(),
+            );
+            return Ok(true);
+        }
+
         #[allow(unreachable_patterns)]
         let obj: Result<WsRequestValue, _> = match msg {
             Message::Text(t) => {

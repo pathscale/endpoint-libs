@@ -205,7 +205,9 @@ The WebSocket server can optionally expose every registered endpoint as an
 **MCP tool** over JSON-RPC 2.0, alongside the legacy `{method, seq, params}`
 protocol. MCP is **off by default** and fully additive: with it disabled the
 server behaves exactly as before, and even with it enabled, legacy frames are
-routed unchanged — both protocols work on the same connection.
+routed unchanged, so both protocols work on the same connection. Set
+`WsServerConfig::mcp_only` to `true` to reject non-MCP frames. MCP-only mode
+requires `enable_mcp` and fails validation at startup without it.
 
 Supported MCP methods: `initialize`, `ping`, `tools/list` (filtered by the
 connection's roles), `tools/call`, and `notifications/*`. Tool metadata
@@ -428,12 +430,15 @@ defines the vocabulary; the platform implementations live in a sibling crate.
 ### Hooks
 
 `BeforeRequest` (may reject and may attach claims to `ctx.extensions`), `AfterRequest`
-(observes outcomes), and `OnConnect` (refuses a peer once, rather than per request).
-All three run on both the legacy and MCP dispatch paths.
+(observes outcomes), `OnConnect` (refuses a peer once, rather than per request), and
+`OnDisconnect` (cleans up connection-owned work after the peer leaves). Request hooks
+run on both the legacy and MCP dispatch paths unless MCP-only mode rejects legacy
+frames first.
 
 ```rust
 server.add_before_hook(MyMissionTokenCheck);
 server.add_on_connect_hook(RefuseUnattestedPeers);
+server.add_on_disconnect_hook(CleanUpConnectionWork);
 ```
 
 > **Note:** `MessageStream`'s futures are not `Send`, so `serve_connection`,
