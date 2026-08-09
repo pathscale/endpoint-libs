@@ -124,6 +124,14 @@ no backend, no TLS and no HTTP. Everything the other `ws-*` features build on. `
 and `WsClient::from_stream` are available here too, so a sidecar speaking only a local
 transport does not compile a TLS/WebSocket stack it never uses.
 
+### `agent-control`
+
+The minimal built-in local wire surface for always-on application control. It enables
+`WireMessage`, `TransportStream`, and length-delimited `framed_json` without the endpoint
+server, WebSocket, HTTP, TLS, database, scheduler, or diagnostics layers. Agent-control
+messages use MCP-compatible JSON-RPC semantics; application-specific generated endpoints
+define the semantic inspect/action/lifecycle tools.
+
 ### `ws-client`
 
 The connecting half: `WsClient::new` (TCP/TLS), `WsClientBuilder` and the connect helpers.

@@ -1,12 +1,16 @@
 use std::fmt;
+#[cfg(feature = "ws-core")]
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+#[cfg(feature = "ws-core")]
 use crossfire::{AsyncRx, mpsc::Array};
+#[cfg(feature = "ws-core")]
 use eyre::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::WsMessage as Message;
+#[cfg(feature = "ws-core")]
 use super::WsServerConfig;
 
 /// Combined trait alias for a raw byte stream that can be used across thread boundaries.
@@ -63,6 +67,7 @@ pub use MessageStream as WsStream;
 
 /// An upgrade event yielded by the upgrader.
 /// Contains the on_upgrade future and the negotiated protocol.
+#[cfg(feature = "ws-core")]
 pub struct UpgradeEvent {
     /// Only present with a hyper-based backend (`ws` or `ws-client`), which is
     /// what provides the `hyper` dependency.
@@ -71,6 +76,7 @@ pub struct UpgradeEvent {
     pub protocol: String,
 }
 
+#[cfg(feature = "ws-core")]
 #[async_trait]
 pub trait WsUpgrader: Send + Sync {
     /// Returns a receiver that yields upgrade events.
