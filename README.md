@@ -105,6 +105,11 @@ What is actually enforced:
 
 The release order for the whole chain is in [`docs/release-order.md`](docs/release-order.md).
 
+Version 3 makes `WireMessage` payloads immutable and byte-backed so local framed
+transports and tungstenite WebSockets can hand buffers to the application without
+cloning them. The wire format is unchanged. See
+[`docs/3.0-migration.md`](docs/3.0-migration.md) for the source migration.
+
 ## Features
 
 The crate is feature-gated. The default feature set is `types` only.
@@ -122,7 +127,9 @@ Endpoint schema types shared between services and `endpoint-gen`:
 Shared WebSocket infrastructure — `WireMessage`, server, session, traits, toolbox — with
 no backend, no TLS and no HTTP. Everything the other `ws-*` features build on. `WsClient`
 and `WsClient::from_stream` are available here too, so a sidecar speaking only a local
-transport does not compile a TLS/WebSocket stack it never uses.
+transport does not compile a TLS/WebSocket stack it never uses. Text payloads use
+`Utf8Bytes`; binary and control payloads use `bytes::Bytes`. Both clone cheaply and expose
+borrowed string or byte slices without allocating.
 
 ### `agent-control`
 

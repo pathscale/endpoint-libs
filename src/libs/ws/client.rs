@@ -216,7 +216,7 @@ impl WsClient {
             params,
         })?;
         debug!("send req: {}", req);
-        self.stream_send(Message::Text(req)).await
+        self.stream_send(Message::Text(req.into())).await
     }
 
     /// Send a fully pre-serialized request message.
