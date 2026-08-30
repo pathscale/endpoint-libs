@@ -90,7 +90,9 @@ impl From<io::Error> for FramedError {
 }
 
 fn encode(msg: WireMessage) -> Bytes {
-    let mut buf = BytesMut::new();
+    let payload_len = msg.as_bytes().len();
+    let close_code_len = matches!(msg, WireMessage::Close(Some(_))) as usize * 2;
+    let mut buf = BytesMut::with_capacity(1 + close_code_len + payload_len);
     match msg {
         WireMessage::Text(text) => {
             buf.put_u8(KIND_TEXT);
@@ -124,14 +126,12 @@ fn decode(mut frame: BytesMut) -> Result<WireMessage, FramedError> {
         return Err(FramedError::EmptyFrame);
     }
     let kind = frame.get_u8();
-    let payload = frame;
+    let payload = frame.freeze();
     Ok(match kind {
-        KIND_TEXT => WireMessage::Text(
-            String::from_utf8(payload.to_vec()).map_err(|_| FramedError::InvalidUtf8)?,
-        ),
-        KIND_BINARY => WireMessage::Binary(payload.to_vec()),
-        KIND_PING => WireMessage::Ping(payload.to_vec()),
-        KIND_PONG => WireMessage::Pong(payload.to_vec()),
+        KIND_TEXT => WireMessage::Text(payload.try_into().map_err(|_| FramedError::InvalidUtf8)?),
+        KIND_BINARY => WireMessage::Binary(payload),
+        KIND_PING => WireMessage::Ping(payload),
+        KIND_PONG => WireMessage::Pong(payload),
         KIND_CLOSE => {
             if payload.is_empty() {
                 WireMessage::Close(None)
@@ -141,8 +141,9 @@ fn decode(mut frame: BytesMut) -> Result<WireMessage, FramedError> {
                 }
                 let mut payload = payload;
                 let code = payload.get_u16();
-                let reason =
-                    String::from_utf8(payload.to_vec()).map_err(|_| FramedError::MalformedClose)?;
+                let reason = payload
+                    .try_into()
+                    .map_err(|_| FramedError::MalformedClose)?;
                 WireMessage::Close(Some(CloseFrame { code, reason }))
             }
         }
@@ -265,11 +266,11 @@ mod tests {
     fn every_variant_round_trips_through_the_codec() {
         let cases = vec![
             WireMessage::Text("hello".into()),
-            WireMessage::Text(String::new()),
-            WireMessage::Binary(vec![0, 1, 2, 255]),
-            WireMessage::Binary(Vec::new()),
-            WireMessage::Ping(vec![9]),
-            WireMessage::Pong(Vec::new()),
+            WireMessage::Text(String::new().into()),
+            WireMessage::Binary(vec![0, 1, 2, 255].into()),
+            WireMessage::Binary(Vec::new().into()),
+            WireMessage::Ping(vec![9].into()),
+            WireMessage::Pong(Vec::new().into()),
             WireMessage::Close(None),
             WireMessage::Close(Some(CloseFrame {
                 code: 1001,
@@ -277,7 +278,7 @@ mod tests {
             })),
             WireMessage::Close(Some(CloseFrame {
                 code: 1000,
-                reason: String::new(),
+                reason: String::new().into(),
             })),
         ];
         for case in cases {
@@ -296,7 +297,7 @@ mod tests {
         // Close with code 1000 and no reason => kind 4, then u16 BE.
         let encoded = encode(WireMessage::Close(Some(CloseFrame {
             code: 1000,
-            reason: String::new(),
+            reason: String::new().into(),
         })));
         assert_eq!(&encoded[..], &[KIND_CLOSE, 0x03, 0xE8]);
     }
@@ -322,6 +323,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn decode_reuses_the_framed_payload_allocation() {
+        let frame = BytesMut::from(&[KIND_TEXT, b'h', b'e', b'l', b'l', b'o'][..]);
+        let payload_pointer = frame.as_ptr().wrapping_add(1);
+        let WireMessage::Text(text) = decode(frame).expect("decode") else {
+            panic!("text frame changed kind");
+        };
+
+        let text_bytes: &[u8] = text.as_ref();
+        assert_eq!(text_bytes, b"hello");
+        assert_eq!(text_bytes.as_ptr(), payload_pointer);
+    }
+
     #[tokio::test]
     async fn duplex_pipe_carries_messages_both_ways() {
         let (a, b) = tokio::io::duplex(64 * 1024);
@@ -332,9 +346,12 @@ mod tests {
         let got = right.next().await.unwrap().unwrap();
         assert_eq!(got, WireMessage::Text("ping".into()));
 
-        right.send(WireMessage::Binary(vec![7, 7])).await.unwrap();
+        right
+            .send(WireMessage::Binary(vec![7, 7].into()))
+            .await
+            .unwrap();
         let got = left.next().await.unwrap().unwrap();
-        assert_eq!(got, WireMessage::Binary(vec![7, 7]));
+        assert_eq!(got, WireMessage::Binary(vec![7, 7].into()));
     }
 
     #[tokio::test]
@@ -344,7 +361,7 @@ mod tests {
 
         // The limit is enforced on the way out too, so we never emit a frame a
         // conforming peer would have to reject.
-        let result = left.send(WireMessage::Binary(vec![0u8; 4096])).await;
+        let result = left.send(WireMessage::Binary(vec![0u8; 4096].into())).await;
         assert!(
             matches!(result, Err(FramedError::Io(_))),
             "expected the encoder to refuse an oversized frame, got {result:?}"
