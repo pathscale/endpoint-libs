@@ -47,7 +47,6 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     if log_level > LogLevel::Info && log_level != LogLevel::Detail {
         const DIRECTIVES: &[(Level, &str)] = &[
             (Level::DEBUG, "tungstenite::protocol"),
-            (Level::DEBUG, "tokio_postgres::connection"),
             (Level::DEBUG, "tokio_util::codec::framed_impl"),
             (Level::DEBUG, "tokio_tungstenite"),
             (Level::INFO, "h2"),

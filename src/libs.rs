@@ -24,9 +24,6 @@ pub use ws::toolbox;
 #[cfg(feature = "types")]
 pub mod config;
 #[deprecated]
-#[cfg(feature = "database")]
-pub mod database;
-#[deprecated]
 #[cfg(feature = "types")]
 pub mod datatable;
 #[deprecated]

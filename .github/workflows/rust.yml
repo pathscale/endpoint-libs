@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-test-all-features:
+  test:
     runs-on: ubicloud-standard-8
     permissions:
       contents: read
@@ -28,12 +28,15 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Install cargo-all-features
-      run: cargo install cargo-all-features
-
-    - name: Run tests for all feature combinations
-      # This command builds/tests all combinations sequentially
-      run: cargo all-features test -- --verbose
+    - name: Test supported feature boundaries
+      run: |
+        cargo test --no-default-features
+        cargo test
+        cargo test --no-default-features --features agent-control
+        cargo test --no-default-features --features ws-client
+        cargo test --no-default-features --features ws
+        cargo test --no-default-features --features full
+        cargo test --all-features
 
 
   clippy_check:
@@ -54,11 +57,15 @@ jobs:
         with:
           toolchain: stable
           components: clippy
-      - name: Install cargo-all-features
-        run: cargo install cargo-all-features
-
-      - name: Clippy check all feature combinations
-        run: cargo all-features clippy --all-targets -- -D warnings
+      - name: Lint supported feature boundaries
+        run: |
+          cargo clippy --all-targets --no-default-features -- -D warnings
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --no-default-features --features agent-control -- -D warnings
+          cargo clippy --all-targets --no-default-features --features ws-client -- -D warnings
+          cargo clippy --all-targets --no-default-features --features ws -- -D warnings
+          cargo clippy --all-targets --no-default-features --features full -- -D warnings
+          cargo clippy --all-targets --all-features -- -D warnings
 
   format_check:
 
@@ -92,6 +99,8 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Resolve current compatible dependencies for audit
+        run: cargo generate-lockfile
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

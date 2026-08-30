@@ -135,7 +135,7 @@ borrowed string or byte slices without allocating.
 
 The minimal built-in local wire surface for always-on application control. It enables
 `WireMessage`, `TransportStream`, and length-delimited `framed_json` without the endpoint
-server, WebSocket, HTTP, TLS, database, scheduler, or diagnostics layers. Agent-control
+server, WebSocket, HTTP, TLS, scheduler, or diagnostics layers. Agent-control
 messages use the built-in `mcp_wire` JSON-RPC envelopes; application-specific generated
 endpoints define the semantic inspect/action/lifecycle tools.
 
@@ -341,11 +341,6 @@ MCP tool schemas deliberately do **not** go through this path: `to_mcp_input_sch
 `to_mcp_output_schema` keep their own self-contained `$defs` so each tool schema stands
 alone, which consumers depend on. A test asserts that stays true.
 
-### `database`
-
-Pooled PostgreSQL access: `tokio-postgres` behind `deadpool`, a background data thread,
-and `postgres-from-row` mapping.
-
 ### `ws-http1` / `ws-tls12`
 
 Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HTTP/2;
@@ -357,7 +352,7 @@ Forwards to `cert-provider/s3-sync`, for certificate material synced from S3.
 
 ### `full`
 
-`types` + `ws` + `database` + `signal` + `scheduler` + `log_reader` +
+`types` + `ws` + `signal` + `scheduler` + `log_reader` +
 `error_aggregation` + `log_throttling` + `ws-http1` + `ws-tls12`. Convenience only, and it
 does **not** include `ws-client` or `framed-transport` — prefer naming what you use.
 
