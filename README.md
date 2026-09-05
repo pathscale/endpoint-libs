@@ -20,8 +20,13 @@ Together they are a schema-first RPC pipeline: **`endpoint-gen` generates,
 `endpoint-libs` serves, `endpoint-validator` verifies** — one declarative source of truth
 behind all three.
 
-- **WebSocket RPC server** — `{method, seq, params}` frames over a persistent socket, with
-  connection/session management, push and subscription infrastructure, and typed handlers.
+- **RPC server over any byte stream** — `{method, seq, params}` frames on a persistent
+  socket, with connection/session management, push and subscription infrastructure, and
+  typed handlers. WebSocket is one backend, not the only one: length-delimited framing over
+  **Unix sockets**, named pipes or inherited socketpairs is a feature flag away, with no TLS
+  or HTTP compiled in. For a local agent-control surface see
+  [`agent-control`](#agent-control) and [`framed-transport`](#framed-transport); the seam
+  itself is [Transports (2.0)](#transports-20).
 - **Roles and typed public errors** — endpoints declare which roles may call them; handlers
   return a typed error enum that becomes a stable public error contract.
 - **Every endpoint is an MCP tool, for free** — one `enable_mcp()` call exposes your whole
@@ -32,9 +37,6 @@ behind all three.
   [MCP support](#mcp-model-context-protocol-support).
 - **Schema model** — `Type`/`Field`/`EndpointSchema` plus `to_json_schema`, emitting JSON
   Schema 2020-12; the basis for MCP tool schemas and the OpenAPI/AsyncAPI documents.
-- **Transport-agnostic core (2.0)** — the WebSocket backend is one implementation of a
-  transport seam. Length-delimited framing over Unix sockets, named pipes or inherited
-  socketpairs is a feature flag away, with no TLS or HTTP compiled in.
 
 ### How it compares
 
