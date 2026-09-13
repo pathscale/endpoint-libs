@@ -96,11 +96,21 @@ impl WsClientSession {
         #[allow(unreachable_patterns)]
         let obj: Result<WsRequestValue, _> = match msg {
             Message::Text(t) => {
-                debug!(ws_server = true, ?addr, "Handling request {}", t);
+                debug!(
+                    ws_server = true,
+                    ?addr,
+                    bytes = t.len(),
+                    "Handling text request"
+                );
                 serde_json::from_str(&t)
             }
             Message::Binary(b) => {
-                debug!(ws_server = true, ?addr, "Handling request <BIN>");
+                debug!(
+                    ws_server = true,
+                    ?addr,
+                    bytes = b.len(),
+                    "Handling binary request"
+                );
                 serde_json::from_slice(&b)
             }
             Message::Ping(_) => {
@@ -114,7 +124,11 @@ impl WsClientSession {
                 return Ok(false);
             }
             _ => {
-                warn!(ws_server = true, ?addr, "Strange pattern {:?}", msg);
+                warn!(
+                    ws_server = true,
+                    ?addr,
+                    "Ignoring unsupported WebSocket frame"
+                );
                 return Ok(true);
             }
         };
@@ -137,6 +151,13 @@ impl WsClientSession {
                 return Ok(true);
             }
         };
+        debug!(
+            ws_server = true,
+            ?addr,
+            method = req.method,
+            seq = req.seq,
+            "Parsed WebSocket request"
+        );
         context.seq = req.seq;
         context.method = req.method;
         context.user_id = self.conn_info.get_user_id();

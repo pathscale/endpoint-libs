@@ -1,5 +1,10 @@
 /target
 Cargo.lock
+package-lock.json
+bun.lock
+bun.lockb
+pnpm-lock.yaml
+yarn.lock
 .vscode/settings.json
 node_modules/
 examples/ws-echo/target/

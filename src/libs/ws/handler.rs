@@ -197,8 +197,8 @@ impl<T: RequestHandler> RequestHandlerErased for T {
                 tracing::warn!(
                     ws_server = true,
                     conn_id = ctx.connection_id,
-                    "MCP request error: {:?}",
-                    err
+                    code = err.code.to_u32(),
+                    "MCP request rejected"
                 );
                 jsonrpc_result(&mcp.id, encode_tool_error(err.code, &err.params))
             }

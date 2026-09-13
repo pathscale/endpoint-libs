@@ -180,6 +180,13 @@ pub fn custom_error_to_resp(ctx: &RequestContext, err: CustomError) -> WsRespons
         log_id: ctx.log_id.to_string(),
         params: err.params,
     };
-    tracing::warn!(ws_server = true, "Request error: {:?}", resp);
+    tracing::warn!(
+        ws_server = true,
+        method = resp.method,
+        code = resp.code,
+        seq = resp.seq,
+        log_id = %resp.log_id,
+        "Request rejected"
+    );
     WsResponseValue::Error(resp)
 }
