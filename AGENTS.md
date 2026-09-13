@@ -5,7 +5,7 @@ the single source of truth for the rules: Codex, Cursor and Gemini CLI read `AGE
 natively, and Claude Code loads it through the `@AGENTS.md` import in
 [`CLAUDE.md`](CLAUDE.md). **Never fork these rules into a per-vendor file.**
 
-**Mixed Rust + JavaScript repository.** The JS side (`endpoint-libs-examples`, built with `npm`) is the primary surface; the Cargo workspace holds supporting Rust (e.g. integration tests).
+**Rust workspace.** The library, examples, and integration tests are built with Cargo.
 
 ## Invariants (don't break these)
 
@@ -17,17 +17,9 @@ natively, and Claude Code loads it through the `@AGENTS.md` import in
   `WsRequest`/`WsResponse` traits and must be published after it; the six backends
   bump both together. Getting it wrong puts two incompatible copies of endpoint-libs
   in a consumer's graph. See [`docs/release-order.md`](docs/release-order.md).
-- **`npm` is the package manager. Do not commit dependency lockfiles.** Use
-  `npm install --no-package-lock`, remove generated lockfiles before review, and
-  don't run bun/yarn/pnpm here.
-- **Two toolchains live here.** A change to one side does not imply the other still builds — check both before calling it done.
 - **Docs describe what is true now.** If you change behaviour, update the README and any affected doc in the same change.
 
 ## Build & run
-
-```bash
-npm install --no-package-lock
-```
 
 ```bash
 cargo build
