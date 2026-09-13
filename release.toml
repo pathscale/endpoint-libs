@@ -1,4 +1,4 @@
-allow-branch = ["main"]
+allow-branch = ["master"]
 sign-commit = false
 sign-tag = false
 push = false        # script handles push (tag message must be set first)

@@ -346,10 +346,6 @@ alone, which consumers depend on. A test asserts that stays true.
 Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HTTP/2;
 `ws-tls12` accepts TLS 1.2 in addition to 1.3. Default is HTTP/2 and TLS 1.3 only.
 
-### `s3-sync`
-
-Forwards to `cert-provider/s3-sync`, for certificate material synced from S3.
-
 ### `full`
 
 `types` + `ws` + `signal` + `scheduler` + `log_reader` +
