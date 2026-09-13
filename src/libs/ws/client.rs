@@ -215,7 +215,12 @@ impl WsClient {
             seq: self.seq,
             params,
         })?;
-        debug!("send req: {}", req);
+        debug!(
+            method,
+            seq = self.seq,
+            bytes = req.len(),
+            "sending WebSocket request"
+        );
         self.stream_send(Message::Text(req.into())).await
     }
 
@@ -232,9 +237,20 @@ impl WsClient {
             .ok_or(eyre!("Connection closed"))??;
         let text = match msg {
             Message::Text(text) => text,
-            other => bail!("Expected text message, got: {:?}", other),
+            other => {
+                #[allow(unreachable_patterns)]
+                let kind = match &other {
+                    Message::Text(_) => "text",
+                    Message::Binary(_) => "binary",
+                    Message::Ping(_) => "ping",
+                    Message::Pong(_) => "pong",
+                    Message::Close(_) => "close",
+                    _ => "unknown",
+                };
+                bail!("Expected text message, got {kind}")
+            }
         };
-        debug!("recv raw: {}", text);
+        debug!(bytes = text.len(), "received raw WebSocket response");
         let resp: serde_json::Value = serde_json::from_str(&text)?;
         Ok(resp)
     }
@@ -247,7 +263,7 @@ impl WsClient {
                 .ok_or(eyre!("Connection closed"))??;
             match msg {
                 Message::Text(text) => {
-                    debug!("recv resp: {}", text);
+                    debug!(bytes = text.len(), "received WebSocket response");
                     let resp: WsResponseGeneric<T> = serde_json::from_str(&text)?;
                     match resp {
                         WsResponseGeneric::Immediate(resp) if resp.seq == self.seq => {
@@ -488,7 +504,7 @@ async fn connect_h2(
         path,
     } = parse_ws_url(addr)?;
 
-    debug!(host, port, path, tls, "H2: resolving host");
+    debug!(host, port, tls, "H2: resolving host");
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
         .await
         .context("DNS resolution failed")?
@@ -576,7 +592,12 @@ where
 
     let scheme = if tls { "https" } else { "http" };
     let uri = format!("{}://{}{}", scheme, host, path);
-    debug!(uri, protocol_header, "H2: sending CONNECT upgrade request");
+    debug!(
+        host,
+        has_protocol_header = !protocol_header.is_empty(),
+        additional_header_count = headers.len(),
+        "H2: sending CONNECT upgrade request"
+    );
     let mut builder = hyper::Request::builder()
         .method(hyper::Method::CONNECT)
         .uri(&uri)

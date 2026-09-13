@@ -120,7 +120,7 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                 let is_options = req.method() == Method::OPTIONS;
                 debug!(
                     ws_server = true, ?addr,
-                    method = %req.method(), uri = %req.uri(),
+                    method = %req.method(),
                     version = ?req.version(), is_http2, is_options,
                     "WS handshake request received"
                 );
