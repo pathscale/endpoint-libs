@@ -513,27 +513,13 @@ A `load_config` utility parses a JSON config file, defaulting to `etc/config.jso
 
 ## Releasing
 
-Releases are managed with [`cargo-release`](https://github.com/crate-ci/cargo-release) and [`git-cliff`](https://github.com/orhun/git-cliff). Both must be installed:
+Put the `Cargo.toml` version bump in a pull request. After merge, the Rust
+workflow waits for tests, clippy, formatting, and the security audit, then runs
+`cargo publish` when the package version changed in that `master` update. The
+workflow uses the repository's `CARGO_REGISTRY_TOKEN` secret.
+
+To verify the package locally without publishing:
 
 ```sh
-cargo install cargo-release git-cliff
-```
-
-To cut a release:
-
-```sh
-./scripts/release.sh [--skip-bump] <patch|minor|major>
-```
-
-The script will:
-1. Run `cargo release --execute <level>` — bumps the version in `Cargo.toml`, updates the deps.rs badge in this README, regenerates `CHANGELOG.md`, and commits everything as `chore(release): vX.Y.Z`.
-2. Open your `$EDITOR` with the auto-generated tag notes (from `git-cliff`) for review.
-3. Create an annotated tag using the edited notes as the tag body (shown as GitHub Release notes).
-4. Push the commit and tag.
-5. Prompt whether to publish to crates.io.
-
-To preview what `cargo-release` would do without making changes:
-
-```sh
-cargo release patch  # omit --execute for a dry run
+cargo publish --dry-run
 ```
