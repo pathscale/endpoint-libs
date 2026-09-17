@@ -191,6 +191,10 @@ tonic = { version = "0.14", optional = true }
 [dev-dependencies]
 tempfile = "3.19"
 tokio = { version = "1.39", features = ["full", "test-util"] }
+# `compat` only, and only for tests: it adapts a tokio duplex into the
+# `futures-io` pair the neutral transport takes, which is what lets one test
+# drive both framing paths and compare the bytes they produce.
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
 tracing-throttle = { version = "0.4", features = ["async", "test-helpers"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 rcgen = "0.14"

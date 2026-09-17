@@ -30,8 +30,11 @@
 //! value, so the serde codec layer would buy nothing.
 
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use futures::io::{AsyncRead as FuturesRead, AsyncWrite as FuturesWrite};
 use futures::{Sink, Stream};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -257,6 +260,228 @@ where
     }
 }
 
+/// Length-delimited framing over a `futures-io` byte stream.
+///
+/// The same wire format as [`framed_json`], carried over
+/// [`futures::io::AsyncRead`]/[`AsyncWrite`] rather than tokio's. That trait pair is
+/// the neutral one: tokio adapts to it through `tokio-util`'s `Compat`, and Nagoya
+/// adapts to it through `nagoya::io::Compat`, so a runtime-agnostic caller has a
+/// path that does not name a runtime.
+///
+/// `encode` and `decode` are shared with the tokio path, so the bytes on the wire
+/// are identical by construction rather than by agreement.
+pub fn framed_json_neutral<S>(
+    io: S,
+) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
+where
+    S: FuturesRead + FuturesWrite + Unpin + Send + 'static,
+{
+    framed_json_neutral_with_max_frame(io, DEFAULT_MAX_FRAME_BYTES)
+}
+
+/// [`framed_json_neutral`] with an explicit maximum frame length.
+pub fn framed_json_neutral_with_max_frame<S>(
+    io: S,
+    max_frame_bytes: usize,
+) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
+where
+    S: FuturesRead + FuturesWrite + Unpin + Send + 'static,
+{
+    NeutralFramed {
+        io,
+        max_frame_bytes,
+        read_buf: BytesMut::new(),
+        write_buf: BytesMut::new(),
+        read_eof: false,
+    }
+}
+
+/// The `futures-io` counterpart of [`WireFramed`].
+///
+/// `tokio_util`'s `Framed` is what the tokio path gets for free; there is no
+/// equivalent in `futures-util`, so the buffering is here. It is the same two
+/// buffers `Framed` keeps: one accumulating what has been read but not yet framed,
+/// one holding what has been encoded but not yet written.
+struct NeutralFramed<S> {
+    io: S,
+    max_frame_bytes: usize,
+    read_buf: BytesMut,
+    write_buf: BytesMut,
+    read_eof: bool,
+}
+
+/// How much to ask the reader for at once when the buffer needs filling.
+const READ_CHUNK_BYTES: usize = 8 * 1024;
+
+/// The length prefix itself: `u32` big-endian.
+const LENGTH_PREFIX_BYTES: usize = 4;
+
+impl<S> NeutralFramed<S> {
+    /// Take one whole frame out of `read_buf`, if one is there.
+    ///
+    /// `Ok(None)` means "not yet", which is the ordinary case and not an error.
+    /// An oversized length is refused **before** the body is buffered, which is the
+    /// property that keeps a hostile peer from naming 4 GiB and being believed.
+    fn take_frame(&mut self) -> Result<Option<BytesMut>, FramedError> {
+        if self.read_buf.len() < LENGTH_PREFIX_BYTES {
+            return Ok(None);
+        }
+
+        let mut prefix = [0u8; LENGTH_PREFIX_BYTES];
+        prefix.copy_from_slice(&self.read_buf[..LENGTH_PREFIX_BYTES]);
+        let frame_len = u32::from_be_bytes(prefix) as usize;
+
+        if frame_len > self.max_frame_bytes {
+            return Err(FramedError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "frame of {frame_len} bytes exceeds the {} byte maximum",
+                    self.max_frame_bytes
+                ),
+            )));
+        }
+
+        if self.read_buf.len() < LENGTH_PREFIX_BYTES + frame_len {
+            return Ok(None);
+        }
+
+        self.read_buf.advance(LENGTH_PREFIX_BYTES);
+        Ok(Some(self.read_buf.split_to(frame_len)))
+    }
+}
+
+impl<S> Stream for NeutralFramed<S>
+where
+    S: FuturesRead + FuturesWrite + Unpin,
+{
+    type Item = Result<WireMessage, FramedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        loop {
+            match this.take_frame() {
+                Err(err) => return Poll::Ready(Some(Err(err))),
+                Ok(Some(frame)) => return Poll::Ready(Some(decode(frame))),
+                Ok(None) => {}
+            }
+
+            // A frame was still arriving when the stream ended. That is a truncated
+            // frame and an error, not a clean close: a clean close lands on a frame
+            // boundary with nothing buffered.
+            if this.read_eof {
+                return if this.read_buf.is_empty() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Ready(Some(Err(FramedError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the stream ended in the middle of a frame",
+                    )))))
+                };
+            }
+
+            let before = this.read_buf.len();
+            this.read_buf.resize(before + READ_CHUNK_BYTES, 0);
+            let result = Pin::new(&mut this.io).poll_read(cx, &mut this.read_buf[before..]);
+
+            match result {
+                Poll::Ready(Ok(0)) => {
+                    this.read_buf.truncate(before);
+                    this.read_eof = true;
+                }
+                Poll::Ready(Ok(read)) => this.read_buf.truncate(before + read),
+                Poll::Ready(Err(err)) => {
+                    this.read_buf.truncate(before);
+                    return Poll::Ready(Some(Err(FramedError::Io(err))));
+                }
+                Poll::Pending => {
+                    this.read_buf.truncate(before);
+                    return Poll::Pending;
+                }
+            }
+        }
+    }
+}
+
+impl<S> Sink<WireMessage> for NeutralFramed<S>
+where
+    S: FuturesRead + FuturesWrite + Unpin,
+{
+    type Error = FramedError;
+
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Bound the outbound buffer the way `Framed` does: once a backlog has built
+        // up, make the caller wait for it to drain rather than accepting without
+        // limit. Below the threshold this is free.
+        let this = self.get_mut();
+        if this.write_buf.len() >= this.max_frame_bytes {
+            Pin::new(&mut *this).poll_flush(cx)
+        } else {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: WireMessage) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+        let payload = encode(item);
+
+        if payload.len() > this.max_frame_bytes {
+            return Err(FramedError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "frame of {} bytes exceeds the {} byte maximum",
+                    payload.len(),
+                    this.max_frame_bytes
+                ),
+            )));
+        }
+
+        this.write_buf.reserve(LENGTH_PREFIX_BYTES + payload.len());
+        this.write_buf
+            .put_u32(u32::try_from(payload.len()).map_err(|_| {
+                FramedError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "frame length does not fit in u32",
+                ))
+            })?);
+        this.write_buf.put_slice(&payload);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+
+        while !this.write_buf.is_empty() {
+            match Pin::new(&mut this.io).poll_write(cx, &this.write_buf) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(FramedError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the stream accepted no bytes",
+                    ))));
+                }
+                Poll::Ready(Ok(written)) => this.write_buf.advance(written),
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(FramedError::Io(err))),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        Pin::new(&mut this.io)
+            .poll_flush(cx)
+            .map_err(FramedError::Io)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self.as_mut().poll_flush(cx) {
+            Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        let this = self.get_mut();
+        Pin::new(&mut this.io)
+            .poll_close(cx)
+            .map_err(FramedError::Io)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +612,140 @@ mod tests {
             matches!(got, Some(Err(FramedError::Io(_)))),
             "expected an io error for an oversized declared length, got {got:?}"
         );
+    }
+    /// The neutral path must put the same bytes on the wire as the tokio path.
+    /// Not "equivalent": identical, because the format is normative for non-Rust
+    /// peers and there are now two implementations that could drift.
+    #[tokio::test]
+    async fn the_neutral_path_writes_the_same_bytes_as_the_tokio_path() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let cases = vec![
+            WireMessage::Text("hello".into()),
+            WireMessage::Binary(vec![0, 1, 2, 255].into()),
+            WireMessage::Ping(vec![9].into()),
+            WireMessage::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "bye".into(),
+            })),
+        ];
+
+        for case in cases {
+            let (mut tokio_sink, tokio_reader) = tokio::io::duplex(4096);
+            let mut tokio_framed = framed_json(tokio_reader);
+            tokio_framed.send(case.clone()).await.expect("tokio send");
+            let mut tokio_bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_buf(&mut tokio_sink, &mut tokio_bytes)
+                .await
+                .expect("tokio read");
+
+            let (mut neutral_sink, neutral_reader) = tokio::io::duplex(4096);
+            let mut neutral_framed = framed_json_neutral(neutral_reader.compat());
+            neutral_framed
+                .send(case.clone())
+                .await
+                .expect("neutral send");
+            let mut neutral_bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_buf(&mut neutral_sink, &mut neutral_bytes)
+                .await
+                .expect("neutral read");
+
+            assert_eq!(
+                tokio_bytes, neutral_bytes,
+                "the two framing paths disagree on the wire format for {case:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_neutral_path_carries_messages_both_ways() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = framed_json_neutral(client.compat());
+        let mut server = framed_json_neutral(server.compat());
+
+        let sent = WireMessage::Text("ping".into());
+        client.send(sent.clone()).await.expect("send");
+        let got = server.next().await.expect("a frame").expect("decode");
+        assert_eq!(sent, got);
+
+        let back = WireMessage::Binary(vec![7, 7, 7].into());
+        server.send(back.clone()).await.expect("send back");
+        let got = client.next().await.expect("a frame").expect("decode");
+        assert_eq!(back, got);
+    }
+
+    /// A length prefix naming more than the maximum is refused before the body is
+    /// buffered. Believing it is how a peer asks for an allocation it never sends.
+    #[tokio::test]
+    async fn the_neutral_path_rejects_an_oversized_length_prefix() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let mut framed = framed_json_neutral_with_max_frame(reader.compat(), 64);
+
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &u32::MAX.to_be_bytes())
+            .await
+            .expect("write prefix");
+
+        let err = framed
+            .next()
+            .await
+            .expect("a result")
+            .expect_err("must refuse");
+        assert!(
+            matches!(err, FramedError::Io(_)),
+            "expected an io error, got {err:?}"
+        );
+    }
+
+    /// A stream that ends mid-frame is truncation, not a clean close. A clean close
+    /// lands on a frame boundary with nothing buffered.
+    #[tokio::test]
+    async fn the_neutral_path_reports_a_truncated_frame() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let mut framed = framed_json_neutral(reader.compat());
+
+        // Promise ten bytes, send three, then hang up.
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &10u32.to_be_bytes())
+            .await
+            .expect("write prefix");
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &[KIND_TEXT, b'h', b'i'])
+            .await
+            .expect("write partial body");
+        drop(writer);
+
+        let err = framed
+            .next()
+            .await
+            .expect("a result")
+            .expect_err("must refuse");
+        assert!(
+            matches!(err, FramedError::Io(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got {err:?}"
+        );
+    }
+
+    /// A clean close after a whole frame ends the stream rather than erroring.
+    #[tokio::test]
+    async fn the_neutral_path_ends_cleanly_on_a_frame_boundary() {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let (writer, reader) = tokio::io::duplex(4096);
+        let mut sender = framed_json_neutral(writer.compat());
+        let mut framed = framed_json_neutral(reader.compat());
+
+        sender
+            .send(WireMessage::Text("only".into()))
+            .await
+            .expect("send");
+        sender.close().await.expect("close");
+
+        let got = framed.next().await.expect("a frame").expect("decode");
+        assert_eq!(WireMessage::Text("only".into()), got);
+        assert!(framed.next().await.is_none(), "expected a clean end");
     }
 }
