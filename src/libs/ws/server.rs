@@ -230,8 +230,9 @@ impl WebsocketServer {
     /// time — the WebSocket subprotocol string today, a handed-over token for local
     /// transports. It is passed to [`AuthController::auth`] unchanged.
     ///
-    /// Must be called inside a `tokio::task::LocalSet`: [`MessageStream`]'s futures
-    /// are not `Send`.
+    /// [`MessageStream`]'s futures are not `Send`, so this must be polled on
+    /// the thread that owns the stream. [`Self::serve_with`] does that by
+    /// driving connections with `FuturesUnordered` rather than `spawn_local`.
     pub async fn serve_connection(
         self: Arc<Self>,
         peer: PeerIdentity,
@@ -351,12 +352,17 @@ impl WebsocketServer {
     /// runs on a single runtime — the shard-per-core model is a property of the TCP
     /// path and buys nothing for a 1:1 sidecar channel.
     ///
-    /// Must be called inside a `tokio::task::LocalSet` (see
-    /// [`Self::serve_connection`]).
+    /// Connections are polled in place with `FuturesUnordered`. That is the
+    /// same one-thread model `spawn_local` had, without tying the method to a
+    /// tokio `LocalSet`, so a nagoya reactor can drive it.
     pub async fn serve_with<L>(self, listener: L) -> Result<()>
     where
         L: SessionListener + 'static,
     {
+        use futures::StreamExt;
+        use futures::future::FutureExt;
+        use futures::stream::FuturesUnordered;
+
         self.validate_protocol_mode()?;
         let this = Arc::new(self);
         let states = Arc::new(WebsocketStates::new());
@@ -366,8 +372,19 @@ impl WebsocketServer {
             this.config.drop_conn_on_buffer_full,
         );
 
+        let mut connections = FuturesUnordered::new();
         loop {
-            let (stream, peer) = match listener.accept().await {
+            let accepted = if connections.is_empty() {
+                listener.accept().await
+            } else {
+                let accept = listener.accept();
+                futures::pin_mut!(accept);
+                match futures::future::select(accept, connections.next()).await {
+                    futures::future::Either::Left((accepted, _)) => accepted,
+                    futures::future::Either::Right(_) => continue,
+                }
+            };
+            let (stream, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(err) => {
                     error!(ws_server = true, error = %err, "listener accept failed; stopping");
@@ -378,11 +395,14 @@ impl WebsocketServer {
 
             let this = Arc::clone(&this);
             let states = Arc::clone(&states);
-            tokio::task::spawn_local(async move {
-                // Local transports carry credentials out of band (an inherited fd is
-                // already a capability), so there is no subprotocol string to pass.
-                this.serve_connection(peer, states, stream, None).await;
-            });
+            connections.push(
+                async move {
+                    // Local transports carry credentials out of band (an inherited fd is
+                    // already a capability), so there is no subprotocol string to pass.
+                    this.serve_connection(peer, states, stream, None).await;
+                }
+                .boxed_local(),
+            );
         }
     }
 
