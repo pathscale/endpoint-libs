@@ -265,8 +265,8 @@ where
 /// The same wire format as [`framed_json`], carried over
 /// [`futures::io::AsyncRead`]/[`AsyncWrite`] rather than tokio's. That trait pair is
 /// the neutral one: tokio adapts to it through `tokio-util`'s `Compat`, and Nagoya
-/// adapts to it through `nagoya::io::Compat`, so a runtime-agnostic caller has a
-/// path that does not name a runtime.
+/// through [`NagoyaStream`](super::nagoya::NagoyaStream) behind the `nagoya-transport`
+/// feature, so a runtime-agnostic caller has a path that does not name a runtime.
 ///
 /// `encode` and `decode` are shared with the tokio path, so the bytes on the wire
 /// are identical by construction rather than by agreement.

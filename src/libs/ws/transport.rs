@@ -89,5 +89,11 @@ where
 #[cfg(feature = "framed-transport")]
 pub mod framed;
 
+#[cfg(feature = "nagoya-transport")]
+pub mod nagoya;
+
 #[cfg(feature = "framed-transport")]
 pub use framed::{FramedError, framed_json};
+
+#[cfg(feature = "nagoya-transport")]
+pub use nagoya::NagoyaStream;

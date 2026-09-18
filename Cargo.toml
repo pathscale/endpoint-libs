@@ -67,6 +67,13 @@ framed-transport = [
     "wire-core",
     "dep:tokio-util",
 ]
+nagoya-transport = [
+    # `framed_json_neutral` over a Nagoya socket. Off by default and additive: a
+    # consumer that does not run Nagoya never compiles it, and the tokio path is
+    # untouched either way.
+    "framed-transport",
+    "dep:nagoya",
+]
 agent-control = ["framed-transport"]
 ws-client = [
     # WS client (WsClient, WsClientBuilder) - standalone
@@ -155,6 +162,11 @@ tokio-rustls = { version = "0.26", optional = true, default-features = false, fe
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "std"] }
 tokio = { version = "1.39", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
+# The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
+# `nagoya::reactor` does not exist and the error reads like a missing module.
+# 0.1.9 is the published release that already speaks AF_UNIX and carries `TaskSet`,
+# so this resolves from the registry with no path dependency and no sibling checkout.
+nagoya = { version = "0.1.9", default-features = false, features = ["reactor"], optional = true }
 tokio-cron-scheduler = { version = "0.11", optional = true }
 parking_lot = { version = "0.12", optional = true }
 dashmap = { version = "6.0", optional = true }
