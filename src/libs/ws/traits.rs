@@ -55,8 +55,9 @@ impl std::error::Error for StreamError {
 /// [`TransportStream`](super::TransportStream).
 ///
 /// Note `?Send`: implementations' futures need not be `Send`. `serve_with`
-/// and the session loop poll them in place on one thread. The TCP `listen`
-/// path still uses `spawn_local` and a `LocalSet`.
+/// and the session loop poll them in place on one thread. TCP `listen` polls
+/// connections the same way; a `LocalSet` remains only for the hyper
+/// upgrader's `spawn_local`.
 #[async_trait(?Send)]
 pub trait MessageStream: Unpin + Send {
     async fn send(&mut self, msg: Message) -> Result<(), StreamError>;

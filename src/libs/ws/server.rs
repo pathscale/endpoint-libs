@@ -171,31 +171,58 @@ impl WebsocketServer {
             .upgrade_stream(stream, addr, &self.config, &cached_date)
             .await?;
 
-        // Loop: spawn session task for each upgrade event
-        while let Ok(event) = rx.recv().await {
+        use futures::StreamExt;
+        use futures::future::FutureExt;
+        use futures::stream::FuturesUnordered;
+
+        // Poll sessions in place, the same one-thread model `serve_with` uses.
+        // The hyper upgrader still `spawn_local`s (TokioExecutor); that is why
+        // `run_shard` keeps a LocalSet. nago-wss is the replacement, not this loop.
+        let mut sessions = FuturesUnordered::new();
+        loop {
+            let event = if sessions.is_empty() {
+                match rx.recv().await {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            } else {
+                let recv = rx.recv();
+                futures::pin_mut!(recv);
+                match futures::future::select(recv, sessions.next()).await {
+                    futures::future::Either::Left((Ok(event), _)) => event,
+                    futures::future::Either::Left((Err(_), _)) => {
+                        while sessions.next().await.is_some() {}
+                        break;
+                    }
+                    futures::future::Either::Right(_) => continue,
+                }
+            };
+
             let this = Arc::clone(&self);
             let states = Arc::clone(&states);
             let addr_clone = addr;
+            sessions.push(
+                async move {
+                    let ws_stream = match create_ws_stream(event.on_upgrade).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            error!(ws_server = true, ?addr_clone, "on_upgrade failed: {e}");
+                            return;
+                        }
+                    };
 
-            tokio::task::spawn_local(async move {
-                let ws_stream = match create_ws_stream(event.on_upgrade).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(ws_server = true, ?addr_clone, "on_upgrade failed: {e}");
-                        return;
-                    }
-                };
+                    debug!(
+                        ws_server = true,
+                        ?addr_clone,
+                        protocol = %event.protocol,
+                        "WsServer: upgrade succeeded, protocol received"
+                    );
 
-                debug!(
-                    ws_server = true,
-                    ?addr_clone,
-                    protocol = %event.protocol,
-                    "WsServer: upgrade succeeded, protocol received"
-                );
-
-                this.post_upgrade_connection(addr_clone, states, ws_stream, event.protocol)
-                    .await;
-            });
+                    this.post_upgrade_connection(addr_clone, states, ws_stream, event.protocol)
+                        .await;
+                }
+                .boxed_local(),
+            );
         }
 
         debug!(
@@ -354,7 +381,9 @@ impl WebsocketServer {
     ///
     /// Connections are polled in place with `FuturesUnordered`. That is the
     /// same one-thread model `spawn_local` had, without tying the method to a
-    /// tokio `LocalSet`, so a nagoya reactor can drive it.
+    /// tokio `LocalSet`, so a nagoya reactor can drive it. TCP `listen` now
+    /// polls its connections the same way; it still needs a `LocalSet` for the
+    /// hyper upgrader.
     pub async fn serve_with<L>(self, listener: L) -> Result<()>
     where
         L: SessionListener + 'static,
@@ -515,43 +544,68 @@ impl WebsocketServer {
             .enable_all()
             .build()
             .expect("Failed to build shard runtime");
+        // LocalSet remains only because the hyper upgrader `spawn_local`s onto
+        // TokioExecutor. Connection tasks themselves are polled in place.
         let local_set = LocalSet::new();
         rt.block_on(local_set.run_until(async move {
+            use futures::StreamExt;
+            use futures::future::FutureExt;
+            use futures::stream::FuturesUnordered;
+
+            let mut connections = FuturesUnordered::new();
             loop {
-                let Some((stream, addr)) = rx.recv().await else {
+                let received = if connections.is_empty() {
+                    rx.recv().await
+                } else {
+                    let recv = rx.recv();
+                    futures::pin_mut!(recv);
+                    match futures::future::select(recv, connections.next()).await {
+                        futures::future::Either::Left((received, _)) => received,
+                        futures::future::Either::Right(_) => continue,
+                    }
+                };
+                let Some((stream, addr)) = received else {
+                    while connections.next().await.is_some() {}
                     break;
                 };
                 let this = Arc::clone(&this);
                 let states = Arc::clone(&states);
                 let listener = Arc::clone(&listener);
-                tokio::task::spawn_local(async move {
-                    let stream = match listener.handshake(stream).await {
-                        Ok(channel) => {
-                            debug!(ws_server = true, "Accepted stream from {}", addr);
-                            channel
-                        }
-                        Err(err) => {
+                connections.push(
+                    async move {
+                        let stream = match listener.handshake(stream).await {
+                            Ok(channel) => {
+                                debug!(ws_server = true, "Accepted stream from {}", addr);
+                                channel
+                            }
+                            Err(err) => {
+                                error!(
+                                    ws_server = true,
+                                    "Error while handshaking stream: {:?}", err
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(err) = TOOLBOX
+                            .scope(
+                                this.toolbox.clone(),
+                                this.handle_ws_handshake_and_connection(
+                                    addr,
+                                    states,
+                                    Box::new(stream),
+                                ),
+                            )
+                            .await
+                        {
                             error!(
                                 ws_server = true,
-                                "Error while handshaking stream: {:?}", err
+                                ?addr,
+                                "Failed to handle WS connection: {err}"
                             );
-                            return;
                         }
-                    };
-                    if let Err(err) = TOOLBOX
-                        .scope(
-                            this.toolbox.clone(),
-                            this.handle_ws_handshake_and_connection(addr, states, Box::new(stream)),
-                        )
-                        .await
-                    {
-                        error!(
-                            ws_server = true,
-                            ?addr,
-                            "Failed to handle WS connection: {err}"
-                        );
                     }
-                });
+                    .boxed_local(),
+                );
             }
         }));
     }
