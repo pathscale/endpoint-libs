@@ -20,9 +20,10 @@
 //!
 //! [`MessageStream`] is `#[async_trait(?Send)]` — its futures are **not** `Send`.
 //! `serve_connection` / `serve_with` poll the session and its request handlers
-//! in place on one thread, so they do not need a `LocalSet`. The TCP `listen`
-//! path still `spawn_local`s and does. This is not an oversight; it is what lets
-//! handlers hold non-`Send` state across await points.
+//! in place on one thread, so they do not need a `LocalSet`. TCP `listen` now
+//! polls connections the same way. A `LocalSet` remains only because the hyper
+//! upgrader `spawn_local`s onto `TokioExecutor`; nago-wss is the tokio-free
+//! replacement for that backend, and is not wired here yet.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
