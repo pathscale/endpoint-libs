@@ -1,8 +1,22 @@
 use eyre::Result;
+use futures::StreamExt;
+use futures::future::{FutureExt, LocalBoxFuture};
+use futures::stream::FuturesUnordered;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::*;
+
+/// What the session loop does after one inbound frame.
+///
+/// Handler bodies are polled in place on this task (`Task`) so a slow hook
+/// cannot stall the read loop, without `spawn_local` and the LocalSet it
+/// needs. `serve_with` already drives connections the same way.
+enum Dispatch {
+    Close,
+    Keep,
+    Task(LocalBoxFuture<'static, ()>),
+}
 
 use crate::libs::ws::WsMessage as Message;
 
@@ -58,7 +72,7 @@ impl WsClientSession {
         }
     }
 
-    fn handle_message(&mut self, msg: Message) -> Result<bool> {
+    fn handle_message(&mut self, msg: Message) -> Result<Dispatch> {
         let addr = self.conn_info.peer.display();
         let mut context = RequestContext::from_conn(&self.conn_info);
 
@@ -73,8 +87,10 @@ impl WsClientSession {
             };
             if let Some(frame) = payload.and_then(mcp::try_parse_jsonrpc) {
                 let mcp = Arc::clone(mcp);
-                self.handle_mcp_frame(mcp, frame, context);
-                return Ok(true);
+                if let Some(task) = self.handle_mcp_frame(mcp, frame, context) {
+                    return Ok(Dispatch::Task(task));
+                }
+                return Ok(Dispatch::Keep);
             }
         }
 
@@ -90,7 +106,7 @@ impl WsClientSession {
                 )
                 .to_string(),
             );
-            return Ok(true);
+            return Ok(Dispatch::Keep);
         }
 
         #[allow(unreachable_patterns)]
@@ -114,14 +130,14 @@ impl WsClientSession {
                 serde_json::from_slice(&b)
             }
             Message::Ping(_) => {
-                return Ok(true);
+                return Ok(Dispatch::Keep);
             }
             Message::Pong(_) => {
-                return Ok(true);
+                return Ok(Dispatch::Keep);
             }
             Message::Close(_) => {
                 debug!(ws_server = true, ?addr, "Receive side terminated");
-                return Ok(false);
+                return Ok(Dispatch::Close);
             }
             _ => {
                 warn!(
@@ -129,7 +145,7 @@ impl WsClientSession {
                     ?addr,
                     "Ignoring unsupported WebSocket frame"
                 );
-                return Ok(true);
+                return Ok(Dispatch::Keep);
             }
         };
         let req = match obj {
@@ -148,7 +164,7 @@ impl WsClientSession {
                         }),
                     }),
                 );
-                return Ok(true);
+                return Ok(Dispatch::Keep);
             }
         };
         debug!(
@@ -177,7 +193,7 @@ impl WsClientSession {
                     }),
                 }),
             );
-            return Ok(true);
+            return Ok(Dispatch::Keep);
         };
 
         if !check_roles(&context.roles, &endpoint.allowed_roles) {
@@ -194,51 +210,52 @@ impl WsClientSession {
                     }),
                 }),
             );
-            return Ok(true);
+            return Ok(Dispatch::Keep);
         }
 
         let handler = endpoint.handler.clone();
         let toolbox = self.server.toolbox.clone();
         let hooks = self.server.hooks.clone();
         let schema = endpoint.schema.clone();
-        tokio::task::spawn_local(async move {
-            let mut context = context;
-            // Hooks run inside the spawned task so a slow hook cannot stall the
-            // session loop, and after check_roles so they only see calls that were
-            // already allowed to reach this endpoint.
-            if let Err(custom) = hooks.run_before(&mut context, &schema, &req.params).await {
-                let code = custom.code.to_u32();
-                toolbox.send(
-                    context.connection_id,
-                    WsResponseValue::Error(WsResponseError {
-                        method: context.method,
-                        code,
-                        seq: context.seq,
-                        log_id: context.log_id.to_string(),
-                        params: custom.params.clone(),
-                    }),
-                );
-                hooks
-                    .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+        Ok(Dispatch::Task(
+            async move {
+                let mut context = context;
+                // Polled alongside the session read loop so a slow hook cannot
+                // stall it, and after check_roles so they only see calls that
+                // were already allowed to reach this endpoint.
+                if let Err(custom) = hooks.run_before(&mut context, &schema, &req.params).await {
+                    let code = custom.code.to_u32();
+                    toolbox.send(
+                        context.connection_id,
+                        WsResponseValue::Error(WsResponseError {
+                            method: context.method,
+                            code,
+                            seq: context.seq,
+                            log_id: context.log_id.to_string(),
+                            params: custom.params.clone(),
+                        }),
+                    );
+                    hooks
+                        .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                        .await;
+                    return;
+                }
+
+                TOOLBOX
+                    .scope(
+                        toolbox.clone(),
+                        handler.handle(&toolbox, context.clone(), req.params),
+                    )
                     .await;
-                return;
+
+                // The erased handler reports its own outcome through the toolbox, so
+                // AfterRequest observes completion rather than the specific result here.
+                hooks
+                    .run_after(&context, &schema, &RequestOutcome::Ok)
+                    .await;
             }
-
-            TOOLBOX
-                .scope(
-                    toolbox.clone(),
-                    handler.handle(&toolbox, context.clone(), req.params),
-                )
-                .await;
-
-            // The erased handler reports its own outcome through the toolbox, so
-            // AfterRequest observes completion rather than the specific result here.
-            hooks
-                .run_after(&context, &schema, &RequestOutcome::Ok)
-                .await;
-        });
-
-        Ok(true)
+            .boxed_local(),
+        ))
     }
 
     /// Handles one parsed JSON-RPC frame: lifecycle methods are answered
@@ -251,7 +268,7 @@ impl WsClientSession {
         mcp: Arc<McpState>,
         frame: Result<JsonRpcRequest, serde_json::Value>,
         mut context: RequestContext,
-    ) {
+    ) -> Option<LocalBoxFuture<'static, ()>> {
         let conn_id = context.connection_id;
         let req = match frame {
             Ok(req) => req,
@@ -259,7 +276,7 @@ impl WsClientSession {
                 self.server
                     .toolbox
                     .send_raw(conn_id, error_frame.to_string());
-                return;
+                return None;
             }
         };
 
@@ -269,8 +286,9 @@ impl WsClientSession {
         match mcp.route(req, &context.roles) {
             McpAction::Respond(frame) => {
                 self.server.toolbox.send_raw(conn_id, frame.to_string());
+                None
             }
-            McpAction::Ignore => {}
+            McpAction::Ignore => None,
             McpAction::ToolCall {
                 id,
                 method_code,
@@ -294,52 +312,58 @@ impl WsClientSession {
                         )
                         .to_string(),
                     );
-                    return;
+                    return None;
                 };
 
                 let handler = endpoint.handler.clone();
                 let toolbox = self.server.toolbox.clone();
                 let hooks = self.server.hooks.clone();
                 let schema = endpoint.schema.clone();
-                tokio::task::spawn_local(async move {
-                    let mut context = context;
-                    // Same placement as the legacy path, but the rejection has to go
-                    // back in the MCP envelope — a tool error, not a WsResponseError.
-                    if let Err(custom) = hooks.run_before(&mut context, &schema, &arguments).await {
-                        let code = custom.code.to_u32();
-                        toolbox.send_raw(
-                            conn_id,
-                            jsonrpc_result(&id, encode_tool_error(custom.code, &custom.params))
-                                .to_string(),
-                        );
-                        hooks
-                            .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                Some(
+                    async move {
+                        let mut context = context;
+                        // Same placement as the legacy path, but the rejection has to go
+                        // back in the MCP envelope — a tool error, not a WsResponseError.
+                        if let Err(custom) =
+                            hooks.run_before(&mut context, &schema, &arguments).await
+                        {
+                            let code = custom.code.to_u32();
+                            toolbox.send_raw(
+                                conn_id,
+                                jsonrpc_result(&id, encode_tool_error(custom.code, &custom.params))
+                                    .to_string(),
+                            );
+                            hooks
+                                .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                                .await;
+                            return;
+                        }
+
+                        TOOLBOX
+                            .scope(
+                                toolbox.clone(),
+                                handler.handle_mcp(
+                                    &toolbox,
+                                    context.clone(),
+                                    McpCallCtx { id },
+                                    arguments,
+                                ),
+                            )
                             .await;
-                        return;
+
+                        hooks
+                            .run_after(&context, &schema, &RequestOutcome::Ok)
+                            .await;
                     }
-
-                    TOOLBOX
-                        .scope(
-                            toolbox.clone(),
-                            handler.handle_mcp(
-                                &toolbox,
-                                context.clone(),
-                                McpCallCtx { id },
-                                arguments,
-                            ),
-                        )
-                        .await;
-
-                    hooks
-                        .run_after(&context, &schema, &RequestOutcome::Ok)
-                        .await;
-                });
+                    .boxed_local(),
+                )
             }
         }
     }
 
     async fn run_loop(&mut self) -> Result<()> {
         let conn_id = self.conn_info.connection_id;
+        let mut handlers = FuturesUnordered::new();
         loop {
             while let Ok(msg) = self.rx.try_recv() {
                 if !self.send_message(msg).await {
@@ -385,14 +409,17 @@ impl WsClientSession {
                                 break;
                             }
                         };
-                        if !self.handle_message(msg)? {
-                            break;
+                        match self.handle_message(msg)? {
+                            Dispatch::Close => break,
+                            Dispatch::Keep => {}
+                            Dispatch::Task(task) => handlers.push(task),
                         }
                     } else {
                         debug!(ws_server = true, ?conn_id, "Inbound stream ended");
                         break;
                     }
                 }
+                _ = handlers.next(), if !handlers.is_empty() => {}
             }
         }
 

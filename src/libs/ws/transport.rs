@@ -18,11 +18,11 @@
 //!
 //! # Threading
 //!
-//! [`MessageStream`] is `#[async_trait(?Send)]` — its futures are **not** `Send`,
-//! matching the existing `spawn_local` dispatch model. Anything driving a session
-//! (`serve_connection`, `serve_with`) must therefore run inside a
-//! `tokio::task::LocalSet`. This is not an oversight; it is what lets handlers hold
-//! non-`Send` state across await points.
+//! [`MessageStream`] is `#[async_trait(?Send)]` — its futures are **not** `Send`.
+//! `serve_connection` / `serve_with` poll the session and its request handlers
+//! in place on one thread, so they do not need a `LocalSet`. The TCP `listen`
+//! path still `spawn_local`s and does. This is not an oversight; it is what lets
+//! handlers hold non-`Send` state across await points.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
