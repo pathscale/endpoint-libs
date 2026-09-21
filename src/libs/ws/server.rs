@@ -167,7 +167,7 @@ impl WebsocketServer {
         })?;
 
         // Get upgrade event receiver - H2 yields multiple events, H1 yields one
-        let rx = upgrader
+        let mut rx = upgrader
             .upgrade_stream(stream, addr, &self.config, &cached_date)
             .await?;
 
@@ -181,16 +181,16 @@ impl WebsocketServer {
         let mut sessions = FuturesUnordered::new();
         loop {
             let event = if sessions.is_empty() {
-                match rx.recv().await {
-                    Ok(event) => event,
-                    Err(_) => break,
+                match rx.next().await {
+                    Some(event) => event,
+                    None => break,
                 }
             } else {
-                let recv = rx.recv();
+                let recv = rx.next();
                 futures::pin_mut!(recv);
                 match futures::future::select(recv, sessions.next()).await {
-                    futures::future::Either::Left((Ok(event), _)) => event,
-                    futures::future::Either::Left((Err(_), _)) => {
+                    futures::future::Either::Left((Some(event), _)) => event,
+                    futures::future::Either::Left((None, _)) => {
                         while sessions.next().await.is_some() {}
                         break;
                     }

@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 #[cfg(feature = "ws-core")]
-use crossfire::{AsyncRx, mpsc::Array};
-#[cfg(feature = "ws-core")]
 use eyre::Result;
+#[cfg(feature = "ws-core")]
+use futures::channel::mpsc::Receiver;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::WsMessage as Message;
@@ -90,5 +90,5 @@ pub trait WsUpgrader: Send + Sync {
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<AsyncRx<Array<UpgradeEvent>>>;
+    ) -> Result<Receiver<UpgradeEvent>>;
 }

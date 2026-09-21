@@ -3,9 +3,9 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use crossfire::AsyncRx;
-use crossfire::mpsc::{Array, bounded_async};
+
 use eyre::{Result, eyre};
+use futures::channel::mpsc::{Receiver, channel};
 use futures::{SinkExt, StreamExt};
 use http_body_util::Empty;
 use hyper::body::{Bytes, Incoming};
@@ -101,16 +101,16 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
         addr: SocketAddr,
         config: &WsServerConfig,
         cached_date: &str,
-    ) -> Result<AsyncRx<Array<UpgradeEvent>>> {
+    ) -> Result<Receiver<UpgradeEvent>> {
         let io = TokioIo::new(stream);
-        let (tx, rx) = bounded_async::<UpgradeEvent>(2);
+        let (tx, rx) = channel::<UpgradeEvent>(2);
 
         let svc_config = config.clone();
         let svc_date = cached_date.to_owned();
         let svc_addr = addr;
 
         let service = service_fn(move |mut req: Request<Incoming>| {
-            let tx = tx.clone();
+            let mut tx = tx.clone();
             let config = svc_config.clone();
             let cached_date = svc_date.clone();
             let addr = svc_addr;
