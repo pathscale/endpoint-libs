@@ -115,6 +115,9 @@ signal = [
     "dep:tokio-util",
     "dep:tokio",
     "dep:lazy_static",
+    # `signal.rs` logs the signal it caught. `types` happens to pull tracing in,
+    # so this was never missed until somebody enabled `signal` on its own.
+    "dep:tracing",
     # "dep:",
 ]
 scheduler = [
@@ -130,6 +133,11 @@ log_reader = [
     "dep:rev_lines",
     "dep:tokio",
     "dep:lazy_static",
+    # `log_reader.rs` parses a tracing level and an RFC 3339 timestamp out of
+    # each line, so it names both crates directly. Same reason as `signal`:
+    # `types` supplied them in every set anyone built.
+    "dep:tracing",
+    "dep:chrono",
     # "dep:",
 ]
 error_aggregation = [
