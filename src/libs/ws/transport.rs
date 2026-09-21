@@ -24,6 +24,24 @@
 //! polls connections the same way. A `LocalSet` remains only because the hyper
 //! upgrader `spawn_local`s onto `TokioExecutor`; nago-wss is the tokio-free
 //! replacement for that backend, and is not wired here yet.
+//!
+//! # Which feature sets are free of tokio
+//!
+//! Verified with `cargo tree -e normal -i tokio`, which is the fact; a feature
+//! flag alone is not.
+//!
+//! - `wire-core,framed-transport,nagoya-transport` prints nothing. This is the
+//!   neutral path and it is genuinely runtime-free.
+//! - Anything including `ws-core` still carries tokio, and *not* because of the
+//!   transport code. `ws-core` requires `types`, and `types` pulls in the
+//!   observability stack — `opentelemetry-otlp`, `tonic`, `reqwest`,
+//!   `hyper-rustls` — every one of which depends on tokio unconditionally. The
+//!   `ws` path additionally needs it for real (hyper, tokio-tungstenite,
+//!   tokio-rustls).
+//!
+//! So a consumer that wants no tokio at all takes the neutral transport without
+//! `types`. Making `ws-core` tokio-free is a separate project: it means getting
+//! the OTLP exporters out of `types` and behind their own feature.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -94,7 +112,9 @@ pub mod framed;
 pub mod nagoya;
 
 #[cfg(feature = "framed-transport")]
-pub use framed::{FramedError, framed_json};
+pub use framed::FramedError;
+#[cfg(feature = "framed-transport-tokio")]
+pub use framed::framed_json;
 
 #[cfg(feature = "nagoya-transport")]
 pub use nagoya::NagoyaStream;

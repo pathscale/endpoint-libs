@@ -48,6 +48,7 @@ types = [
     "dep:tracing-opentelemetry",
     "dep:opentelemetry-appender-tracing",
     "dep:tonic",
+    "dep:tokio",
 ]
 wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
@@ -59,11 +60,22 @@ ws-core = [
     "dep:dashmap",
     "dep:async-trait",
     "dep:httpdate",
+    "dep:tokio",
 ]
 framed-transport = [
     # Length-delimited WireMessage framing over any byte stream (Unix sockets,
     # named pipes, inherited socketpairs). No WebSocket, no TLS, no HTTP.
+    #
+    # This is the neutral half: `framed_json_neutral` over `futures_io`. It names
+    # no runtime, so a consumer that takes only this never sees tokio in its
+    # normal graph. The tokio-io flavour is `framed-transport-tokio`.
     "wire-core",
+]
+framed-transport-tokio = [
+    # `framed_json` over `tokio::io`, built on `tokio_util::codec::Framed`. Same
+    # bytes on the wire as the neutral path; `encode`/`decode` are shared.
+    "framed-transport",
+    "dep:tokio",
     "dep:tokio-util",
 ]
 nagoya-transport = [
@@ -73,7 +85,7 @@ nagoya-transport = [
     "framed-transport",
     "dep:nagoya",
 ]
-agent-control = ["framed-transport"]
+agent-control = ["framed-transport-tokio"]
 ws-client = [
     # WS client (WsClient, WsClientBuilder) - standalone
     "ws-core",
@@ -101,12 +113,14 @@ ws = [
 signal = [
     # Feature dependencies
     "dep:tokio-util",
+    "dep:tokio",
     "dep:lazy_static",
     # "dep:",
 ]
 scheduler = [
     # Feature dependencies
     "dep:tokio-cron-scheduler",
+    "dep:tokio",
     # "dep:",
 ]
 log_reader = [
@@ -114,11 +128,13 @@ log_reader = [
     "dep:tempfile",
     "dep:regex",
     "dep:rev_lines",
+    "dep:tokio",
     "dep:lazy_static",
     # "dep:",
 ]
 error_aggregation = [
     # Feature dependencies
+    "dep:tokio",
     "dep:regex",
     "dep:lazy_static",
     # "dep:",
@@ -159,7 +175,7 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
 ], optional = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "std"] }
-tokio = { version = "1.39", features = ["full"] }
+tokio = { version = "1.39", features = ["full"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 # The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
 # `nagoya::reactor` does not exist and the error reads like a missing module.
@@ -212,7 +228,7 @@ rcgen = "0.14"
 [[example]]
 name = "uds_echo"
 path = "examples/uds_echo.rs"
-required-features = ["full", "framed-transport", "ws-client"]
+required-features = ["full", "framed-transport-tokio", "ws-client"]
 
 [[example]]
 name = "mcp_echo"
