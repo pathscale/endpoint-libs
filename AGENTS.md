@@ -20,6 +20,11 @@ natively, and Claude Code loads it through the `@AGENTS.md` import in
   endpoint-validator and the six backends all break silently when this crate moves.
   `./scripts/check-chain.sh` verifies all of it; run it before calling a change done.
   Cross-repo context: [`docs/chain.md`](docs/chain.md).
+- **Every feature has to compile on its own.** A consumer enables one feature, not
+  the set you happened to build with, so a feature must name every dependency its
+  own code uses with `dep:`. Building alongside `types` hides a missing one.
+  `./scripts/check-features.sh` reads the feature list out of `Cargo.toml` and
+  checks each one alone; `check-chain.sh` and CI both run it.
 - **Releasing this crate has a required order.** `honey_id-types` re-exports its
   `WsRequest`/`WsResponse` traits and must be published after it; the six backends
   bump both together. Getting it wrong puts two incompatible copies of endpoint-libs

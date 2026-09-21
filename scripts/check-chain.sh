@@ -98,7 +98,26 @@ else
     done
 fi
 
-# ── 5. Local versions vs crates.io ───────────────────────────────────────────
+# ── 5. Every endpoint-libs feature compiles standalone ───────────────────────
+# A consumer picks features one at a time, so every feature has to declare the
+# dependencies its own code names. `signal` and `log_reader` did not, and it
+# stayed invisible because nothing ever built them without `types`. The feature
+# list lives in Cargo.toml, not in a script, so this cannot go stale.
+head_ "Every endpoint-libs feature standalone"
+if $QUICK; then
+    skip "--quick: skipped"
+elif ! have endpoint-libs; then
+    skip "endpoint-libs (not checked out)"
+else
+    if out=$("$(repo endpoint-libs)/scripts/check-features.sh" 2>&1); then
+        pass "every feature compiles alone"
+    else
+        fail "some features do not compile alone; run ./scripts/check-features.sh in endpoint-libs"
+        echo "$out" | grep -a 'FAIL' | sed 's/^/    /'
+    fi
+fi
+
+# ── 6. Local versions vs crates.io ───────────────────────────────────────────
 # Informational: an unpublished local bump is normal mid-release, but you should
 # know it is the case rather than discover it from a consumer.
 head_ "Local version vs crates.io"
