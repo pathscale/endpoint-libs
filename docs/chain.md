@@ -35,9 +35,18 @@ failing.
 
 It verifies:
 
-1. **Exactly one `endpoint-libs` per dependency graph.** Two copies means the traits
-   `honey_id-types` re-exports are different types with the same name. The resulting
-   error names two different `endpoint-libs` paths and reads like a broken handler.
+1. **Exactly one `endpoint-libs` per dependency graph.** Two copies in one graph means
+   the traits `honey_id-types` re-exports are different types with the same name. The
+   resulting error names two different `endpoint-libs` paths and reads like a broken
+   handler.
+
+   *Per graph*, not per lockfile. A `Cargo.lock` is per workspace and records every
+   version any member resolved, not which member reached which, so counting copies in
+   the lock cannot tell the real defect from a workspace whose members resolve
+   different versions in graphs that never meet. The lock count is only a prefilter:
+   above one, the check asks `cargo tree` per workspace member, and fails only when a
+   single member reaches two versions. `EndpointValidator` is the standing example of
+   the harmless shape, described at the end of this document.
 2. **`config/version.toml` agrees with `Cargo.lock`** in every backend. `endpoint-gen`
    compares its own requirement against `[libs] version` and refuses to run on a
    mismatch — a stale declaration is the usual cause of a baffling refusal.
@@ -85,15 +94,22 @@ Irreversible: a version number can never be reused, and yanking does not delete.
 `cargo publish --dry-run` first, publish from the default branch, tag the release. Ask a
 human before publishing unless they have asked for it in this session.
 
-## Known-red, as of 2026-07-26
+## The `EndpointValidator` split, which is not a failure
 
-Two checks fail deliberately. Delete each entry when it is resolved.
+`EndpointValidator` is a workspace whose two members sit on different majors on purpose.
+`endpoint-validator` is on 2.1; `ws-load-test` is held on 1.9 because endpoint-libs 2.0
+made `WsClient`'s futures non-`Send`, which breaks its `JoinSet`-of-workers model. Moving
+it needs a runtime plus a `LocalSet` per pinned core, changing the very concurrency
+characteristics its CIDR 2027 measurements record. The reason lives in
+`ws-load-test/Cargo.toml`, where the pin is.
 
-- **The six backends fail check 3.** They declare `[libs] 2.0.0` while the installed
-  `endpoint-gen` requires `^2.1`, so none can be regenerated. They are self-consistent
-  and building fine; the rollout to 2.1 is a pending decision, not an accident.
-- **`EndpointValidator` fails check 1** with two majors (1.9.1 and 2.1.1). Its
-  `ws-load-test` member is held on 1.x because endpoint-libs 2.0 made `WsClient`'s
-  futures non-`Send`, breaking its `JoinSet`-of-workers model. Moving it needs a runtime
-  plus `LocalSet` per pinned core, which would change the concurrency characteristics its
-  benchmarks measure. Recorded in that member's manifest.
+The two members do not depend on each other, so no binary ever sees two copies and
+nothing can fail to unify. Check 1 used to report it anyway, on every run, because it
+counted the lockfile instead of the graphs. It no longer does. **Do not "fix" this by
+bumping `ws-load-test`**, and do not reintroduce a lockfile count.
+
+## Known-red, as of 2026-09-22
+
+Nothing. `./scripts/check-chain.sh --quick` is green across all ten repos. Add an entry
+here the moment a check goes red on purpose, and delete it when it is resolved -- a red
+line with no entry is a real problem.
