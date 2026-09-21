@@ -43,6 +43,15 @@ jobs:
         cargo test --no-default-features --features full
         cargo test --all-features
 
+    # The list above is hand-written, so it only covers the sets somebody
+    # thought to add. `signal` and `log_reader` were absent from it and did not
+    # compile on their own for the whole life of the feature table. This step
+    # reads the features out of Cargo.toml instead, so a feature added tomorrow
+    # is covered tomorrow. It runs inside `test`, which `publish` already needs,
+    # so a feature that does not build standalone blocks the release.
+    - name: Every feature compiles standalone
+      run: ./scripts/check-features.sh
+
 
   clippy_check:
 

@@ -43,7 +43,11 @@ It verifies:
    mismatch — a stale declaration is the usual cause of a baffling refusal.
 3. **Generated artifacts still match their RON** (`endpoint-gen --check` per backend).
 4. **Each tool repo builds and tests.**
-5. **Local versions against crates.io**, so an unpublished bump is a known state rather
+5. **Every `endpoint-libs` feature compiles standalone**
+   (`./scripts/check-features.sh`). A consumer enables one feature, not the set you
+   built with, so each feature must name every dependency its own code uses with
+   `dep:`. Skipped under `--quick`.
+6. **Local versions against crates.io**, so an unpublished bump is a known state rather
    than something a consumer discovers.
 
 A red line is a real problem or a deliberate, documented one — never noise to skim past.
@@ -62,6 +66,12 @@ If it is deliberate, say so in the change that makes it red.
 - **Minor versions do not need to match** across endpoint-libs, endpoint-gen and
   honey_id-types, despite what older docs claimed. What is enforced is the
   `version.toml` check. Do not "fix" a version to make the numbers line up.
+- **A feature that only ever builds with `types` can forget its own dependencies.**
+  `types` pulls in `tracing`, `chrono` and most of the rest, so `signal` and
+  `log_reader` compiled in every set anyone ever built while missing `dep:tracing`
+  and `dep:chrono` of their own. It only shows up for a consumer who asks for just
+  that feature, which is the whole point of an optional feature.
+  `./scripts/check-features.sh` is the guard.
 - **`cargo update` in one repo can move a shared dependency** into a range another repo
   cannot satisfy. Re-run the chain check after any dependency update.
 - **`services.json` is not deprecated by the 2.1 specification documents.** It is the
