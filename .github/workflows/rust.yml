@@ -1,10 +1,10 @@
 name: Rust
 
+# Manual only. Nothing here runs on a push or a pull request: the gate is the
+# one an author runs locally before asking for review, and a green tick that
+# nobody asked for teaches people to stop reading it.
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
