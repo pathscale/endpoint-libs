@@ -36,7 +36,9 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::io::{AsyncRead as FuturesRead, AsyncWrite as FuturesWrite};
 use futures::{Sink, Stream};
+#[cfg(feature = "framed-transport-tokio")]
 use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "framed-transport-tokio")]
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use super::super::message::{CloseFrame, WireMessage};
@@ -159,6 +161,7 @@ fn decode(mut frame: BytesMut) -> Result<WireMessage, FramedError> {
 /// The result is a [`Transport`] of [`WireMessage`], which
 /// [`TransportStream`](super::TransportStream) turns into a
 /// [`MessageStream`](super::super::traits::MessageStream) for the session loop.
+#[cfg(feature = "framed-transport-tokio")]
 pub fn framed_json<S>(
     io: S,
 ) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
@@ -172,6 +175,7 @@ where
 ///
 /// Frames longer than `max_frame_bytes` are rejected rather than buffered, which is
 /// what keeps a hostile or broken peer from exhausting memory.
+#[cfg(feature = "framed-transport-tokio")]
 pub fn framed_json_with_max_frame<S>(
     io: S,
     max_frame_bytes: usize,
@@ -192,10 +196,12 @@ where
 
 /// Adapts `Framed<S, LengthDelimitedCodec>` (bytes) to `WireMessage` in both
 /// directions.
+#[cfg(feature = "framed-transport-tokio")]
 struct WireFramed<S> {
     inner: Framed<S, LengthDelimitedCodec>,
 }
 
+#[cfg(feature = "framed-transport-tokio")]
 impl<S> Stream for WireFramed<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -217,6 +223,7 @@ where
     }
 }
 
+#[cfg(feature = "framed-transport-tokio")]
 impl<S> Sink<WireMessage> for WireFramed<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -485,6 +492,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the async cases drive a sink or a stream, and those all run over a
+    // tokio duplex, so they go with the tokio flavour.
+    #[cfg(feature = "framed-transport-tokio")]
     use futures::{SinkExt, StreamExt};
 
     #[test]
@@ -561,6 +571,7 @@ mod tests {
         assert_eq!(text_bytes.as_ptr(), payload_pointer);
     }
 
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn duplex_pipe_carries_messages_both_ways() {
         let (a, b) = tokio::io::duplex(64 * 1024);
@@ -579,6 +590,7 @@ mod tests {
         assert_eq!(got, WireMessage::Binary(vec![7, 7].into()));
     }
 
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn oversized_outbound_frames_are_refused_by_the_encoder() {
         let (a, _b) = tokio::io::duplex(64 * 1024);
@@ -593,6 +605,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn oversized_inbound_frames_are_rejected_rather_than_buffered() {
         use tokio::io::AsyncWriteExt;
@@ -616,6 +629,7 @@ mod tests {
     /// The neutral path must put the same bytes on the wire as the tokio path.
     /// Not "equivalent": identical, because the format is normative for non-Rust
     /// peers and there are now two implementations that could drift.
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn the_neutral_path_writes_the_same_bytes_as_the_tokio_path() {
         use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -657,6 +671,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn the_neutral_path_carries_messages_both_ways() {
         use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -678,6 +693,7 @@ mod tests {
 
     /// A length prefix naming more than the maximum is refused before the body is
     /// buffered. Believing it is how a peer asks for an allocation it never sends.
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn the_neutral_path_rejects_an_oversized_length_prefix() {
         use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -702,6 +718,7 @@ mod tests {
 
     /// A stream that ends mid-frame is truncation, not a clean close. A clean close
     /// lands on a frame boundary with nothing buffered.
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn the_neutral_path_reports_a_truncated_frame() {
         use tokio_util::compat::TokioAsyncReadCompatExt;
@@ -730,6 +747,7 @@ mod tests {
     }
 
     /// A clean close after a whole frame ends the stream rather than erroring.
+    #[cfg(feature = "framed-transport-tokio")]
     #[tokio::test]
     async fn the_neutral_path_ends_cleanly_on_a_frame_boundary() {
         use tokio_util::compat::TokioAsyncReadCompatExt;

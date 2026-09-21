@@ -8,7 +8,7 @@
 //!
 //! If this file fails to compile, the transport seam has regressed.
 
-#![cfg(all(feature = "framed-transport", feature = "ws-client"))]
+#![cfg(all(feature = "framed-transport-tokio", feature = "ws-client"))]
 
 use std::sync::Arc;
 use std::time::Duration;

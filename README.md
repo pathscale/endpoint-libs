@@ -151,6 +151,17 @@ inherited socketpairs. No WebSocket, no TLS, no HTTP. Wire format under
 [Transports (2.0)](#transports-20) below, and machine-readable in the generated AsyncAPI
 document.
 
+This feature is the runtime-neutral half: `framed_json_neutral()` over
+`futures_io::AsyncRead`/`AsyncWrite`. It names no runtime, so a consumer that takes
+only this (plus `nagoya-transport`) has no tokio in its normal dependency graph.
+
+### `framed-transport-tokio`
+
+The tokio-io flavour of the above: `framed_json()` over `tokio::io`, built on
+`tokio_util::codec::Framed`. `encode`/`decode` are shared with the neutral path, so
+the bytes on the wire are identical by construction rather than by agreement. Implies
+`framed-transport` and pulls in `tokio` and `tokio-util`.
+
 ### `ws`
 
 Async WebSocket server built on `tokio-tungstenite` with TLS support via `rustls`. Includes:
@@ -350,7 +361,7 @@ Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HT
 
 `types` + `ws` + `signal` + `scheduler` + `log_reader` +
 `error_aggregation` + `log_throttling` + `ws-http1` + `ws-tls12`. Convenience only, and it
-does **not** include `ws-client` or `framed-transport` — prefer naming what you use.
+does **not** include `ws-client` or the `framed-transport` features — prefer naming what you use.
 
 ### `signal`
 
@@ -394,7 +405,7 @@ server.serve_with(my_listener).await?;   // my_listener: SessionListener
 let client = WsClient::from_stream(stream);
 ```
 
-Both sides need a `MessageStream`. For byte-stream transports, the `framed-transport`
+Both sides need a `MessageStream`. For byte-stream transports, the `framed-transport-tokio`
 feature supplies one:
 
 ```rust
@@ -407,7 +418,7 @@ let stream: Box<dyn MessageStream> =
 `examples/uds_echo.rs` is a complete worked example over a Unix domain socket:
 
 ```bash
-cargo run --example uds_echo --features full,framed-transport,ws-client
+cargo run --example uds_echo --features full,framed-transport-tokio,ws-client
 ```
 
 ### `framed_json` wire format
