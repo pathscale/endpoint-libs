@@ -664,8 +664,18 @@ mod tests {
         assert!(TOOLBOX.try_with(|_| ()).is_err());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn scope_is_the_same_toolbox_after_an_await() {
+    /// The slot survives a suspension, which is the whole point of restoring it
+    /// on every poll rather than once at entry.
+    ///
+    /// The two tests above poll by hand because one poll is all they need.
+    /// This one needs the future to come back from `Pending` and find the same
+    /// toolbox, so it needs something that polls twice: `nagoya::block_on`,
+    /// which drives the future on the calling thread. That is load bearing
+    /// here and not a detail -- `TOOLBOX` is a `thread_local`, so a runtime
+    /// free to resume the future on another thread would be testing a
+    /// different question.
+    #[test]
+    fn scope_is_the_same_toolbox_after_an_await() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use super::TOOLBOX;
@@ -674,22 +684,20 @@ mod tests {
         let expected = toolbox.clone();
         let saw = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&saw);
-        TOOLBOX
-            .scope(toolbox, async move {
-                assert!(
-                    TOOLBOX
-                        .try_with(|current| Arc::ptr_eq(current, &expected))
-                        .unwrap()
-                );
-                tokio::task::yield_now().await;
-                assert!(
-                    TOOLBOX
-                        .try_with(|current| Arc::ptr_eq(current, &expected))
-                        .unwrap()
-                );
-                flag.store(true, Ordering::Release);
-            })
-            .await;
+        nagoya::block_on(TOOLBOX.scope(toolbox, async move {
+            assert!(
+                TOOLBOX
+                    .try_with(|current| Arc::ptr_eq(current, &expected))
+                    .unwrap()
+            );
+            nagoya::yield_now().await;
+            assert!(
+                TOOLBOX
+                    .try_with(|current| Arc::ptr_eq(current, &expected))
+                    .unwrap()
+            );
+            flag.store(true, Ordering::Release);
+        }));
         assert!(saw.load(Ordering::Acquire));
         assert!(TOOLBOX.try_with(|_| ()).is_err());
     }

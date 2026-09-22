@@ -217,8 +217,12 @@ mod tests {
 
     pub(super) use super::*;
 
-    #[tokio::test]
-    async fn test_subscribe() {
+    // `#[tokio::test]` only ever put a runtime in scope here; nothing in the
+    // body awaits, because subscribe, publish and unsubscribe are all
+    // synchronous and the sends land in the outbound queue rather than on a
+    // socket. A plain test, then.
+    #[test]
+    fn test_subscribe() {
         let mut manager: SubscriptionManager<(), ()> = SubscriptionManager::new(0);
 
         let ctx = RequestContext {

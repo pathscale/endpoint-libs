@@ -642,51 +642,69 @@ mod tests {
     /// inbound, so it drains. Below inbound it starves instead, because a
     /// peer that keeps a frame available makes inbound ready on every poll
     /// and the handler set is then never polled at all.
-    #[tokio::test]
-    async fn a_ready_handler_beats_a_ready_inbound() {
+    ///
+    /// `nagoya::block_on` rather than a runtime: every arm below is `ready` or
+    /// `pending`, so `priority4` resolves on its first poll and an executor is
+    /// providing nothing but that poll.
+    #[test]
+    fn a_ready_handler_beats_a_ready_inbound() {
         use futures::future::{pending, ready};
 
         use super::{Arm, priority4};
 
-        let fired = priority4(
+        let fired = nagoya::block_on(priority4(
             Some(ready("handler")),
             pending::<()>(),
             ready("inbound"),
             ready(()),
-        )
-        .await;
+        ));
         assert!(
             matches!(fired, Arm::Handler("handler")),
             "a finished handler lost to an inbound frame that was also ready"
         );
     }
 
-    #[tokio::test]
-    async fn an_absent_handler_does_not_take_the_arm() {
+    #[test]
+    fn an_absent_handler_does_not_take_the_arm() {
         use futures::future::{Ready, pending, ready};
 
         use super::{Arm, priority4};
 
         let absent: Option<Ready<()>> = None;
-        let fired = priority4(absent, ready("outbound"), pending::<()>(), pending::<()>()).await;
+        let fired = nagoya::block_on(priority4(
+            absent,
+            ready("outbound"),
+            pending::<()>(),
+            pending::<()>(),
+        ));
         assert!(
             matches!(fired, Arm::Outbound("outbound")),
             "an empty handler set took the arm instead of parking it"
         );
     }
 
-    #[tokio::test]
-    async fn outbound_beats_inbound_and_both_beat_the_flag() {
+    #[test]
+    fn outbound_beats_inbound_and_both_beat_the_flag() {
         use futures::future::{Ready, pending, ready};
 
         use super::{Arm, priority4};
 
         let absent: Option<Ready<()>> = None;
-        let fired = priority4(absent, ready("outbound"), ready("inbound"), ready(())).await;
+        let fired = nagoya::block_on(priority4(
+            absent,
+            ready("outbound"),
+            ready("inbound"),
+            ready(()),
+        ));
         assert!(matches!(fired, Arm::Outbound("outbound")));
 
         let absent: Option<Ready<()>> = None;
-        let fired = priority4(absent, pending::<()>(), ready("inbound"), ready(())).await;
+        let fired = nagoya::block_on(priority4(
+            absent,
+            pending::<()>(),
+            ready("inbound"),
+            ready(()),
+        ));
         assert!(
             matches!(fired, Arm::Inbound("inbound")),
             "the policy flag dropped a frame that was already ready"
@@ -733,8 +751,16 @@ mod tests {
         })
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn dropping_the_outbound_sender_ends_the_session() {
+    /// The teardown edge: no sender left, so the session has to return rather
+    /// than wait on a channel nobody can write to.
+    ///
+    /// `nagoya::block_on` polls on this thread, which is what `run` needs --
+    /// the stream is `?Send` and the future is not movable between threads.
+    /// The timeout is the whole assertion: a session that fails to notice the
+    /// closed channel parks forever, so without a deadline this test hangs
+    /// instead of failing.
+    #[test]
+    fn dropping_the_outbound_sender_ends_the_session() {
         use std::time::Duration;
 
         use super::WsClientSession;
@@ -751,15 +777,31 @@ mod tests {
             rx,
             std::sync::Arc::new(WebsocketServer::new(WsServerConfig::default())),
         );
-        let finished = tokio::time::timeout(Duration::from_secs(1), session.run()).await;
+        let finished = nagoya::block_on(nagoya::timeout(Duration::from_secs(1), session.run()));
         assert!(
             finished.is_ok(),
             "session kept running after every outbound sender was dropped"
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn policy_flag_ends_a_session_blocked_on_recv() {
+    /// The policy-close edge: the session is parked on `recv` with nothing to
+    /// read, and setting the flag still ends it.
+    ///
+    /// The session and the thing that flags it have to run concurrently, and
+    /// both are `?Send`, which is what a `LocalSet` and `spawn_local` used to
+    /// buy. `futures::future::join` buys the same concurrency without a
+    /// spawner: two futures, one task, polled on this thread by
+    /// `nagoya::block_on`. Nothing here needs a second thread -- the flag is
+    /// set from inside the same task, by the arm that watches `parked` -- so
+    /// single-threaded is not a weakening, it just removes the runtime.
+    ///
+    /// `parked` is the ordering that makes the test mean anything: flagging
+    /// before the session has reached `recv` would prove only that a session
+    /// that never started can stop. `flagged` then says which of the two
+    /// deadlines the timeout hit, which the two separate `timeout` calls in
+    /// the tokio version reported by having two messages.
+    #[test]
+    fn policy_flag_ends_a_session_blocked_on_recv() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
@@ -782,24 +824,35 @@ mod tests {
         );
         session.bind_end(Arc::clone(&end));
 
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async move {
-                let running = tokio::task::spawn_local(async move { session.run().await });
-                tokio::time::timeout(Duration::from_secs(1), async {
-                    while !parked.load(Ordering::Acquire) {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("session never waited on the connection");
+        let flagged = Arc::new(AtomicBool::new(false));
+        let flag_once_parked = {
+            let parked = Arc::clone(&parked);
+            let flagged = Arc::clone(&flagged);
+            let end = Arc::clone(&end);
+            async move {
+                // `yield_now` wakes before it returns `Pending`, so this hands
+                // the poll back to the session arm rather than stalling on a
+                // wake that is nobody's job to send.
+                while !parked.load(Ordering::Acquire) {
+                    nagoya::yield_now().await;
+                }
                 end.cancel();
-                let finished = tokio::time::timeout(Duration::from_secs(1), running).await;
-                assert!(
-                    finished.is_ok(),
-                    "session kept running after the policy flag was set"
-                );
-            })
-            .await;
+                flagged.store(true, Ordering::Release);
+            }
+        };
+
+        let finished = nagoya::block_on(nagoya::timeout(
+            Duration::from_secs(1),
+            futures::future::join(session.run(), flag_once_parked),
+        ));
+        assert!(
+            finished.is_ok(),
+            "{}",
+            if flagged.load(Ordering::Acquire) {
+                "session kept running after the policy flag was set"
+            } else {
+                "session never waited on the connection"
+            }
+        );
     }
 }

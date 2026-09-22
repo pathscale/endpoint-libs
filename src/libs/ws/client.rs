@@ -162,13 +162,14 @@ impl WsClient {
     /// All the request/reply machinery — sequence correlation, response routing, MCP
     /// framing — is shared with the WebSocket path; only the byte plumbing differs.
     ///
-    /// Use with [`framed_json`](crate::libs::ws::transport::framed_json) over a Unix
-    /// socket or inherited socketpair, or with a platform transport's own
-    /// `MessageStream` implementation.
+    /// Use with `framed_json_neutral` over a Unix socket or inherited
+    /// socketpair, or with a platform transport's own `MessageStream`
+    /// implementation.
     ///
     /// `MessageStream`'s futures are not `Send`, so this must be polled on the
-    /// thread that owns the stream — a `tokio::task::LocalSet`, or whatever the
-    /// transport's own runtime offers.
+    /// thread that owns the stream. `nagoya::reactor::TaskSet` driven by
+    /// `block_on_with` is the non-`Send` task runner here; a bare
+    /// `nagoya::block_on` does for one connection.
     pub fn from_stream(stream: Box<dyn crate::libs::ws::MessageStream>) -> Self {
         Self {
             stream: WsStream::Message(stream),

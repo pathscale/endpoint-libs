@@ -22,7 +22,6 @@ full = [
     "log_reader",
     "error_aggregation",
     "log_throttling",
-    "otel",
     "ws-http1",
     "ws-tls12",
 ]
@@ -41,44 +40,6 @@ types = [
     "dep:tracing-appender",
     "dep:serde_path_to_error",
     "dep:alloy-primitives",
-]
-otel = [
-    # OTLP export of traces and logs out of the `setup_logging` subscriber.
-    # Off by default: the exporter stack is `opentelemetry-otlp` plus `tonic`,
-    # `reqwest` and `hyper-rustls`, every one of which depends on tokio
-    # unconditionally. Leaving it in `types` meant that every consumer of the
-    # default feature set compiled a tokio runtime it never asked for, which is
-    # what `ws-core` -> `types` was dragging into an otherwise tokio-free graph.
-    #
-    # `OtelConfig` stays in `types` so a config struct literal keeps compiling
-    # without this feature; `OtelGuards` and the exporters do not.
-    "types",
-    "dep:opentelemetry",
-    "dep:opentelemetry_sdk",
-    "dep:opentelemetry-otlp",
-    "dep:opentelemetry-semantic-conventions",
-    "dep:tracing-opentelemetry",
-    "dep:opentelemetry-appender-tracing",
-    # No module under `otel` names tokio, and this feature does not name it
-    # either. `rt-tokio` is off the SDK: its batch processor runs on a thread
-    # of its own in 0.31 and does not need a runtime.
-    #
-    # THIS IS THE ONE FEATURE OF THIS CRATE WHOSE GRAPH STILL CONTAINS TOKIO,
-    # AND THE EDGE IS UPSTREAM'S RATHER THAN OURS. `http-proto` needs
-    # `opentelemetry-proto/gen-tonic-messages` for the OTLP message types, that
-    # feature is `["tonic", "tonic-prost", "prost"]`, and tonic reaches tokio
-    # through tokio-stream. No transport feature on `opentelemetry-otlp` 0.31
-    # avoids those types; `http-json` names the same ones. So tokio is here for
-    # protobuf structs, not for a runtime.
-    #
-    # `opentelemetry-otlp`'s default features are deliberately left ON. Turning
-    # them off removes `reqwest-blocking-client`, which is the HTTP client
-    # `.with_http()` builds on, and the exporter then fails to build at all --
-    # caught by `test_otel_graceful_degradation_unreachable_endpoint`. Since
-    # tonic already puts tokio in this graph, dropping the client buys no tokio
-    # back and costs the exporter, so it stays. Closing this properly means an
-    # OTLP exporter that is not this crate's, or an upstream that separates its
-    # message types from its gRPC client.
 ]
 wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
@@ -102,28 +63,22 @@ framed-transport = [
     # named pipes, inherited socketpairs). No WebSocket, no TLS, no HTTP.
     #
     # This is the neutral half: `framed_json_neutral` over `futures_io`. It names
-    # no runtime, so a consumer that takes only this never sees tokio in its
-    # normal graph. The tokio-io flavour is `framed-transport-tokio`.
+    # no runtime, so a consumer that takes only this never sees tokio, because
+    # there is no longer a tokio anything to see. This is the only framing
+    # path now.
     "wire-core",
-]
-framed-transport-tokio = [
-    # `framed_json` over `tokio::io`, built on `tokio_util::codec::Framed`. Same
-    # bytes on the wire as the neutral path; `encode`/`decode` are shared.
-    "framed-transport",
-    # `framed.rs` names only `tokio::io::{AsyncRead, AsyncWrite}`, which are
-    # unconditional. `tokio_util`'s `codec` feature names `tokio/io-util` for
-    # `Framed` itself, so nothing extra belongs here.
-    "dep:tokio",
-    "dep:tokio-util",
 ]
 nagoya-transport = [
     # `framed_json_neutral` over a Nagoya socket. Off by default and additive: a
-    # consumer that does not run Nagoya never compiles it, and the tokio path is
-    # untouched either way.
+    # consumer that does not run Nagoya never compiles it.
     "framed-transport",
     "dep:nagoya",
 ]
-agent-control = ["framed-transport-tokio"]
+# `framed-transport-tokio` is gone, and with it the only reason this named a
+# runtime. The neutral path put identical bytes on the wire, so what the tokio
+# flavour offered was an adapter type and a dependency. A consumer holding a
+# tokio `AsyncRead + AsyncWrite` bridges it on their own side.
+agent-control = ["framed-transport"]
 ws-client = [
     # WS client (WsClient, WsClientBuilder). The handshake and the framing are
     # nago-wss over a nagoya socket; there is no hyper and no tungstenite here
@@ -243,21 +198,6 @@ alloy-primitives = { version = "1.3.0", features = [
     "std",
 ], default-features = false, optional = true }
 
-# tokio is optional, and carries no features of its own. It used to be a
-# non-optional `features = ["full"]` dependency, which meant no consumer could
-# ever get a tokio-free graph no matter which features it selected: `cargo tree
-# -e normal -i tokio` could not come back empty. Every crate feature whose own
-# code calls tokio now names `dep:tokio` together with the tokio features that
-# code actually uses, so the set is the union of what is enabled, not `full`.
-#
-# `full` was hiding: fs, io-std, process, rt-multi-thread and parking_lot. No
-# module in this crate names `tokio::fs`, `tokio::process` or a multi-thread
-# runtime builder (`server.rs` builds `new_current_thread` per shard).
-# `io-util` is used only in `#[cfg(test)]` code, where the dev-dependency below
-# still supplies it, and by `tokio-util`'s `codec` feature, which names
-# `tokio/io-util` itself.
-tokio = { version = "1.39", default-features = false, optional = true }
-tokio-util = { version = "0.7", features = ["codec"], optional = true }
 # The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
 # `nagoya::reactor` does not exist and the error reads like a missing module.
 # 0.1.11 is the release that carries `signal::Signal`, `resolve` and
@@ -299,18 +239,6 @@ async-trait = { version = "0.1", optional = true }
 tracing-throttle = { version = "0.4", default-features = false, features = [
     "human-readable",
 ], optional = true }
-# OpenTelemetry dependencies (behind the non-default `otel` feature)
-opentelemetry = { version = "0.31", features = ["logs"], optional = true }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace", "logs", "internal-logs"], optional = true }
-# Default features are still on, so `grpc-tonic` comes along and drags `tonic`,
-# `reqwest` and `hyper-rustls` in even though only `.with_http()` is ever called.
-# That is why this whole block sits behind `otel`. Turning default features off
-# needs an explicit HTTP client feature chosen and compiled, which is its own
-# change.
-opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "http-proto"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.31", optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
-opentelemetry-appender-tracing = { version = "0.31", optional = true }
 # `tonic` used to be listed here for gRPC header configuration. The gRPC path and
 # `OtelProtocol` were removed in 2.1.0 ("only using http"), the dependency was
 # not, and it kept a tokio-bearing crate in the default graph. No module in this
@@ -318,12 +246,13 @@ opentelemetry-appender-tracing = { version = "0.31", optional = true }
 
 [dev-dependencies]
 tempfile = "3.19"
-tokio = { version = "1.39", features = ["full", "test-util"] }
-# `compat` only, and only for tests: it adapts a tokio duplex into the
-# `futures-io` pair the neutral transport takes, which is what lets one test
-# drive both framing paths and compare the bytes they produce.
-tokio-util = { version = "0.7", features = ["codec", "compat"] }
-tracing-throttle = { version = "0.4", features = ["async", "test-helpers"] }
+# `async` is this crate's only tokio edge (`async = ["tokio"]`), so the dev
+# build asks for the same synchronous half the normal one does, plus the
+# helpers the tests need.
+tracing-throttle = { version = "0.4", default-features = false, features = [
+    "human-readable",
+    "test-helpers",
+] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [[example]]

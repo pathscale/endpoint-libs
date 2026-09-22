@@ -1,13 +1,26 @@
-//! Tracing-based logging setup with stdout, file, and OpenTelemetry logging support
+//! Tracing-based logging setup with stdout and file logging
+//!
+//! # OpenTelemetry
+//! There is no OTLP export here any more. The exporter stack this crate used --
+//! `opentelemetry-otlp` and the SDK providers behind it -- was the last thing in the
+//! graph that pulled tokio in, and it did so for the protobuf *message types* rather
+//! than for a runtime: `http-proto` requires `opentelemetry-proto/gen-tonic-messages`,
+//! that feature is `["tonic", "tonic-prost", "prost"]`, and tonic 0.14 lists
+//! `tokio-stream` as a non-optional dependency, which in turn lists tokio. No transport
+//! or encoding choice on `opentelemetry-otlp` 0.31 avoids those types, so the only ways
+//! out were to hand-roll an OTLP encoder or to drop the exporter. Nothing in the fleet
+//! enabled the `otel` feature, so the exporter went.
+//!
+//! [`OtelConfig`] stays because several backends construct it inside a [`LoggingConfig`]
+//! literal and deleting it would break their builds for no gain. It is inert: setting
+//! `enabled: true` now warns at setup and forwards nothing.
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use chrono::SecondsFormat;
 use eyre::{DefaultHandler, EyreHandler, bail};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
-#[cfg(feature = "otel")]
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
     layer::SubscriberExt,
@@ -30,29 +43,46 @@ pub mod legacy;
 #[cfg(feature = "error_aggregation")]
 pub mod error_aggregation;
 pub mod level_filter;
-pub mod otel;
 
 pub use level_filter::*;
-pub use otel::OtelConfig;
-#[cfg(feature = "otel")]
-pub use otel::OtelGuards;
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
 
 pub use tracing_appender::non_blocking::WorkerGuard;
 
+/// Configuration for OpenTelemetry integration.
+///
+/// Inert. It used to drive an OTLP exporter; that exporter is gone (see the module
+/// docs for why), and nothing reads these fields any more except the `enabled` flag,
+/// which [`setup_logging`] warns about so an operator who configured a collector is
+/// told to their face that nothing is being sent.
+///
+/// It is kept, rather than deleted with the exporter, because it lives in the `types`
+/// feature and four backends name it in a `LoggingConfig` struct literal. It carries no
+/// dependency of its own -- a bool, two `Option<String>`s and a map -- so keeping it
+/// costs nothing and removing it would be a source break with no compile-time benefit.
+/// It is also the seam to reattach an exporter to, if one ever comes back on a
+/// tokio-free transport.
+#[derive(Debug, Clone, Default)]
+pub struct OtelConfig {
+    /// Whether OTel log/trace forwarding was requested. Requesting it now only warns.
+    pub enabled: bool,
+    /// Service name that would identify this application to a collector.
+    pub service_name: Option<String>,
+    /// OTLP collector endpoint (e.g., "http://localhost:4318").
+    pub endpoint: Option<String>,
+    /// Additional headers that would be sent with OTLP requests (e.g., authentication).
+    pub headers: HashMap<String, String>,
+}
+
 #[derive(Debug)]
 pub struct LoggingConfig {
     pub level: LogLevel,
     pub file_config: Option<FileLoggingConfig>,
-    /// OpenTelemetry configuration for log/trace forwarding to an OTLP collector.
-    /// By default, OTel is disabled. Set `enabled: true` and configure the endpoint
-    /// to forward traces and logs to an OTel collector.
-    ///
-    /// Honoured only when the `otel` feature is on. Without it this field is still
-    /// present and still compiles, but `enabled: true` forwards nothing and logs a
-    /// warning at setup.
+    /// OpenTelemetry configuration. Accepted and ignored: OTLP export was removed, so
+    /// `enabled: true` forwards nothing and logs a warning at setup. The field stays so
+    /// existing `LoggingConfig` literals keep compiling. See [`OtelConfig`].
     pub otel_config: OtelConfig,
     #[cfg(feature = "error_aggregation")]
     pub error_aggregation: ErrorAggregationConfig,
@@ -98,10 +128,6 @@ pub struct LogThrottlingConfig {
 pub struct LogSetupReturn {
     pub reload_handle: LogReloadHandle,
     pub log_guards: (WorkerGuard, Option<WorkerGuard>),
-    /// OpenTelemetry guards (tracer + logger providers). Must be kept alive to ensure
-    /// pending traces and logs are flushed to the OTLP collector on shutdown.
-    #[cfg(feature = "otel")]
-    pub otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     pub errors_container: Arc<ErrorAggregationContainer>,
     #[cfg(feature = "log_throttling")]
@@ -114,9 +140,6 @@ struct LoggingSubscriberParts {
     subscriber: Box<dyn Subscriber + Send + Sync + 'static>,
     reload_handle: LogReloadHandle,
     log_guards: (WorkerGuard, Option<WorkerGuard>), // Stdout and optional file log guards
-    /// OpenTelemetry guards (tracer + logger providers).
-    #[cfg(feature = "otel")]
-    otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     errors_container: Arc<ErrorAggregationContainer>,
     #[cfg(feature = "log_throttling")]
@@ -216,21 +239,16 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 
     let reload_handle = LogReloadHandle(global_reload_handle);
 
-    // Build OTel layer (separate, parallel to stdout/file layers)
-    #[cfg(feature = "otel")]
-    let otel_result = otel::build_otel_layer(&config.otel_config);
-    #[cfg(feature = "otel")]
-    let otel_guards = otel_result.guards;
-    #[cfg(feature = "otel")]
-    let otel_tracer = otel_result.tracer;
-
-    // Without the `otel` feature there is no exporter to build. Say so out loud
-    // rather than silently dropping a collector the operator configured.
-    #[cfg(not(feature = "otel"))]
+    // There is no exporter to build any more, and no feature flag that brings one back.
+    // An operator who set `enabled: true` pointed this process at a collector and is
+    // entitled to find out that nothing arrives there, so the flag warns rather than
+    // being ignored. The warning fires once per `setup_logging` call, which is once per
+    // process in every consumer, and it names the config field so the fix is obvious.
     if config.otel_config.enabled {
         tracing::warn!(
             target: "otel::setup",
-            "otel_config.enabled is true but endpoint-libs was built without the `otel` feature - \
+            endpoint = config.otel_config.endpoint.as_deref().unwrap_or("unset"),
+            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
              no traces or logs will be forwarded to a collector"
         );
     }
@@ -254,29 +272,16 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     // Combine Subscriber with Sinks
     let subscriber = subscriber.with(sinks);
 
-    // Add OTel Traces and Logs layers if enabled
-    #[cfg(feature = "otel")]
-    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = match (otel_tracer, &otel_guards)
-    {
-        (Some(tracer), Some(guards)) => {
-            let trace_layer = OpenTelemetryLayer::new(tracer);
-            let log_layer = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
-                &guards.logger_provider,
-            );
-            Box::new(subscriber.with(trace_layer).with(log_layer))
-        }
-        _ => Box::new(subscriber),
-    };
-
-    #[cfg(not(feature = "otel"))]
+    // The box is still here with no OTel arm to choose against: `setup_logging` and
+    // `setup_logging_test` install the same concrete type, and the erasure is what lets
+    // the feature-gated layers above change the subscriber's type without changing this
+    // function's signature.
     let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = Box::new(subscriber);
 
     Ok(LoggingSubscriberParts {
         subscriber,
         reload_handle,
         log_guards: (stdout_guard, file_guard),
-        #[cfg(feature = "otel")]
-        otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container,
         #[cfg(feature = "log_throttling")]
@@ -298,8 +303,10 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 /// Returns [LogSetupReturn], which is a composite struct containing objects that need to be retained by the client such as:
 /// - [LogReloadHandle], for setting a new global log level during runtime
 /// - [WorkerGuard], so that the non-blocking file writer can continue writing. This cannot be dropped and needs to be kept alive for the duration of the program execution
-/// - [Option<OtelGuards>], the OTel guards. Must be kept alive to flush pending traces and logs on shutdown.
 /// - [ErrorAggregationContainer], if the [error_aggregation] feature is enabled. This object allows recent errors to be queried from the logging framework
+///
+/// `otel_config.enabled` is accepted and warned about; there is no OTel guard to return
+/// any more because there is no exporter to flush.
 pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -310,8 +317,6 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     Ok(LogSetupReturn {
         reload_handle: parts.reload_handle,
         log_guards: parts.log_guards,
-        #[cfg(feature = "otel")]
-        otel_guards: parts.otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container: parts.errors_container,
         #[cfg(feature = "log_throttling")]
@@ -414,9 +419,6 @@ pub struct LogSetupReturnTest {
     reload_handle: LogReloadHandle,
     #[allow(dead_code)]
     log_guards: (WorkerGuard, Option<WorkerGuard>),
-    #[cfg(feature = "otel")]
-    #[allow(dead_code)]
-    otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     #[allow(dead_code)]
     errors_container: Arc<ErrorAggregationContainer>,
@@ -435,8 +437,6 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
         _guard: guard,
         reload_handle: parts.reload_handle,
         log_guards: parts.log_guards,
-        #[cfg(feature = "otel")]
-        otel_guards: parts.otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container: parts.errors_container,
     })
@@ -549,39 +549,24 @@ mod tests {
         );
     }
 
-    // === OTel Integration Tests ===
+    // === OTel config tests ===
+    //
+    // OTLP export is gone; `OtelConfig` remains as an inert config struct so
+    // the backends that build a `LoggingConfig` literal keep compiling. What
+    // is worth asserting is therefore no longer that an exporter came up, but
+    // that asking for one is accepted, warned about, and harmless.
 
-    /// Test that setup succeeds when OTel is disabled (default config)
-    /// and otel_guards is None
-    #[cfg(feature = "otel")]
+    /// A config with `enabled: true` must not fail setup, and must not take
+    /// the rest of the subscriber down with it.
+    ///
+    /// This replaces `test_otel_disabled_returns_none_guards` and
+    /// `test_otel_graceful_degradation_unreachable_endpoint`, which asserted
+    /// on `LogSetupReturn::otel_guards`. That field went with the exporter.
+    /// The endpoint is still the unreachable one those tests used, because the
+    /// property that matters is unchanged: nothing here may try to reach it at
+    /// setup time.
     #[test]
-    fn test_otel_disabled_returns_none_guards() {
-        let config = LoggingConfig {
-            level: LogLevel::Info,
-            file_config: None,
-            otel_config: OtelConfig::default(), // enabled: false
-            #[cfg(feature = "error_aggregation")]
-            error_aggregation: default_error_aggregation_config(),
-            #[cfg(feature = "log_throttling")]
-            throttling_config: None,
-        };
-
-        let result = setup_logging_test(config);
-        assert!(result.is_ok(), "Setup should succeed with OTel disabled");
-
-        let guard = result.unwrap();
-        assert!(
-            guard.otel_guards.is_none(),
-            "otel_guards should be None when OTel is disabled"
-        );
-    }
-
-    /// Test that OTel initialization succeeds even with an unreachable endpoint
-    /// The SDK initializes asynchronously, so guards ARE present even if the endpoint
-    /// is unreachable. Export failures happen at runtime, not at setup time.
-    #[cfg(feature = "otel")]
-    #[test]
-    fn test_otel_graceful_degradation_unreachable_endpoint() {
+    fn enabling_otel_is_accepted_and_changes_nothing() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
@@ -596,21 +581,27 @@ mod tests {
             throttling_config: None,
         };
 
-        // Setup should succeed - the SDK doesn't validate connectivity at init time
         let result = setup_logging_test(config);
         assert!(
             result.is_ok(),
-            "Setup should succeed even with unreachable OTel endpoint"
+            "an otel_config asking for export must not fail setup"
         );
+    }
 
-        let guard = result.unwrap();
-        // Guards ARE present because the SDK creates them synchronously.
-        // Export failures happen asynchronously when spans/logs are batched.
-        // The key assertion is that setup() didn't return an error.
-        assert!(
-            guard.otel_guards.is_some(),
-            "otel_guards should be Some even with unreachable endpoint (SDK initializes synchronously)"
-        );
+    /// The default config asks for nothing and is the common case.
+    #[test]
+    fn a_default_otel_config_sets_up_cleanly() {
+        let config = LoggingConfig {
+            level: LogLevel::Info,
+            file_config: None,
+            otel_config: OtelConfig::default(),
+            #[cfg(feature = "error_aggregation")]
+            error_aggregation: default_error_aggregation_config(),
+            #[cfg(feature = "log_throttling")]
+            throttling_config: None,
+        };
+
+        assert!(setup_logging_test(config).is_ok());
     }
 
     /// Test that file logging works alongside OTel enabled (but with invalid endpoint)
@@ -747,37 +738,5 @@ mod tests {
         assert!(default_config.service_name.is_none());
         assert!(default_config.endpoint.is_none());
         assert!(default_config.headers.is_empty());
-    }
-
-    /// Test that setup succeeds with OTel enabled but no endpoint specified
-    /// (should use env var fallback or SDK defaults)
-    #[cfg(feature = "otel")]
-    #[test]
-    fn test_otel_enabled_no_endpoint_uses_fallback() {
-        let config = LoggingConfig {
-            level: LogLevel::Info,
-            file_config: None,
-            otel_config: OtelConfig {
-                enabled: true,
-                endpoint: None, // No endpoint - should use SDK defaults
-                ..OtelConfig::default()
-            },
-            #[cfg(feature = "error_aggregation")]
-            error_aggregation: default_error_aggregation_config(),
-            #[cfg(feature = "log_throttling")]
-            throttling_config: None,
-        };
-
-        // Setup should succeed (exporter will use SDK defaults)
-        let result = setup_logging_test(config);
-        assert!(
-            result.is_ok(),
-            "Setup should succeed with OTel enabled but no endpoint"
-        );
-
-        let guard = result.unwrap();
-        // Guards may or may not be present depending on whether SDK defaults work
-        // The key thing is setup didn't panic or return an error
-        let _ = guard.otel_guards;
     }
 }
