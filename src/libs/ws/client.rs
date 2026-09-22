@@ -3,50 +3,30 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::*;
 
-// --- tungstenite/hyper/rustls: only for the TCP/TLS constructor ------------
+// --- nago-wss/nagoya: only for the TCP(/TLS) constructors -------------------
+//
+// The tokio half of this file is gone. `tokio_tungstenite`, `tokio::net`,
+// `tokio_rustls` and the hyper HTTP/2 path have been replaced by nago-wss over
+// a nagoya reactor, which is the same substitution `server.rs` already made.
+// What that costs the caller is documented on [`WsClient::new`]: a nagoya
+// socket is bound to one reactor at birth and only makes progress while that
+// reactor is polled, so the reactor is now a parameter rather than something
+// an ambient `#[tokio::main]` supplied invisibly.
 #[cfg(feature = "ws-client")]
-use bytes::Bytes;
+use nago_wss::conn::Connection;
 #[cfg(feature = "ws-client")]
-use eyre::ensure;
+use nago_wss::proto::message::{CloseFrame as NagoCloseFrame, Limits, Message as NagoMessage};
 #[cfg(feature = "ws-client")]
-use futures::SinkExt;
+use nago_wss::stream::{ByteStream, StreamExt};
 #[cfg(feature = "ws-client")]
-use futures::StreamExt;
+use nagoya::reactor::{Addr, Handle, TcpStream, connect_any, resolve};
 #[cfg(feature = "ws-client")]
-use http_body_util::Empty;
-#[cfg(feature = "ws-client")]
-use hyper::StatusCode;
-#[cfg(feature = "ws-client")]
-use hyper::client::conn::http2;
-#[cfg(feature = "ws-client")]
-use hyper::header::HeaderValue;
-#[cfg(feature = "ws-client")]
-use hyper_util::rt::{TokioExecutor, TokioIo};
-#[cfg(feature = "ws-client")]
-use rustls::pki_types::ServerName;
-#[cfg(feature = "ws-client")]
-use std::net::SocketAddr;
-#[cfg(feature = "ws-client")]
-use std::sync::Arc;
-#[cfg(feature = "ws-client")]
-use tokio::net::TcpStream;
-#[cfg(feature = "ws-client")]
-use tokio_rustls::TlsConnector;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::MaybeTlsStream;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::WebSocketStream;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::connect_async;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::tungstenite::Message as TMessage;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-#[cfg(feature = "ws-client")]
-use tokio_tungstenite::tungstenite::protocol::Role;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::libs::log::LogLevel;
 use crate::libs::ws::WireMessage as Message;
+#[cfg(feature = "ws-client")]
+use crate::libs::ws::{CloseFrame, Utf8Bytes};
 use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGeneric};
 
 // ---------------------------------------------------------------------------
@@ -54,23 +34,50 @@ use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGene
 // ---------------------------------------------------------------------------
 
 /// Which HTTP version to use when connecting.
+///
+/// # There is only one answer now
+///
+/// HTTP/2 extended CONNECT (RFC 8441) has been removed from this client. It was
+/// never negotiable without ALPN, ALPN is a TLS feature, and the server side of
+/// this crate no longer terminates TLS: the fleet runs plain `ws://` behind a
+/// fly.io edge that terminates for it. An h2 attempt against that topology can
+/// only fail and fall back, so the fallback is all that is left.
+///
+/// The enum survives because two fleet repositories name it
+/// (`honey_id-types`, `auth.honey.id-backend`) and deleting it would break them
+/// at the `use` line rather than at the one place the behaviour actually
+/// changed. Every variant now selects the HTTP/1.1 upgrade handshake; the two
+/// that used to mean something else are deprecated rather than silently
+/// honoured, so a caller asking for h2 is told, at compile time, that it is not
+/// getting it.
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg(feature = "ws-client")]
 pub enum WsVersionMode {
-    /// HTTP/1.1 upgrade handshake (existing behaviour).
+    /// HTTP/1.1 upgrade handshake. The only behaviour.
     #[default]
     Http1Only,
-    /// HTTP/2 Extended CONNECT (RFC 8441): h2 for `wss://`, h2c for `ws://`.
+    /// Formerly HTTP/2 extended CONNECT. Now an alias for [`Self::Http1Only`].
+    #[deprecated(note = "HTTP/2 extended CONNECT was removed; this connects over HTTP/1.1")]
     Http2Only,
-    /// Try HTTP/2 first; fall back to HTTP/1.1 on any error.
+    /// Formerly "h2 first, fall back to HTTP/1.1". Now an alias for [`Self::Http1Only`].
+    #[deprecated(note = "HTTP/2 extended CONNECT was removed; this connects over HTTP/1.1")]
     Auto,
 }
 
 /// Response metadata returned by [`WsClientBuilder::build`].
+///
+/// `headers` is no longer the server's whole response head. nago-wss's
+/// handshake consumes the head, validates the `Sec-WebSocket-Accept` value
+/// against the key it sent and reports only the negotiated subprotocol, so the
+/// rest is gone by the time this is built. Reporting the one header it does
+/// know is honest; inventing the others would not be. Callers that need more
+/// of the head need it surfaced from nago-wss first.
 #[cfg(feature = "ws-client")]
 pub struct WsConnectResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    /// The subprotocol the server selected, if any.
+    pub protocol: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,9 +86,11 @@ pub struct WsConnectResponse {
 
 enum WsStream {
     #[cfg(feature = "ws-client")]
-    H1(Box<WebSocketStream<MaybeTlsStream<TcpStream>>>),
-    #[cfg(feature = "ws-client")]
-    H2(Box<WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>>),
+    Plain(Box<Connection<TcpStream>>),
+    /// A `wss://` connection. See [`WsTarget::resolve`] for why this is behind
+    /// a feature of its own rather than compiled unconditionally.
+    #[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+    Secure(Box<Connection<nago_wss::tls::TlsStream<TcpStream>>>),
     /// Any transport-agnostic message channel — a framed Unix socket, a named pipe,
     /// an XPC connection. Added in 2.0 alongside [`WsClient::from_stream`].
     Message(Box<dyn crate::libs::ws::MessageStream>),
@@ -97,41 +106,53 @@ pub struct WsClient {
 }
 
 impl WsClient {
-    // Existing HTTP/1.1 constructor — unchanged externally.
+    /// Connect over TCP and perform the HTTP/1.1 upgrade handshake.
+    ///
+    /// # The reactor is a parameter now
+    ///
+    /// **Breaking change: this takes a [`Handle`], and its second return value
+    /// is a [`WsConnectResponse`] rather than a tungstenite `http::Response`.**
+    ///
+    /// tokio supplied an ambient runtime, so a client could be built from
+    /// anywhere inside `#[tokio::main]` and the sockets it opened found a
+    /// driver by themselves. nagoya has no ambient anything: a descriptor is
+    /// registered with one specific reactor when it is created, and only that
+    /// reactor will ever report its readiness. A connection opened against a
+    /// reactor nobody polls does not connect slowly, it never completes at all.
+    /// Making the handle an argument is the only way that constraint is visible
+    /// at the call site, and it matches what
+    /// [`WebsocketServer::listen`](crate::libs::ws::WebsocketServer::listen)
+    /// already does on the other side of the wire.
+    ///
+    /// The caller owns the reactor, exactly as the server does:
+    ///
+    /// ```ignore
+    /// let reactor = nagoya::reactor::Reactor::local()?;
+    /// let handle = reactor.handle();
+    /// // Resolve first: see `WsTarget::resolve`.
+    /// let target = WsTarget::resolve("ws://127.0.0.1:8443/")?;
+    /// nagoya::reactor::block_on_with(&reactor, async {
+    ///     let (client, _) = WsClientBuilder::new().connect(&target, &handle).await?;
+    ///     // ... use the client while this future runs ...
+    ///     Ok::<_, eyre::Report>(())
+    /// })?;
+    /// ```
+    ///
+    /// This convenience form resolves the name itself, which blocks — see
+    /// [`WsTarget::resolve`]. Use [`WsTarget`] plus
+    /// [`WsClientBuilder::connect`] when a reactor is already running.
     #[cfg(feature = "ws-client")]
     pub async fn new(
         connect_addr: &str,
         protocol_header: &str,
         headers: Option<Vec<(&'static str, &'static str)>>,
-    ) -> Result<(
-        Self,
-        tokio_tungstenite::tungstenite::http::Response<std::option::Option<Vec<u8>>>,
-    )> {
-        let mut req = <&str as IntoClientRequest>::into_client_request(connect_addr)?;
-        if !protocol_header.is_empty() {
-            req.headers_mut().insert(
-                "Sec-WebSocket-Protocol",
-                HeaderValue::from_str(protocol_header)?,
-            );
-        }
-
+        handle: &Handle,
+    ) -> Result<(Self, WsConnectResponse)> {
+        let mut builder = WsClientBuilder::new().protocol_header(protocol_header);
         if let Some(headers) = headers {
-            for header in headers {
-                req.headers_mut()
-                    .insert(header.0, HeaderValue::from_str(header.1)?);
-            }
+            builder = builder.headers(headers);
         }
-
-        let (ws_stream, response) = connect_async(req)
-            .await
-            .context("Failed to connect to endpoint")?;
-        Ok((
-            Self {
-                stream: WsStream::H1(Box::new(ws_stream)),
-                seq: 0,
-            },
-            response,
-        ))
+        builder.build(connect_addr, handle).await
     }
 
     /// Build a client over any [`MessageStream`], bypassing TCP/TLS entirely.
@@ -145,8 +166,9 @@ impl WsClient {
     /// socket or inherited socketpair, or with a platform transport's own
     /// `MessageStream` implementation.
     ///
-    /// Must be driven inside a `tokio::task::LocalSet` — `MessageStream`'s futures are
-    /// not `Send`.
+    /// `MessageStream`'s futures are not `Send`, so this must be polled on the
+    /// thread that owns the stream — a `tokio::task::LocalSet`, or whatever the
+    /// transport's own runtime offers.
     pub fn from_stream(stream: Box<dyn crate::libs::ws::MessageStream>) -> Self {
         Self {
             stream: WsStream::Message(stream),
@@ -157,13 +179,13 @@ impl WsClient {
     // --- Private stream helpers -------------------------------------------
 
     async fn stream_send(&mut self, msg: Message) -> Result<()> {
-        // Backend edge: the client speaks WireMessage; tungstenite's type exists
-        // only inside these helpers.
+        // Backend edge: the client speaks WireMessage; nago-wss's message type
+        // exists only inside these helpers and the two conversions below.
         match &mut self.stream {
             #[cfg(feature = "ws-client")]
-            WsStream::H1(s) => s.send(TMessage::from(msg)).await?,
-            #[cfg(feature = "ws-client")]
-            WsStream::H2(s) => s.send(TMessage::from(msg)).await?,
+            WsStream::Plain(c) => send_to(c, msg).await?,
+            #[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+            WsStream::Secure(c) => send_to(c, msg).await?,
             WsStream::Message(s) => s
                 .send(msg)
                 .await
@@ -175,15 +197,9 @@ impl WsClient {
     async fn stream_next(&mut self) -> Option<Result<Message>> {
         match &mut self.stream {
             #[cfg(feature = "ws-client")]
-            WsStream::H1(s) => s
-                .next()
-                .await
-                .map(|res| res.map(Into::into).map_err(Into::into)),
-            #[cfg(feature = "ws-client")]
-            WsStream::H2(s) => s
-                .next()
-                .await
-                .map(|res| res.map(Into::into).map_err(Into::into)),
+            WsStream::Plain(c) => next_from(c).await,
+            #[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+            WsStream::Secure(c) => next_from(c).await,
             WsStream::Message(s) => s
                 .recv()
                 .await
@@ -194,9 +210,9 @@ impl WsClient {
     async fn stream_close(&mut self) -> Result<()> {
         match &mut self.stream {
             #[cfg(feature = "ws-client")]
-            WsStream::H1(s) => s.as_mut().close(None).await?,
-            #[cfg(feature = "ws-client")]
-            WsStream::H2(s) => s.as_mut().close(None).await?,
+            WsStream::Plain(c) => close_to(c).await?,
+            #[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+            WsStream::Secure(c) => close_to(c).await?,
             WsStream::Message(s) => {
                 // No protocol-level close handshake on a plain message channel:
                 // send the Close frame and let the transport tear down.
@@ -320,14 +336,187 @@ impl WsClient {
 }
 
 // ---------------------------------------------------------------------------
+// The nago-wss edge
+// ---------------------------------------------------------------------------
+//
+// Three helpers, generic over the byte stream, so the plain and TLS variants of
+// `WsStream` share one implementation instead of two that drift. The match arms
+// above are dispatch and nothing else.
+
+#[cfg(feature = "ws-client")]
+async fn send_to<S: ByteStream + StreamExt>(
+    conn: &mut Connection<S>,
+    message: Message,
+) -> Result<()> {
+    conn.write(into_nago(message))
+        .await
+        .map_err(|err| eyre!("websocket write failed: {err}"))
+}
+
+#[cfg(feature = "ws-client")]
+async fn next_from<S: ByteStream + StreamExt>(conn: &mut Connection<S>) -> Option<Result<Message>> {
+    match conn.read().await {
+        // A clean close handshake. `None` is "the stream ended", which is what
+        // every caller above already treats as a closed connection.
+        Ok(None) => None,
+        // tokio-tungstenite answered pings inside its own `Stream` impl and
+        // still yielded the Ping to the caller; nago-wss does neither, because
+        // it will not write behind its caller's back. Answering here keeps the
+        // observable behaviour identical rather than leaving a client that
+        // looks alive to itself and dead to any server with a ping timeout.
+        // §5.5.2: the payload must be echoed exactly, so it is cloned rather
+        // than rebuilt — `Bytes` makes that a refcount bump.
+        Ok(Some(NagoMessage::Ping(payload))) => {
+            if let Err(err) = conn.pong(payload.clone()).await {
+                return Some(Err(eyre!("failed to answer ping: {err}")));
+            }
+            Some(Ok(Message::Ping(payload)))
+        }
+        Ok(Some(other)) => Some(Ok(from_nago(other))),
+        Err(err) => Some(Err(eyre!("websocket read failed: {err}"))),
+    }
+}
+
+#[cfg(feature = "ws-client")]
+async fn close_to<S: ByteStream + StreamExt>(conn: &mut Connection<S>) -> Result<()> {
+    // Sending a second close is a no-op inside nago-wss, so this stays safe to
+    // call from both `close()` and the Close branch of `recv_resp`.
+    conn.close(None)
+        .await
+        .map_err(|err| eyre!("websocket close failed: {err}"))
+}
+
+/// nago-wss message -> [`WireMessage`](crate::libs::ws::WireMessage).
+///
+/// Both types carry `Bytes`, so this moves refcounts rather than payloads: the
+/// buffer the reactor read into reaches the caller without being copied.
+#[cfg(feature = "ws-client")]
+fn from_nago(message: NagoMessage) -> Message {
+    match message {
+        // SAFETY: nago-wss validates a text payload during reassembly (over the
+        // joined fragments, so a multi-byte character split across a boundary is
+        // handled) and rejects the frame otherwise. Re-scanning here would
+        // repeat that work on every message for no additional guarantee.
+        NagoMessage::Text(payload) => {
+            Message::Text(unsafe { Utf8Bytes::from_bytes_unchecked(payload) })
+        }
+        NagoMessage::Binary(payload) => Message::Binary(payload),
+        NagoMessage::Ping(payload) => Message::Ping(payload),
+        NagoMessage::Pong(payload) => Message::Pong(payload),
+        NagoMessage::Close(frame) => Message::Close(frame.map(|frame| CloseFrame {
+            code: frame.code.0,
+            // SAFETY: as above — a close reason is checked for UTF-8 when the
+            // close body is parsed, and a frame that fails never gets here.
+            reason: unsafe { Utf8Bytes::from_bytes_unchecked(frame.reason) },
+        })),
+    }
+}
+
+/// [`WireMessage`](crate::libs::ws::WireMessage) -> nago-wss message.
+#[cfg(feature = "ws-client")]
+fn into_nago(message: Message) -> NagoMessage {
+    match message {
+        Message::Text(text) => NagoMessage::Text(text.into_bytes()),
+        Message::Binary(payload) => NagoMessage::Binary(payload),
+        Message::Ping(payload) => NagoMessage::Ping(payload),
+        Message::Pong(payload) => NagoMessage::Pong(payload),
+        Message::Close(frame) => NagoMessage::Close(frame.map(|frame| NagoCloseFrame {
+            code: nago_wss::CloseCode(frame.code),
+            reason: frame.reason.into_bytes(),
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WsTarget: the blocking half of connecting
+// ---------------------------------------------------------------------------
+
+/// A parsed and resolved WebSocket URL, ready to connect to.
+///
+/// This exists to separate the one blocking step from the asynchronous ones.
+/// See [`Self::resolve`].
+#[cfg(feature = "ws-client")]
+pub struct WsTarget {
+    secure: bool,
+    /// The host as written, which is what SNI and certificate validation use.
+    host: String,
+    /// The `Host` header value: the same host, with the port when it is not the
+    /// scheme's default.
+    host_header: String,
+    path: String,
+    addrs: Vec<Addr>,
+}
+
+#[cfg(feature = "ws-client")]
+impl WsTarget {
+    /// Parse a `ws://` or `wss://` URL and resolve its host.
+    ///
+    /// # Why this is a separate, synchronous step
+    ///
+    /// [`resolve`] is `getaddrinfo`. It blocks the calling thread for as long
+    /// as the platform resolver takes, which on a DNS timeout is seconds, and
+    /// nagoya has no `spawn_blocking` to put it anywhere else. The arrangement
+    /// this crate uses is the one where the polling thread *is* the reactor
+    /// thread, so resolving from inside a running reactor stalls every other
+    /// socket on it for the whole lookup — not just this client's.
+    ///
+    /// So the name is resolved here, before any reactor is driven, and
+    /// [`WsClientBuilder::connect`] takes the result. That is the same order
+    /// [`WebsocketServer::listen`](crate::libs::ws::WebsocketServer::listen)
+    /// follows on the server side: resolve, create the reactor, then poll.
+    ///
+    /// `nago_wss::client::connect_plain` would do both in one call and is
+    /// deliberately not used for that reason: it resolves inside the future,
+    /// which is precisely the stall nagoya's documentation warns about.
+    ///
+    /// Every address the name has is kept, not the first. A host with both an A
+    /// and an AAAA record is ordinary, and taking one family fails on any
+    /// machine where the listener is on the other.
+    pub fn resolve(url: &str) -> Result<Self> {
+        let url = nago_wss::client::Url::parse(url)
+            .map_err(|err| eyre!("invalid WebSocket URL {url}: {err}"))?;
+
+        #[cfg(not(feature = "ws-client-tls"))]
+        if url.secure {
+            bail!(
+                "wss:// needs the `ws-client-tls` feature; this build speaks plain ws:// only \
+                 (the fleet terminates TLS at the edge)"
+            );
+        }
+
+        let host_header = url.host_header();
+        debug!(host = %url.host, port = url.port, secure = url.secure, "resolving WebSocket host");
+        let addrs = resolve(&url.host, url.port)
+            .map_err(|err| eyre!("DNS resolution failed for {}: {err}", url.host))?;
+        debug!(?addrs, "resolved WebSocket host");
+
+        Ok(Self {
+            secure: url.secure,
+            host: url.host,
+            host_header,
+            path: url.path,
+            addrs,
+        })
+    }
+
+    /// Whether this target is `wss://`.
+    pub fn is_secure(&self) -> bool {
+        self.secure
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WsClientBuilder
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ws-client")]
 pub struct WsClientBuilder {
-    mode: WsVersionMode,
     protocol_header: String,
     headers: Vec<(&'static str, &'static str)>,
+    /// Only the TLS path reads this, and the TLS path is optional. Without the
+    /// feature the field is still set — the builder method stays callable so a
+    /// caller does not have to feature-gate its own code — and never read.
+    #[cfg_attr(not(feature = "ws-client-tls"), allow(dead_code))]
     danger_accept_invalid_certs: bool,
 }
 
@@ -335,15 +524,27 @@ pub struct WsClientBuilder {
 impl WsClientBuilder {
     pub fn new() -> Self {
         Self {
-            mode: WsVersionMode::Http1Only,
             protocol_header: String::new(),
             headers: Vec::new(),
             danger_accept_invalid_certs: false,
         }
     }
 
-    pub fn mode(mut self, mode: WsVersionMode) -> Self {
-        self.mode = mode;
+    /// Select the HTTP version. Retained for source compatibility; ignored.
+    ///
+    /// Every [`WsVersionMode`] now means HTTP/1.1. The call is kept so the two
+    /// fleet repositories that make it keep compiling, and warns at runtime
+    /// when it is given a mode that used to mean something else, because a
+    /// silently downgraded connection is exactly the kind of thing that gets
+    /// diagnosed twice.
+    #[allow(deprecated)]
+    pub fn mode(self, mode: WsVersionMode) -> Self {
+        if !matches!(mode, WsVersionMode::Http1Only) {
+            warn!(
+                ?mode,
+                "HTTP/2 extended CONNECT was removed from this client; connecting over HTTP/1.1"
+            );
+        }
         self
     }
 
@@ -362,33 +563,103 @@ impl WsClientBuilder {
         self
     }
 
+    /// Accept any server certificate. `wss://` only, and a development tool.
     pub fn danger_accept_invalid_certs(mut self) -> Self {
         self.danger_accept_invalid_certs = true;
         self
     }
 
-    pub async fn build(self, connect_addr: &str) -> Result<(WsClient, WsConnectResponse)> {
-        let danger = self.danger_accept_invalid_certs;
-        match self.mode {
-            WsVersionMode::Http1Only => {
-                connect_h1(connect_addr, &self.protocol_header, &self.headers, danger).await
+    /// Resolve `connect_addr` and connect, in one call.
+    ///
+    /// Convenience for a caller that has not entered a reactor yet — a test, a
+    /// CLI, the first connection a process makes. **It resolves inside the
+    /// returned future**, so a reactor that is already serving other sockets
+    /// stalls for the length of the lookup. Anything long-lived should call
+    /// [`WsTarget::resolve`] before entering the reactor and then
+    /// [`Self::connect`]; that is the whole reason the two are separable.
+    pub async fn build(
+        self,
+        connect_addr: &str,
+        handle: &Handle,
+    ) -> Result<(WsClient, WsConnectResponse)> {
+        let target = WsTarget::resolve(connect_addr)?;
+        self.connect(&target, handle).await
+    }
+
+    /// Connect to an already resolved target on the reactor `handle` names.
+    ///
+    /// The socket this opens belongs to that reactor and makes progress only
+    /// while it is polled. See [`WsClient::new`].
+    pub async fn connect(
+        self,
+        target: &WsTarget,
+        handle: &Handle,
+    ) -> Result<(WsClient, WsConnectResponse)> {
+        // The subprotocol goes out as one header value, exactly as it was
+        // written. It is not a list this crate composes: the fleet's auth
+        // scheme puts `0<method>, 1<key>` in that field, and splitting it on
+        // the comma and rejoining it would be a round trip through a meaning
+        // the string does not have.
+        let protocols: Vec<&str> = if self.protocol_header.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.protocol_header.as_str()]
+        };
+        let headers: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (*k, *v)).collect();
+
+        debug!(
+            host = %target.host,
+            secure = target.secure,
+            has_protocol_header = !protocols.is_empty(),
+            additional_header_count = headers.len(),
+            "connecting WebSocket client"
+        );
+
+        if target.secure {
+            #[cfg(feature = "ws-client-tls")]
+            {
+                return connect_secure(
+                    target,
+                    handle,
+                    &protocols,
+                    &headers,
+                    self.danger_accept_invalid_certs,
+                )
+                .await;
             }
-            WsVersionMode::Http2Only => {
-                connect_h2(connect_addr, &self.protocol_header, &self.headers, danger).await
-            }
-            WsVersionMode::Auto => {
-                match connect_h2(connect_addr, &self.protocol_header, &self.headers, danger).await {
-                    Ok(result) => Ok(result),
-                    Err(h2_err) => {
-                        debug!(
-                            "H2 connection failed ({}), falling back to HTTP/1.1",
-                            h2_err
-                        );
-                        connect_h1(connect_addr, &self.protocol_header, &self.headers, danger).await
-                    }
-                }
+            #[cfg(not(feature = "ws-client-tls"))]
+            {
+                // Unreachable through `WsTarget::resolve`, which refuses a
+                // `wss://` URL in this build. Kept so the branch is not a
+                // silent plaintext connection if a target is ever built
+                // another way.
+                bail!("wss:// needs the `ws-client-tls` feature");
             }
         }
+
+        let stream = connect_any(&target.addrs, handle)
+            .await
+            .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
+
+        let (connection, protocol) = nago_wss::upgrade::connect(
+            stream,
+            &target.path,
+            &target.host_header,
+            &protocols,
+            &headers,
+            handshake_entropy(),
+            Limits::default(),
+        )
+        .await
+        .map_err(|err| eyre!("WebSocket upgrade failed: {err}"))?;
+
+        Ok((
+            WsClient {
+                stream: WsStream::Plain(Box::new(connection)),
+                seq: 0,
+            },
+            connect_response(protocol),
+        ))
     }
 }
 
@@ -403,285 +674,128 @@ impl Default for WsClientBuilder {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// A handshake succeeded; this is what the caller is told about it.
+///
+/// The status is 101 by construction: nago-wss's `check_response` returns an
+/// error for anything else, so a value here means the upgrade happened.
 #[cfg(feature = "ws-client")]
-struct ParsedUrl {
-    tls: bool,
-    host: String,
-    port: u16,
-    path: String,
+fn connect_response(protocol: Option<String>) -> WsConnectResponse {
+    let headers = match &protocol {
+        Some(protocol) => vec![("sec-websocket-protocol".to_string(), protocol.clone())],
+        None => Vec::new(),
+    };
+    WsConnectResponse {
+        status: 101,
+        headers,
+        protocol,
+    }
 }
 
+/// Sixteen bytes for the `Sec-WebSocket-Key`.
+///
+/// §4.1 wants a value a cache or a proxy cannot predict, so it cannot replay a
+/// 101 it liked the look of. It is sent in cleartext in the request and is not
+/// a secret, which is why this is the clock, a counter and an address rather
+/// than a CSPRNG this crate would otherwise not depend on.
+///
+/// The counter is what makes two connections opened in the same nanosecond
+/// differ, which is ordinary for a client that opens several at once; the
+/// address varies between processes with ASLR, which the clock alone does not
+/// give on a machine where two processes start together. nago-wss's own default
+/// is a fixed constant it documents as the thing to avoid, so the parameter is
+/// always supplied rather than defaulted.
 #[cfg(feature = "ws-client")]
-fn parse_ws_url(url: &str) -> Result<ParsedUrl> {
-    let (tls, rest) = if let Some(r) = url.strip_prefix("wss://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("ws://") {
-        (false, r)
-    } else {
-        bail!("URL must start with ws:// or wss://: {}", url)
-    };
+fn handshake_entropy() -> [u8; 16] {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let (authority, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], rest[i..].to_owned()),
-        None => (rest, "/".to_owned()),
-    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |value| value.as_nanos() as u64);
+    let counted = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let local = 0u8;
+    let address = core::ptr::addr_of!(local) as u64;
 
-    let (host, port) = match authority.rfind(':') {
-        Some(i) => {
-            let h = authority[..i].to_owned();
-            let p: u16 = authority[i + 1..].parse().context("Invalid port in URL")?;
-            (h, p)
-        }
-        None => (authority.to_owned(), if tls { 443 } else { 80 }),
-    };
-
-    Ok(ParsedUrl {
-        tls,
-        host,
-        port,
-        path,
-    })
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&nanos.to_ne_bytes());
+    out[8..].copy_from_slice(&(counted ^ address).to_ne_bytes());
+    out
 }
 
-#[cfg(feature = "ws-client")]
-async fn connect_h1(
-    addr: &str,
-    protocol_header: &str,
-    headers: &[(&'static str, &'static str)],
+// ---------------------------------------------------------------------------
+// TLS, for a client that still dials an external wss://
+// ---------------------------------------------------------------------------
+//
+// Behind `ws-client-tls`, which is not in the default set and must forward
+// `nago-wss/tls` (and `nago-wss/webpki-roots` for the bundled trust anchors).
+// Off by default on purpose: the fleet's own services are plain `ws://` with
+// TLS terminated at fly.io, and nago-rustls drags `std` and a certificate stack
+// into a graph the internal services are trying to keep no_std-friendly. A
+// build that never dials an external `wss://` should never compile any of this.
+
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+async fn connect_secure(
+    target: &WsTarget,
+    handle: &Handle,
+    protocols: &[&str],
+    headers: &[(&str, &str)],
     danger_accept_invalid_certs: bool,
 ) -> Result<(WsClient, WsConnectResponse)> {
-    let mut req = <&str as IntoClientRequest>::into_client_request(addr)?;
-    if !protocol_header.is_empty() {
-        req.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_str(protocol_header)?,
-        );
-    }
-    for (k, v) in headers {
-        req.headers_mut().insert(*k, HeaderValue::from_str(v)?);
-    }
+    // Through nago-wss's re-export, so this crate never names a rustls version
+    // of its own and cannot end up linking a second, incompatible one.
+    use nago_wss::tls::rustls_pki_types::ServerName;
+    use nago_wss::tls::{TlsStream, rustls};
+    use std::sync::Arc;
 
-    let (ws_stream, response) = if danger_accept_invalid_certs {
-        let connector = tokio_tungstenite::Connector::Rustls(Arc::new(make_dangerous_tls_config()));
-        tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector))
-            .await
-            .context("Failed to connect to endpoint")?
+    let stream = connect_any(&target.addrs, handle)
+        .await
+        .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
+
+    let config: Arc<rustls::ClientConfig> = if danger_accept_invalid_certs {
+        Arc::new(make_dangerous_tls_config())
     } else {
-        connect_async(req)
-            .await
-            .context("Failed to connect to endpoint")?
+        nago_wss::tls::default_client_config()
     };
 
-    let conn_resp = WsConnectResponse {
-        status: response.status().as_u16(),
-        headers: response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect(),
-    };
+    // SNI and certificate validation both key off the name from the URL, not
+    // the address that answered.
+    let name = ServerName::try_from(target.host.clone())
+        .map_err(|_| eyre!("invalid TLS server name: {}", target.host))?;
+    let session = rustls::ClientConnection::new(config, name)
+        .map_err(|err| eyre!("TLS session setup failed: {err}"))?;
+
+    let mut tls = TlsStream::client(stream, session);
+    // Driven explicitly so a certificate failure surfaces here, naming TLS,
+    // rather than in the middle of the WebSocket handshake that follows.
+    tls.handshake()
+        .await
+        .map_err(|err| eyre!("TLS handshake failed: {err}"))?;
+
+    let (connection, protocol) = nago_wss::upgrade::connect(
+        tls,
+        &target.path,
+        &target.host_header,
+        protocols,
+        headers,
+        handshake_entropy(),
+        Limits::default(),
+    )
+    .await
+    .map_err(|err| eyre!("WebSocket upgrade failed: {err}"))?;
 
     Ok((
         WsClient {
-            stream: WsStream::H1(Box::new(ws_stream)),
+            stream: WsStream::Secure(Box::new(connection)),
             seq: 0,
         },
-        conn_resp,
+        connect_response(protocol),
     ))
 }
 
-#[cfg(feature = "ws-client")]
-async fn connect_h2(
-    addr: &str,
-    protocol_header: &str,
-    headers: &[(&'static str, &'static str)],
-    danger_accept_invalid_certs: bool,
-) -> Result<(WsClient, WsConnectResponse)> {
-    let ParsedUrl {
-        tls,
-        host,
-        port,
-        path,
-    } = parse_ws_url(addr)?;
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+fn make_dangerous_tls_config() -> nago_wss::tls::rustls::ClientConfig {
+    use nago_wss::tls::rustls;
+    use std::sync::Arc;
 
-    debug!(host, port, tls, "H2: resolving host");
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
-        .await
-        .context("DNS resolution failed")?
-        .collect();
-
-    if addrs.is_empty() {
-        return Err(eyre!("No addresses returned for {}:{}", host, port));
-    }
-    debug!(?addrs, "H2: resolved addresses");
-
-    let mut tcp = None;
-    let mut last_err = None;
-    for addr in &addrs {
-        debug!(%addr, "H2: attempting TCP connect");
-        match TcpStream::connect(addr).await {
-            Ok(stream) => {
-                debug!(%addr, "H2: TCP connected");
-                tcp = Some(stream);
-                break;
-            }
-            Err(e) => {
-                debug!(%addr, err=%e, "H2: TCP connect failed, trying next address");
-                last_err = Some(e);
-            }
-        }
-    }
-    let tcp = tcp.ok_or_else(|| {
-        eyre!(
-            "TCP connect failed for all addresses {:?}: {}",
-            addrs,
-            last_err.unwrap()
-        )
-    })?;
-    tcp.set_nodelay(true)?;
-
-    if tls {
-        debug!(host, "H2: starting TLS handshake");
-        let tls_stream = make_tls_stream(tcp, &host, danger_accept_invalid_certs).await?;
-        debug!(host, "H2: TLS handshake complete, starting H2 upgrade");
-        h2_upgrade(
-            TokioIo::new(tls_stream),
-            &host,
-            &path,
-            tls,
-            protocol_header,
-            headers,
-        )
-        .await
-    } else {
-        debug!(host, "H2: plain TCP, starting H2 upgrade (h2c)");
-        h2_upgrade(
-            TokioIo::new(tcp),
-            &host,
-            &path,
-            tls,
-            protocol_header,
-            headers,
-        )
-        .await
-    }
-}
-
-#[cfg(feature = "ws-client")]
-async fn h2_upgrade<T>(
-    io: T,
-    host: &str,
-    path: &str,
-    tls: bool,
-    protocol_header: &str,
-    headers: &[(&'static str, &'static str)],
-) -> Result<(WsClient, WsConnectResponse)>
-where
-    T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
-{
-    let (mut sender, conn) = http2::Builder::new(TokioExecutor::new())
-        .handshake(io)
-        .await
-        .context("HTTP/2 handshake failed")?;
-    debug!(host, "H2: HTTP/2 connection handshake complete");
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            debug!("H2 connection driver exited: {}", e);
-        }
-    });
-
-    let scheme = if tls { "https" } else { "http" };
-    let uri = format!("{}://{}{}", scheme, host, path);
-    debug!(
-        host,
-        has_protocol_header = !protocol_header.is_empty(),
-        additional_header_count = headers.len(),
-        "H2: sending CONNECT upgrade request"
-    );
-    let mut builder = hyper::Request::builder()
-        .method(hyper::Method::CONNECT)
-        .uri(&uri)
-        .header("sec-websocket-version", "13");
-    if !protocol_header.is_empty() {
-        builder = builder.header("sec-websocket-protocol", protocol_header);
-    }
-    for (k, v) in headers {
-        builder = builder.header(*k, *v);
-    }
-    let mut request = builder
-        .body(Empty::<Bytes>::new())
-        .context("Failed to build H2 upgrade request")?;
-
-    // :protocol pseudo-header must be set as an extension, not a raw header
-    request
-        .extensions_mut()
-        .insert(hyper::ext::Protocol::from_static("websocket"));
-
-    let mut response = sender
-        .send_request(request)
-        .await
-        .context("Failed to send H2 upgrade request")?;
-
-    debug!(status=%response.status(), "H2: received upgrade response");
-    ensure!(
-        response.status() == StatusCode::OK,
-        "H2 WebSocket upgrade rejected: {}",
-        response.status()
-    );
-
-    let conn_resp = WsConnectResponse {
-        status: response.status().as_u16(),
-        headers: response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect(),
-    };
-
-    // For H2 CONNECT the tunnel is the response stream itself — upgrade::on must be
-    // called on the response (not the request) to obtain the bidirectional tunnel.
-    let upgraded = hyper::upgrade::on(&mut response)
-        .await
-        .context("H2 upgrade failed")?;
-    debug!(host, "H2: upgrade completed, WebSocket stream ready");
-    let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Client, None).await;
-
-    Ok((
-        WsClient {
-            stream: WsStream::H2(Box::new(ws)),
-            seq: 0,
-        },
-        conn_resp,
-    ))
-}
-
-#[cfg(feature = "ws-client")]
-async fn make_tls_stream(
-    tcp: TcpStream,
-    host: &str,
-    danger_accept_invalid_certs: bool,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-    let mut tls_config = if danger_accept_invalid_certs {
-        make_dangerous_tls_config()
-    } else {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-    };
-    tls_config.alpn_protocols = vec![b"h2".to_vec()];
-
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    let server_name = ServerName::try_from(host.to_owned()).context("Invalid TLS server name")?;
-    connector
-        .connect(server_name, tcp)
-        .await
-        .context("TLS handshake failed")
-}
-
-#[cfg(feature = "ws-client")]
-fn make_dangerous_tls_config() -> rustls::ClientConfig {
     rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
@@ -689,50 +803,60 @@ fn make_dangerous_tls_config() -> rustls::ClientConfig {
 }
 
 #[derive(Debug)]
-#[cfg(feature = "ws-client")]
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
 struct AcceptAllVerifier;
 
-#[cfg(feature = "ws-client")]
-impl rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+impl nago_wss::tls::rustls::client::danger::ServerCertVerifier for AcceptAllVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
+        _end_entity: &nago_wss::tls::rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[nago_wss::tls::rustls_pki_types::CertificateDer<'_>],
+        _server_name: &nago_wss::tls::rustls_pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        _now: nago_wss::tls::rustls_pki_types::UnixTime,
+    ) -> std::result::Result<
+        nago_wss::tls::rustls::client::danger::ServerCertVerified,
+        nago_wss::tls::rustls::Error,
+    > {
+        Ok(nago_wss::tls::rustls::client::danger::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &nago_wss::tls::rustls_pki_types::CertificateDer<'_>,
+        _dss: &nago_wss::tls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        nago_wss::tls::rustls::client::danger::HandshakeSignatureValid,
+        nago_wss::tls::rustls::Error,
+    > {
+        Ok(nago_wss::tls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &nago_wss::tls::rustls_pki_types::CertificateDer<'_>,
+        _dss: &nago_wss::tls::rustls::DigitallySignedStruct,
+    ) -> std::result::Result<
+        nago_wss::tls::rustls::client::danger::HandshakeSignatureValid,
+        nago_wss::tls::rustls::Error,
+    > {
+        Ok(nago_wss::tls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+    fn supported_verify_schemes(&self) -> Vec<nago_wss::tls::rustls::SignatureScheme> {
+        use nago_wss::tls::rustls::SignatureScheme;
         vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PSS_SHA384,
-            rustls::SignatureScheme::RSA_PSS_SHA512,
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA384,
-            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
         ]
     }
 }

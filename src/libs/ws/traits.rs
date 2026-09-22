@@ -6,8 +6,6 @@ use async_trait::async_trait;
 #[cfg(feature = "ws-core")]
 use eyre::Result;
 #[cfg(feature = "ws-core")]
-use futures::channel::mpsc::Receiver;
-#[cfg(feature = "ws-core")]
 use futures::future::LocalBoxFuture;
 
 use super::WsMessage as Message;
@@ -150,27 +148,41 @@ pub trait MessageStream: Unpin + Send {
 /// Compatibility alias for the pre-2.0 name.
 pub use MessageStream as WsStream;
 
-/// An upgrade event yielded by the upgrader.
-/// Contains the on_upgrade future and the negotiated protocol.
+/// A connection that finished the upgrade.
+///
+/// **Breaking change in the tokio removal.** This carried
+/// `hyper::upgrade::OnUpgrade`, a future the caller had to await to get the
+/// stream. The upgrade is nago-wss now and completes inside
+/// [`WsUpgrader::upgrade_stream`], so what comes back is the live connection.
 #[cfg(feature = "ws-core")]
 pub struct UpgradeEvent {
-    /// Only present with a hyper-based backend (`ws` or `ws-client`), which is
-    /// what provides the `hyper` dependency.
-    #[cfg(any(feature = "ws", feature = "ws-client"))]
-    pub on_upgrade: hyper::upgrade::OnUpgrade,
+    /// The upgraded connection, ready to carry messages.
+    pub stream: Box<dyn MessageStream>,
+    /// The subprotocols the client offered, as the header spelled them.
+    ///
+    /// The offered list rather than the selection, because this is what reaches
+    /// `AuthController::auth` and the fleet carries its bearer token there.
     pub protocol: String,
 }
 
 #[cfg(feature = "ws-core")]
-#[async_trait]
+#[async_trait(?Send)]
 pub trait WsUpgrader: Send + Sync {
-    /// Returns a receiver that yields upgrade events.
-    /// - H1: receiver yields exactly one event (single WebSocket per TCP connection)
-    /// - H2: receiver yields multiple events (one per CONNECT request, multiplexing)
+    /// Perform the HTTP/1.1 upgrade, or answer the request without upgrading.
+    ///
+    /// **Breaking change in the tokio removal.** This returned
+    /// `Receiver<UpgradeEvent>`. The channel existed only for HTTP/2 extended
+    /// CONNECT, where one TCP connection carried many upgrades; that path is
+    /// gone with the ALPN that negotiated it, so an HTTP/1.1 connection yields
+    /// exactly one upgrade and the value comes back directly.
+    ///
+    /// `None` means the request was answered and needs no session: a CORS
+    /// preflight, a `HEAD`, a plain `GET`, or a refusal. The response bytes
+    /// have already been written.
     async fn upgrade_stream(
         &self,
         stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
-    ) -> Result<Receiver<UpgradeEvent>>;
+    ) -> Result<Option<UpgradeEvent>>;
 }
