@@ -148,3 +148,52 @@ nagoya `0.1.6` and nago-rustls `0.1.1`. This port did not add it and did
 not edit nago-wss, nagoya, or nago-rustls. nago-wss and nago-rustls each
 commit a `Cargo.lock`. endpoint-libs does not. Do not copy the path or
 the lock into endpoint-libs.
+
+## P0.2, corrected. The waiter is not settled
+
+Appended 2026-09-22, after endpoint-libs `1393176`. This does not replace the
+P0.2 row above; it withdraws its conclusion. The row's description of what
+the waiter does is accurate, and the seven macOS tests really ran. The safety
+argument is what does not hold, and `ee8fca0` may not be cited as the
+settlement of P0.2.
+
+A review of `ee8fca0` found four defects. Three of them can kill the process
+that the waiter exists to shut down cleanly.
+
+1. On the BSDs, `arm` blocks the signal with `pthread_sigmask` and only then
+   installs the handler. `pthread_sigmask` is per thread, which the row above
+   states, but the ordering treats it as though it were process wide. In the
+   window between the block and the `sigaction` -- a `pipe()`, four
+   `fcntl()`s and a mutex -- every other already-running thread still has the
+   signal unblocked and still has `SIG_DFL`. A process-directed `SIGTERM`
+   delivered in that window terminates the process. What makes the handler
+   path safe is the handler being installed, not the calling thread's mask.
+
+2. On Linux, `arm` returns the cached descriptor before it reaches
+   `block_one`. signalfd delivers only while the signal stays blocked, so a
+   second waiter created on a different thread never blocks it there, keeps
+   `SIG_DFL`, and dies on a process-directed signal while a live waiter sits
+   on the descriptor. The row above covers threads that existed before the
+   block; it does not cover the waiter's own thread never being blocked.
+
+3. `Signal` declares `claim` before `registration`. Fields drop in
+   declaration order, so the one-waiter-per-number slot is released before
+   the descriptor leaves the poller. A waiter created in that gap gets the
+   same cached descriptor, registers it, and then has its registration torn
+   down by the outgoing waiter: on kqueue it parks forever, on epoll it gets
+   a spurious `EEXIST`. The comment asserting the claim is released last is
+   false.
+
+4. The BSD handler calls `write` without saving and restoring `errno`, and
+   `write` sets `errno` once the pipe fills. The handler runs on whatever
+   thread was interrupted, so it can clobber an `errno` that thread was about
+   to read. The module header claims async-signal-safety is satisfied.
+
+A fifth, minor: no `pthread_sigmask` call preserves the previous mask, so
+creating or dropping a `Signal` unblocks a signal the program had
+deliberately blocked on that thread.
+
+P0.2 is settled when a nagoya waiter observes `SIGINT`, `SIGTERM` and
+`SIGHUP` without tokio **and** without a window in which a thread can take
+the default action, on both platforms. The Linux path has still never been
+executed. Item 12 in the queue waits on that, and then on a publish.

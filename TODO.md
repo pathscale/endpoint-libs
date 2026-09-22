@@ -17,7 +17,7 @@
 
 ## Transport Layer
 
-- The ws-core port onto nago-wss is `docs/pending/ws-core-onto-nago-wss-05.md`. Settled rows are `docs/decisions/ws-core-onto-nago-wss.md`.
+- The ws-core port onto nago-wss is `docs/pending/ws-core-onto-nago-wss-06.md`. Settled rows are `docs/decisions/ws-core-onto-nago-wss.md`.
 - Investigate WebSocket over HTTP/2 for the WS server implementation
 - Investigate raw QUIC as a server transport option, with a usage API compatible with the current WS server
 - Investigate WebTransport after the above two are explored

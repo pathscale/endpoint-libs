@@ -1,3 +1,5 @@
+SUPERSEDED by `ws-core-onto-nago-wss-06.md`. Work that file. Do not mine this one for line numbers.
+
 # `ws-core`, `ws` and `ws-client` onto `nago-wss`: 05
 
 Date: 2026-09-22
