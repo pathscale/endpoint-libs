@@ -65,12 +65,11 @@
 //!    portable inside this crate yet. `signal` names `dep:nagoya` for the
 //!    flag and `tokio/signal` for delivery, and the nagoya dependency enables
 //!    `reactor`, so the reactor comes along too.
-//! 3. **`tokio::task_local!`** for `TOOLBOX` in `toolbox.rs`. `futures` has no
-//!    task-local. `scoped-tls` is not a substitute: its scope is synchronous and
-//!    does not survive an `.await`, and `TOOLBOX.scope(..).await` spans awaits.
-//!    A replacement has to be a hand-rolled future that sets a `thread_local!`
-//!    on poll entry and restores it on return, which is what tokio's own
-//!    `TaskLocalFuture` is.
+//! 3. **`TOOLBOX`** in `toolbox.rs` is a `thread_local` installed on poll entry
+//!    and restored on return, including panic and drop. The value is held by
+//!    the scope future, so the awaits inside `TOOLBOX.scope` (`session.rs`
+//!    handler bodies, and the handshake scope in `server.rs`) observe it again
+//!    on the next poll. `scoped-tls` is not a dependency.
 //! 4. **Channels**, the part usually named first. `tokio::sync::mpsc` remains in
 //!    `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are already
 //!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
@@ -88,13 +87,10 @@
 //! upgrader, tokio-tungstenite and tokio-rustls, all of which are gated on
 //! `ws`/`ws-client` and tokio-bound regardless.
 //!
-//! Doing only 3 and 4 changes the public API and moves the `cargo tree` output
-//! not at all, because 1 and 2 still name tokio. So the useful shape is a
-//! feature split first: put the TCP/TLS/upgrade cluster and `signal` behind
-//! their own feature, leaving a `ws-core` that offers `serve_connection` and
-//! `serve_with` over a `SessionListener`, and only
-//! then port 3 and 4. Until that lands, a consumer that wants no tokio at all
-//! takes the neutral transport and leaves `ws-core` out.
+//! The TCP path and signal delivery still name tokio, and the per-connection
+//! queues do too. Replacing `TOOLBOX` and the `select!`s does not change
+//! `cargo tree`. Until the TCP path and signal delivery move, a consumer that
+//! wants no tokio at all takes the neutral transport and leaves `ws-core` out.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};

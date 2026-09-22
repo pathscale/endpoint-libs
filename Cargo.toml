@@ -77,7 +77,8 @@ ws-core = [
     # `net`: `listener.rs` is `tokio::net::TcpListener`/`TcpStream` and
     #   `server.rs` calls `tokio::net::lookup_host`.
     # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread`, the
-    #   `LocalSet`, `tokio::spawn`, and `tokio::task_local!` for `TOOLBOX`.
+    #   `LocalSet` and `tokio::spawn`. `TOOLBOX` is a `thread_local` installed
+    #   for one poll, not `tokio::task_local!`.
     # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs` and `toolbox.rs`,
     #   all of it in public struct fields.
     # `time`: the date-cache `tokio::time::sleep` in `server.rs`.
