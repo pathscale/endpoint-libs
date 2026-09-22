@@ -56,7 +56,7 @@
 //!    `Reactor::local` and drives the accept loop under `block_on_with`; the
 //!    per-shard threads and their accept `mpsc` went with it.
 //! 2. **Signal delivery** is nagoya. The flag is a `nagoya::sync::Notify` plus
-//!    an `AtomicBool` (`Shutdown`), and delivery is `nagoya::reactor::Signal`. A
+//!    an `AtomicBool` (`Shutdown`), and delivery is `nagoya::signal::Signal`. A
 //!    `Signal` is registered on one reactor and fires only while that reactor is
 //!    polled, which is why `init_signals` takes the `Handle`.
 //! 3. **The per-connection queue** is `outbound`, this crate's own. Its bound is

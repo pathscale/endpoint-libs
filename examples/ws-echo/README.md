@@ -45,10 +45,15 @@ From the repo root — available with either backend:
 cargo run --example ws_echo_server --features ws
 ```
 
-The server generates a self-signed TLS certificate at startup and listens on **port 8443**. Test with `websocat` (note the `wss://` scheme and `-k` flag to skip certificate verification):
+The server listens on **port 8443**, in plain `ws://`. It used to generate a
+self-signed certificate at startup and serve `wss://` itself; this crate does
+not terminate TLS any more, because terminating it is what pins the path to
+`std` and the fleet's internal services want to stay no_std-friendly. In
+deployment the edge proxy terminates and forwards plain to this port. Test with
+`websocat`:
 
 ```sh
-websocat -k wss://localhost:8443
+websocat ws://localhost:8443
 ```
 
 Then send a JSON message:

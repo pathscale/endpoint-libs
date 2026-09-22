@@ -8,7 +8,7 @@ use nagoya::sync::Notify;
 /// A flag every waiter observes, including one that arrives after the cancel.
 ///
 /// `Notify::notify_waiters` wakes the current set and leaves no permit. That
-/// is nagoya 0.1.9 (`sync.rs`), the version this crate pins. A waiter that
+/// is nagoya `sync.rs`, on the 0.1.11 this crate pins. A waiter that
 /// starts later reads [`Shutdown::is_cancelled`] instead of taking a stored
 /// wake, which is the half `CancellationToken::cancel` was providing.
 pub struct Shutdown {

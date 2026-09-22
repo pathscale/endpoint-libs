@@ -29,8 +29,8 @@ mod subs;
 // this crate serves `ws://` only. It was deleted rather than ported because TLS
 // is what pins this path to `std`, and the fleet's internal services want to
 // stay no_std-friendly. `TlsListener`, the certificate loading, the ALPN list and
-// the `ws-tls12` version gate went with it; a client still gets `wss://` through
-// `ws-client`, which is a separate feature and a separate graph.
+// the `ws-tls12` version gate went with it. A client dialling an external
+// `wss://` needs `ws-client-tls`, which is opt-in for the same std reason.
 #[cfg(feature = "ws-core")]
 pub mod toolbox;
 mod traits;
