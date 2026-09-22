@@ -4,9 +4,13 @@ use dashmap::DashMap;
 use eyre::Result;
 use serde::*;
 use serde_json::{Map, Value};
+use std::cell::Cell;
 use std::fmt::{Debug, Display, Formatter};
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
@@ -454,8 +458,94 @@ impl Toolbox {
         Some(resp)
     }
 }
-tokio::task_local! {
-    pub static TOOLBOX: ArcToolbox;
+thread_local! {
+    static TOOLBOX_SLOT: Cell<Option<ArcToolbox>> = const { Cell::new(None) };
+}
+
+/// The toolbox for the poll that is running.
+///
+/// Set for the duration of one poll and restored on the way out, including
+/// when the inner future panics or the scope is dropped. The value lives on
+/// the scope future, so an `.await` inside it sees the same toolbox on the
+/// next poll. This is a `thread_local`, not `tokio::task_local`: two polls
+/// never overlap on one thread, and the slot is empty between them.
+pub struct ToolboxKey;
+
+/// `TOOLBOX.scope(value, future)` installs `value` while `future` is polled.
+pub static TOOLBOX: ToolboxKey = ToolboxKey;
+
+/// The slot was empty. `with` panics with this; `try_with` returns it.
+#[derive(Debug)]
+pub struct ToolboxAccessError;
+
+impl Display for ToolboxAccessError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TOOLBOX is not set for this poll")
+    }
+}
+
+impl std::error::Error for ToolboxAccessError {}
+
+impl ToolboxKey {
+    /// Poll `future` with `value` installed. The previous slot is restored
+    /// when the poll returns.
+    pub fn scope<F>(&self, value: ArcToolbox, future: F) -> ToolboxScope<F> {
+        ToolboxScope { value, future }
+    }
+
+    /// Read the toolbox installed by the current poll.
+    pub fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&ArcToolbox) -> R,
+    {
+        self.try_with(f).expect("TOOLBOX is not set for this poll")
+    }
+
+    /// Read the toolbox, or [`ToolboxAccessError`] when no scope is polling.
+    pub fn try_with<F, R>(&self, f: F) -> Result<R, ToolboxAccessError>
+    where
+        F: FnOnce(&ArcToolbox) -> R,
+    {
+        TOOLBOX_SLOT.with(|slot| {
+            let current = slot.take();
+            // Put it back before `f`, so a nested `try_with` still sees it,
+            // and so a panic in `f` does not clear the slot.
+            slot.set(current.clone());
+            match current.as_ref() {
+                Some(value) => Ok(f(value)),
+                None => Err(ToolboxAccessError),
+            }
+        })
+    }
+}
+
+/// Future returned by [`ToolboxKey::scope`].
+pub struct ToolboxScope<F> {
+    value: ArcToolbox,
+    future: F,
+}
+
+impl<F: Future> Future for ToolboxScope<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // `future` stays where it is for the life of this pin. Only `value`
+        // is cloned. The guard restores the previous slot on Ready, Pending,
+        // and panic.
+        let this = unsafe { self.get_unchecked_mut() };
+        let previous = TOOLBOX_SLOT.with(|slot| slot.replace(Some(this.value.clone())));
+        let _restore = Restore(previous);
+        let future = unsafe { Pin::new_unchecked(&mut this.future) };
+        future.poll(cx)
+    }
+}
+
+struct Restore(Option<ArcToolbox>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        TOOLBOX_SLOT.with(|slot| slot.set(self.0.take()));
+    }
 }
 
 #[cfg(test)]
@@ -510,6 +600,97 @@ mod tests {
         assert!(states.get_state(7).unwrap().end.is_cancelled());
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
         assert!(matches!(rx.try_recv().unwrap(), Message::Close(None)));
+    }
+
+    #[test]
+    fn scope_sees_the_toolbox_on_every_poll_and_clears_it_after() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll};
+
+        use super::TOOLBOX;
+
+        struct See {
+            polls: Arc<AtomicUsize>,
+        }
+
+        impl Future for See {
+            type Output = ();
+
+            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+                let n = self.polls.fetch_add(1, Ordering::AcqRel);
+                assert!(TOOLBOX.try_with(|_| ()).is_ok());
+                if n == 0 {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            }
+        }
+
+        let toolbox = Toolbox::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut scoped = Box::pin(TOOLBOX.scope(
+            toolbox,
+            See {
+                polls: Arc::clone(&polls),
+            },
+        ));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(TOOLBOX.try_with(|_| ()).is_err());
+        assert!(scoped.as_mut().poll(&mut cx).is_pending());
+        assert!(TOOLBOX.try_with(|_| ()).is_err());
+        assert!(scoped.as_mut().poll(&mut cx).is_ready());
+        assert!(TOOLBOX.try_with(|_| ()).is_err());
+        assert_eq!(polls.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn dropping_a_pending_scope_leaves_the_slot_empty() {
+        use std::future::Future;
+        use std::task::Context;
+
+        use super::TOOLBOX;
+
+        let mut scoped = Box::pin(TOOLBOX.scope(Toolbox::new(), std::future::pending::<()>()));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Future::poll(scoped.as_mut(), &mut cx).is_pending());
+        drop(scoped);
+        assert!(TOOLBOX.try_with(|_| ()).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scope_is_the_same_toolbox_after_an_await() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use super::TOOLBOX;
+
+        let toolbox = Toolbox::new();
+        let expected = toolbox.clone();
+        let saw = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&saw);
+        TOOLBOX
+            .scope(toolbox, async move {
+                assert!(
+                    TOOLBOX
+                        .try_with(|current| Arc::ptr_eq(current, &expected))
+                        .unwrap()
+                );
+                tokio::task::yield_now().await;
+                assert!(
+                    TOOLBOX
+                        .try_with(|current| Arc::ptr_eq(current, &expected))
+                        .unwrap()
+                );
+                flag.store(true, Ordering::Release);
+            })
+            .await;
+        assert!(saw.load(Ordering::Acquire));
+        assert!(TOOLBOX.try_with(|_| ()).is_err());
     }
 
     #[test]

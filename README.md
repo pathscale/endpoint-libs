@@ -127,7 +127,7 @@ these features, each naming the tokio features its own code uses:
 
 | feature | tokio features | why |
 | --- | --- | --- |
-| `ws-core` | `net`, `rt`, `sync`, `time` | TCP listener, per-shard current-thread runtime and `task_local!`, `mpsc` in public struct fields, date-cache sleep |
+| `ws-core` | `net`, `rt`, `sync`, `time` | TCP listener, per-shard current-thread runtime, `mpsc` in public struct fields, date-cache sleep. `TOOLBOX` is a `thread_local`, not `task_local!` |
 | `signal` | `signal` | `tokio::signal::unix` for delivery. The flag is `nagoya::sync::Notify`, and the waits are `futures::future::select` |
 | `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
 | `log_reader` | `rt` | `tokio::task::spawn_blocking` |
@@ -467,8 +467,9 @@ reasons, ranked by how hard each is to remove:
    (`notify_waiters` is there; `EVFILT_SIGNAL` and `signalfd` are not), so the
    delivery half still names tokio. `signal` also names `dep:nagoya`, and that
    dependency enables nagoya's `reactor` feature.
-3. **`tokio::task_local!`** for `TOOLBOX`. `futures` has no task-local, and `scoped-tls`
-   is not a substitute because its scope does not survive an `.await`.
+3. **`TOOLBOX` is a `thread_local`.** It is installed for one poll and restored
+   on the way out, including cancel and panic, so an `.await` inside
+   `TOOLBOX.scope` sees it again on the next poll. `scoped-tls` is not used.
 4. **Channels** in `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are
    already `futures::future::select`. The queues are the remaining mechanical part:
    they map onto `futures::channel::mpsc` at the cost of a breaking
@@ -480,11 +481,10 @@ reasons, ranked by how hard each is to remove:
 are the hyper upgrader, tokio-tungstenite and tokio-rustls, which are gated on
 `ws`/`ws-client` and tokio-bound anyway.
 
-Doing 3 and 4 alone breaks the public API and does not change `cargo tree` at all, because
-1 and 2 still name tokio. The useful order is a feature split first, putting the TCP/TLS
-upgrade cluster and `signal` behind their own feature so `ws-core` is left offering
-`serve_connection` and `serve_with` over a `SessionListener`. Until that lands, a consumer
-that wants no tokio has to leave `ws-core` out.
+The TCP path and signal delivery still name tokio, and the per-connection queues do
+too. Replacing `TOOLBOX` and the `select!`s does not change `cargo tree`. Until the
+TCP path and signal delivery move, a consumer that wants no tokio has to leave
+`ws-core` out.
 
 `OtelConfig` itself stays in `types` and compiles without this feature, so a
 `LoggingConfig` literal does not have to be `cfg`-ed. Setting `enabled: true` without
