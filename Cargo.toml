@@ -260,15 +260,10 @@ tokio = { version = "1.39", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 # The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
 # `nagoya::reactor` does not exist and the error reads like a missing module.
-#
-# PATH, NOT A VERSION, AND THIS MUST NOT REACH master. Publishing rejects a path
-# dependency, and a push to master that changes this file runs `cargo publish`,
-# so merging this as it stands breaks the release rather than failing somewhere
-# harmless. It is here because the tokio removal needs `reactor::Signal`,
-# `signal::Signal`, `resolve` and `connect_any`, and crates.io 0.1.9 has none of
-# the three: they are on the sibling at 0.1.11. The pin goes back to a version
-# once that is published, and the port cannot merge until it is.
-nagoya = { path = "../nagoya", default-features = false, features = ["reactor"], optional = true }
+# 0.1.11 is the release that carries `signal::Signal`, `resolve` and
+# `connect_any`, which is what the tokio removal needed and what 0.1.9 did not
+# have. Registry, not a sibling path.
+nagoya = { version = "0.1.11", default-features = false, features = ["reactor"], optional = true }
 # The WebSocket protocol itself: the RFC 6455 handshake and framing over a
 # nagoya socket, replacing hyper on the serving side and tokio-tungstenite on
 # the connecting side. `default-features = false` is load bearing: the default
