@@ -1,10 +1,12 @@
+SUPERSEDED by `ws-core-onto-nago-wss-02.md`. Work that file. Do not mine this one for line numbers.
+
 # `ws-core`, `ws` and `ws-client` onto `nago-wss`: 01
 
 Date: 2026-09-22
-Revision: 2. Bump this line on every edit, and say which revision a claim was
-checked against. Revision 2 detached this file from the cross-repo queue: it no
-longer takes its identity, its item name or its bucket rules from another
-document, and it became the first file of a numbered series.
+Revision: 3. This edit is the superseded banner only. The queue text below is
+revision 2 and is frozen. Revision 2 detached this file from the cross-repo
+queue: it no longer takes its identity, its item name or its bucket rules from
+another document, and it became the first file of a numbered series.
 
 ## How this series works
 
