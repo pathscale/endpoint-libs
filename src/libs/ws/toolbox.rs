@@ -12,6 +12,7 @@ use tracing::*;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::HandlerError;
 use crate::libs::log::LogLevel;
+use crate::libs::signal::Shutdown;
 use crate::libs::ws::{
     ConnectionId, WsConnection, WsLogResponse, WsRequest, WsResponseError, WsResponseValue,
     WsStreamState, WsSuccessResponse, custom_error_to_resp, internal_error_to_resp,
@@ -174,9 +175,17 @@ impl Toolbox {
             } else {
                 return false;
             };
-            Self::send_ws_msg(
+            let serialized = match serde_json::to_string(&msg) {
+                Ok(serialized) => serialized,
+                Err(e) => {
+                    error!(ws_server = true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
+                    return true;
+                }
+            };
+            Self::enqueue(
                 &state.message_queue,
-                msg,
+                Some(&state.end),
+                serialized,
                 oneshot,
                 conn_id,
                 drop_on_buffer_full,
@@ -196,8 +205,9 @@ impl Toolbox {
             } else {
                 return false;
             };
-            Self::send_serialized_ws_msg(
+            Self::enqueue(
                 &state.message_queue,
+                Some(&state.end),
                 serialized,
                 oneshot,
                 conn_id,
@@ -222,11 +232,27 @@ impl Toolbox {
                 return;
             }
         };
-        Self::send_serialized_ws_msg(sender, serialized, oneshot, conn_id, drop_on_full)
+        Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full)
     }
 
     pub fn send_serialized_ws_msg(
         sender: &tokio::sync::mpsc::Sender<Message>,
+        serialized: String,
+        oneshot: bool,
+        conn_id: ConnectionId,
+        drop_on_full: bool,
+    ) {
+        Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full)
+    }
+
+    /// Queue a frame, and on a policy close signal `end` as well.
+    ///
+    /// The `Close` frame stays ordered behind whatever is already queued.
+    /// `end` is what still fires when that `try_send` cannot take a slot.
+    /// Callers that pass `None` keep the old queue-only behaviour.
+    fn enqueue(
+        sender: &tokio::sync::mpsc::Sender<Message>,
+        end: Option<&Shutdown>,
         serialized: String,
         oneshot: bool,
         conn_id: ConnectionId,
@@ -240,7 +266,7 @@ impl Toolbox {
                     conn_id, "Send buffer full — client too slow or disconnected"
                 );
                 if drop_on_full {
-                    let _ = sender.try_send(Message::Close(None));
+                    Self::close_for_policy(sender, end);
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -251,7 +277,14 @@ impl Toolbox {
             }
         }
         if oneshot {
-            let _ = sender.try_send(Message::Close(None));
+            Self::close_for_policy(sender, end);
+        }
+    }
+
+    fn close_for_policy(sender: &tokio::sync::mpsc::Sender<Message>, end: Option<&Shutdown>) {
+        let _ = sender.try_send(Message::Close(None));
+        if let Some(end) = end {
+            end.cancel();
         }
     }
     pub fn send(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
@@ -423,4 +456,73 @@ impl Toolbox {
 }
 tokio::task_local! {
     pub static TOOLBOX: ArcToolbox;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    use parking_lot::RwLock;
+    use tokio::sync::mpsc;
+
+    use super::Toolbox;
+    use crate::libs::peer::{Extensions, PeerIdentity};
+    use crate::libs::ws::{WebsocketStates, WsConnection, WsMessage as Message};
+
+    fn conn(id: u32) -> Arc<WsConnection> {
+        Arc::new(WsConnection {
+            connection_id: id,
+            user_id: AtomicU64::new(0),
+            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            peer: PeerIdentity::Unknown,
+            extensions: Extensions::new(),
+            log_id: 0,
+        })
+    }
+
+    #[test]
+    fn buffer_full_policy_cancels_without_a_free_slot() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Message::from("queued")).unwrap();
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, true);
+
+        assert!(toolbox.send_raw(7, "next".into()));
+
+        assert!(states.get_state(7).unwrap().end.is_cancelled());
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn header_only_cancels_even_when_the_frame_fits() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = mpsc::channel(4);
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), true, false);
+
+        assert!(toolbox.send_raw(7, "one".into()));
+
+        assert!(states.get_state(7).unwrap().end.is_cancelled());
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+        assert!(matches!(rx.try_recv().unwrap(), Message::Close(None)));
+    }
+
+    #[test]
+    fn a_full_buffer_without_the_policy_does_not_cancel() {
+        let states = WebsocketStates::new();
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send(Message::from("queued")).unwrap();
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, false);
+
+        assert!(toolbox.send_raw(7, "next".into()));
+
+        assert!(!states.get_state(7).unwrap().end.is_cancelled());
+    }
 }

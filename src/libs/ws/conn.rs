@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::WsMessage as Message;
 
 use super::{ConnectionId, WsConnection};
+use crate::libs::signal::Shutdown;
 
 #[derive(Default)]
 pub struct WebsocketStates {
@@ -35,6 +36,7 @@ impl WebsocketStates {
             Arc::new(WsStreamState {
                 conn,
                 message_queue,
+                end: Arc::new(Shutdown::new()),
             }),
         );
     }
@@ -43,4 +45,11 @@ impl WebsocketStates {
 pub struct WsStreamState {
     pub conn: Arc<WsConnection>,
     pub message_queue: tokio::sync::mpsc::Sender<Message>,
+    /// Policy close for this connection.
+    ///
+    /// `Shutdown::cancel` sticks, so the session still observes it after the
+    /// fact. A `Close` frame queued behind the payload does not: `try_send`
+    /// fails when the buffer is already full, which is the case
+    /// `drop_conn_on_buffer_full` exists for.
+    pub end: Arc<Shutdown>,
 }
