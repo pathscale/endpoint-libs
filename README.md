@@ -127,8 +127,8 @@ these features, each naming the tokio features its own code uses:
 
 | feature | tokio features | why |
 | --- | --- | --- |
-| `ws-core` | `net`, `rt`, `sync`, `time`, `macros` | TCP listener, per-shard current-thread runtime and `task_local!`, `mpsc` in public struct fields, date-cache sleep, `select!` |
-| `signal` | `signal`, `macros` | `tokio::signal::unix` and two `select!`s |
+| `ws-core` | `net`, `rt`, `sync`, `time` | TCP listener, per-shard current-thread runtime and `task_local!`, `mpsc` in public struct fields, date-cache sleep |
+| `signal` | `signal` | `tokio::signal::unix`. The waits are `futures::future::select` |
 | `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
 | `log_reader` | `rt` | `tokio::task::spawn_blocking` |
 | `error_aggregation` | `rt`, `sync` | `RwLock`, `mpsc`, a spawned aggregation task |
@@ -465,9 +465,9 @@ reasons, ranked by how hard each is to remove:
    `futures` has no signal support and nagoya 0.1.9 has no signal module.
 3. **`tokio::task_local!`** for `TOOLBOX`. `futures` has no task-local, and `scoped-tls`
    is not a substitute because its scope does not survive an `.await`.
-4. **Channels and `select!`** in `session.rs`, `conn.rs` and `toolbox.rs`. This is the
-   only mechanical part: it maps onto
-   `futures::channel::mpsc` and `futures::future::select`, at the cost of a breaking
+4. **Channels** in `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are
+   already `futures::future::select`. The queues are the remaining mechanical part:
+   they map onto `futures::channel::mpsc` at the cost of a breaking
    change to `WsStreamState::message_queue`, `WebsocketStates::insert` and
    `Toolbox::send_ws_msg`/`send_serialized_ws_msg`, and a behaviour change to
    `drop_conn_on_buffer_full` (a `futures` bounded channel reserves a slot per sender).

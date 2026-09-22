@@ -81,17 +81,17 @@ ws-core = [
     # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs` and `toolbox.rs`,
     #   all of it in public struct fields.
     # `time`: the date-cache `tokio::time::sleep` in `server.rs`.
-    # `macros`: `tokio::select!` in `session.rs` and `server.rs`.
     # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
     # `traits.rs`) are unconditional in tokio and need no feature.
     # `tokio/signal` arrives through the `signal` feature, which `ws-core`
-    # already requires.
+    # already requires. The selects in `session.rs`, `server.rs` and
+    # `signal.rs` are `futures::future::select`, so `tokio/macros` is not
+    # named here.
     "dep:tokio",
     "tokio/net",
     "tokio/rt",
     "tokio/sync",
     "tokio/time",
-    "tokio/macros",
 ]
 framed-transport = [
     # Length-delimited WireMessage framing over any byte stream (Unix sockets,
@@ -153,10 +153,10 @@ ws = [
 signal = [
     # Feature dependencies
     "dep:tokio-util",
-    # `signal.rs` is `tokio::signal::unix` plus two `tokio::select!`s.
+    # `signal.rs` is `tokio::signal::unix`. The two waits are
+    # `futures::future::select`, so this feature does not name `tokio/macros`.
     "dep:tokio",
     "tokio/signal",
-    "tokio/macros",
     "dep:lazy_static",
     # `signal.rs` logs the signal it caught. `types` happens to pull tracing in,
     # so this was never missed until somebody enabled `signal` on its own.

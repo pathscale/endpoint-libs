@@ -35,7 +35,7 @@ use crate::libs::ws::{
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
-use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates, WsEndpoint};
+use super::{AuthController, SimpleAuthController, WebsocketStates, WsEndpoint};
 
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
@@ -510,20 +510,28 @@ impl WebsocketServer {
         let (mut sigterm, mut sigint) = crate::libs::signal::init_signals()?;
         let mut shard_idx: usize = 0;
         loop {
-            tokio::select! {
-                _ = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint) => break,
-                accepted = listener.accept() => {
+            // Shutdown is the left arm, so a pending signal is not stuck behind
+            // an accept that is also ready.
+            let shutdown = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint);
+            let accepted = listener.accept();
+            futures::pin_mut!(shutdown, accepted);
+            match futures::future::select(shutdown, accepted).await {
+                futures::future::Either::Left(_) => break,
+                futures::future::Either::Right((accepted, _)) => {
                     let (stream, addr) = match accepted {
                         Ok(x) => x,
                         Err(err) => {
-                            error!(ws_server=true, "Error while accepting stream: {:?}", err);
+                            error!(ws_server = true, "Error while accepting stream: {:?}", err);
                             continue;
                         }
                     };
                     let shard = &shard_senders[shard_idx % num_shards];
                     shard_idx = shard_idx.wrapping_add(1);
                     if shard.send((stream, addr)).await.is_err() {
-                        error!(ws_server=true, "Shard channel closed unexpectedly for addr {}", addr);
+                        error!(
+                            ws_server = true,
+                            "Shard channel closed unexpectedly for addr {}", addr
+                        );
                     }
                 }
             }

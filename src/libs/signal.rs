@@ -14,20 +14,25 @@ pub fn init_signals() -> eyre::Result<(Signal, Signal)> {
 
 // async function to wait for the signals
 pub async fn wait_for_signals(sigterm: &mut Signal, sigint: &mut Signal) {
-    tokio::select! {
-        _ = sigterm.recv() => inform_terminate("SIGTERM"),
-        _ = sigint.recv() => inform_terminate("SIGINT"),
-    };
+    // SIGTERM is polled first. Both arms set the same flag; the name in the log
+    // is the only difference, and a pending SIGTERM is the one we report.
+    let term = sigterm.recv();
+    let int = sigint.recv();
+    futures::pin_mut!(term, int);
+    match futures::future::select(term, int).await {
+        futures::future::Either::Left(_) => inform_terminate("SIGTERM"),
+        futures::future::Either::Right(_) => inform_terminate("SIGINT"),
+    }
 }
 
 // async function to wait for the signals
 pub async fn signal_received_silent() {
     let mut sigterm = signal(SignalKind::terminate()).expect("");
     let mut sigint = signal(SignalKind::interrupt()).expect("");
-    tokio::select! {
-        _ = sigterm.recv() => {},
-        _ = sigint.recv() => {},
-    };
+    let term = sigterm.recv();
+    let int = sigint.recv();
+    futures::pin_mut!(term, int);
+    let _ = futures::future::select(term, int).await;
 }
 
 /// print external signal

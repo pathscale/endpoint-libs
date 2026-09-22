@@ -364,6 +364,13 @@ impl WsClientSession {
     async fn run_loop(&mut self) -> Result<()> {
         let conn_id = self.conn_info.connection_id;
         let mut handlers = FuturesUnordered::new();
+        // Owned so the recv futures can drop before the arms borrow `self` again.
+        // `pin_mut` holds those borrows to the end of its scope.
+        enum Ready {
+            Outbound(Option<Message>),
+            Inbound(Option<std::result::Result<Message, StreamError>>),
+            Handler,
+        }
         loop {
             while let Ok(msg) = self.rx.try_recv() {
                 if !self.send_message(msg).await {
@@ -374,52 +381,84 @@ impl WsClientSession {
                 }
             }
 
-            tokio::select! {
-                msg = self.rx.recv() => {
-                    if let Some(msg) = msg {
-                        if !self.send_message(msg).await {
-                            break;
-                        }
-                        if self.server.config.header_only {
-                            break;
-                        }
-                    } else {
-                        debug!(ws_server = true, ?conn_id, "Outbound channel closed");
+            // Three-way select, nested. Outbound is polled before inbound, and
+            // both before a finished handler. The handler arm stays disabled
+            // while the set is empty, matching the old `if` guard.
+            let ready = {
+                let outbound = self.rx.recv();
+                futures::pin_mut!(outbound);
+                let inbound = self.conn.recv();
+                futures::pin_mut!(inbound);
+                if handlers.is_empty() {
+                    match futures::future::select(outbound, inbound).await {
+                        futures::future::Either::Left((msg, _)) => Ready::Outbound(msg),
+                        futures::future::Either::Right((msg, _)) => Ready::Inbound(msg),
+                    }
+                } else {
+                    let handler = handlers.next();
+                    futures::pin_mut!(handler);
+                    match futures::future::select(
+                        futures::future::select(outbound, inbound),
+                        handler,
+                    )
+                    .await
+                    {
+                        futures::future::Either::Left((inner, _)) => match inner {
+                            futures::future::Either::Left((msg, _)) => Ready::Outbound(msg),
+                            futures::future::Either::Right((msg, _)) => Ready::Inbound(msg),
+                        },
+                        futures::future::Either::Right(_) => Ready::Handler,
+                    }
+                }
+            };
+            match ready {
+                Ready::Outbound(Some(msg)) => {
+                    if !self.send_message(msg).await {
+                        break;
+                    }
+                    if self.server.config.header_only {
                         break;
                     }
                 }
-                msg = self.conn.recv() => {
-                    if let Some(msg_result) = msg {
-                        let msg = match msg_result {
-                            Ok(m) => m,
-                            Err(StreamError::Closed) => {
-                                debug!(ws_server = true, ?conn_id, "WS receive: connection closed");
-                                break;
-                            }
-                            Err(StreamError::Protocol(e)) => {
-                                warn!(ws_server = true, ?conn_id, err=%e, "WS protocol error on receive");
-                                break;
-                            }
-                            Err(StreamError::WriteBufferFull) => {
-                                warn!(ws_server = true, ?conn_id, "WS write buffer full on receive");
-                                break;
-                            }
-                            Err(StreamError::Other(e)) => {
-                                error!(ws_server = true, ?conn_id, err=%e, "WS receive error");
-                                break;
-                            }
-                        };
-                        match self.handle_message(msg)? {
-                            Dispatch::Close => break,
-                            Dispatch::Keep => {}
-                            Dispatch::Task(task) => handlers.push(task),
+                Ready::Outbound(None) => {
+                    debug!(ws_server = true, ?conn_id, "Outbound channel closed");
+                    break;
+                }
+                Ready::Inbound(Some(msg_result)) => {
+                    let msg = match msg_result {
+                        Ok(m) => m,
+                        Err(StreamError::Closed) => {
+                            debug!(ws_server = true, ?conn_id, "WS receive: connection closed");
+                            break;
                         }
-                    } else {
-                        debug!(ws_server = true, ?conn_id, "Inbound stream ended");
-                        break;
+                        Err(StreamError::Protocol(e)) => {
+                            warn!(ws_server = true, ?conn_id, err=%e, "WS protocol error on receive");
+                            break;
+                        }
+                        Err(StreamError::WriteBufferFull) => {
+                            warn!(
+                                ws_server = true,
+                                ?conn_id,
+                                "WS write buffer full on receive"
+                            );
+                            break;
+                        }
+                        Err(StreamError::Other(e)) => {
+                            error!(ws_server = true, ?conn_id, err=%e, "WS receive error");
+                            break;
+                        }
+                    };
+                    match self.handle_message(msg)? {
+                        Dispatch::Close => break,
+                        Dispatch::Keep => {}
+                        Dispatch::Task(task) => handlers.push(task),
                     }
                 }
-                _ = handlers.next(), if !handlers.is_empty() => {}
+                Ready::Inbound(None) => {
+                    debug!(ws_server = true, ?conn_id, "Inbound stream ended");
+                    break;
+                }
+                Ready::Handler => {}
             }
         }
 
