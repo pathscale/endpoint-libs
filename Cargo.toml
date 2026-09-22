@@ -78,8 +78,8 @@ ws-core = [
     #   `server.rs` calls `tokio::net::lookup_host`.
     # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread`, the
     #   `LocalSet`, `tokio::spawn`, and `tokio::task_local!` for `TOOLBOX`.
-    # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs`, `toolbox.rs` and
-    #   `WebsocketServer::message_receiver`, all of it in public struct fields.
+    # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs` and `toolbox.rs`,
+    #   all of it in public struct fields.
     # `time`: the date-cache `tokio::time::sleep` in `server.rs`.
     # `macros`: `tokio::select!` in `session.rs` and `server.rs`.
     # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
