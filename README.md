@@ -114,6 +114,45 @@ cloning them. The wire format is unchanged. See
 
 The crate is feature-gated. The default feature set is `types` only.
 
+### tokio is optional, and narrower than `full`
+
+Up to and including 3.1.1 `tokio` was a **non-optional** dependency of this crate,
+declared as `version = "1.39", features = ["full"]`. No consumer could reach a
+tokio-free graph whatever it selected: `cargo tree -e normal -i tokio` could not come
+back empty, because the manifest named tokio unconditionally. Feature work on the
+consumer side could not fix that; it was one manifest line here.
+
+It is now `optional = true` with no features of its own. tokio is pulled in by exactly
+these features, each naming the tokio features its own code uses:
+
+| feature | tokio features | why |
+| --- | --- | --- |
+| `ws-core` | `net`, `rt`, `sync`, `time`, `macros` | TCP listener, per-shard current-thread runtime and `task_local!`, `mpsc` in public struct fields, date-cache sleep, `select!` |
+| `signal` | `signal`, `macros` | `tokio::signal::unix` and two `select!`s |
+| `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
+| `log_reader` | `rt` | `tokio::task::spawn_blocking` |
+| `error_aggregation` | `rt`, `sync` | `RwLock`, `mpsc`, a spawned aggregation task |
+| `log_throttling` | `rt`, `time` | the spawned metrics reporter |
+| `otel` | `rt` | `opentelemetry_sdk`'s `rt-tokio` batch exporter |
+| `framed-transport-tokio` | none beyond the crate | only `tokio::io::{AsyncRead, AsyncWrite}`, which are unconditional; `tokio-util`'s `codec` names `tokio/io-util` itself |
+
+Features that reach tokio only through another feature: `ws`, `ws-client`, `ws-http1`,
+`ws-tls12` and `agent-control`.
+
+Features with no tokio at all: `types` (the default), `wire-core`, `framed-transport`
+and `nagoya-transport`.
+
+`full` was hiding `fs`, `io-std`, `process`, `rt-multi-thread` and `parking_lot`. No
+module in this crate names `tokio::fs`, `tokio::process`, or a multi-threaded runtime
+builder: `server.rs` builds `new_current_thread` per shard. `io-util` appears only in
+`#[cfg(test)]` code, where the dev-dependency still carries `full`.
+
+This is a breaking change to the feature surface, on top of the `otel` split. A
+consumer that relied on this crate to supply tokio's `fs`, `process`, `io-std` or
+`rt-multi-thread` through feature unification has to name them on its own tokio
+dependency. That is the point of the change, but it will surface as a build error in
+someone else's crate rather than here.
+
 ### `types` (default)
 
 Endpoint schema types shared between services and `endpoint-gen`:
@@ -406,7 +445,11 @@ This is why it is a feature rather than part of `types`. While the exporters liv
 `hyper-rustls`, including one that took only `framed-transport` plus `nagoya-transport`
 and touched no HTTP at all.
 
-Moving them out is necessary but not sufficient for a tokio-free graph. With `otel` off,
+Moving them out is necessary but not sufficient for a tokio-free graph. It was not even
+sufficient for `types`: until tokio was made optional (see
+[tokio is optional, and narrower than `full`](#tokio-is-optional-and-narrower-than-full))
+the manifest named tokio unconditionally, so `--features types -i tokio` printed tokio
+too. With `otel` off and tokio optional,
 `cargo tree -e normal --no-default-features --features types -i tokio` prints nothing, but
 `--features ws-core,framed-transport,nagoya-transport -i tokio` still prints tokio, pulled
 by `endpoint-libs` itself. `ws-core` names `dep:tokio` on its own account, for four

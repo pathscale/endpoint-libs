@@ -59,7 +59,10 @@ otel = [
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
     "dep:opentelemetry-appender-tracing",
+    # No module under `otel` names tokio directly; `opentelemetry_sdk`'s
+    # `rt-tokio` batch exporter spawns onto a runtime, so `rt` is what it needs.
     "dep:tokio",
+    "tokio/rt",
 ]
 wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
@@ -71,7 +74,24 @@ ws-core = [
     "dep:dashmap",
     "dep:async-trait",
     "dep:httpdate",
+    # `net`: `listener.rs` is `tokio::net::TcpListener`/`TcpStream` and
+    #   `server.rs` calls `tokio::net::lookup_host`.
+    # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread`, the
+    #   `LocalSet`, `tokio::spawn`, and `tokio::task_local!` for `TOOLBOX`.
+    # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs`, `toolbox.rs` and
+    #   `WebsocketServer::message_receiver`, all of it in public struct fields.
+    # `time`: the date-cache `tokio::time::sleep` in `server.rs`.
+    # `macros`: `tokio::select!` in `session.rs` and `server.rs`.
+    # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
+    # `traits.rs`) are unconditional in tokio and need no feature.
+    # `tokio/signal` arrives through the `signal` feature, which `ws-core`
+    # already requires.
     "dep:tokio",
+    "tokio/net",
+    "tokio/rt",
+    "tokio/sync",
+    "tokio/time",
+    "tokio/macros",
 ]
 framed-transport = [
     # Length-delimited WireMessage framing over any byte stream (Unix sockets,
@@ -86,6 +106,9 @@ framed-transport-tokio = [
     # `framed_json` over `tokio::io`, built on `tokio_util::codec::Framed`. Same
     # bytes on the wire as the neutral path; `encode`/`decode` are shared.
     "framed-transport",
+    # `framed.rs` names only `tokio::io::{AsyncRead, AsyncWrite}`, which are
+    # unconditional. `tokio_util`'s `codec` feature names `tokio/io-util` for
+    # `Framed` itself, so nothing extra belongs here.
     "dep:tokio",
     "dep:tokio-util",
 ]
@@ -130,7 +153,10 @@ ws = [
 signal = [
     # Feature dependencies
     "dep:tokio-util",
+    # `signal.rs` is `tokio::signal::unix` plus two `tokio::select!`s.
     "dep:tokio",
+    "tokio/signal",
+    "tokio/macros",
     "dep:lazy_static",
     # `signal.rs` logs the signal it caught. `types` happens to pull tracing in,
     # so this was never missed until somebody enabled `signal` on its own.
@@ -140,7 +166,11 @@ signal = [
 scheduler = [
     # Feature dependencies
     "dep:tokio-cron-scheduler",
+    # `scheduler.rs` calls `tokio::spawn`/`tokio::task::spawn` and
+    # `tokio::time::sleep`.
     "dep:tokio",
+    "tokio/rt",
+    "tokio/time",
     # "dep:",
 ]
 log_reader = [
@@ -148,7 +178,9 @@ log_reader = [
     "dep:tempfile",
     "dep:regex",
     "dep:rev_lines",
+    # `log_reader.rs` reads the file on `tokio::task::spawn_blocking`.
     "dep:tokio",
+    "tokio/rt",
     "dep:lazy_static",
     # `log_reader.rs` parses a tracing level and an RFC 3339 timestamp out of
     # each line, so it names both crates directly. Same reason as `signal`:
@@ -159,7 +191,11 @@ log_reader = [
 ]
 error_aggregation = [
     # Feature dependencies
+    # `error_aggregation.rs` holds a `tokio::sync::RwLock` and an mpsc pair, and
+    # keeps the `tokio::spawn`ed aggregation task's `JoinHandle`.
     "dep:tokio",
+    "tokio/rt",
+    "tokio/sync",
     "dep:regex",
     "dep:lazy_static",
     # "dep:",
@@ -168,8 +204,10 @@ log_throttling = [
     "dep:tracing-throttle",
     # The metrics reporter in `log.rs` is a `tokio::spawn` loop. `types` used to
     # supply tokio for the OTel SDK, so this was never missed; it does not any
-    # more.
+    # more. The loop is `tokio::spawn` plus `tokio::time::sleep`.
     "dep:tokio",
+    "tokio/rt",
+    "tokio/time",
 ]
 ws-http1 = ["ws", "hyper/http1"]
 ws-tls12 = ["ws", "rustls/tls12", "tokio-rustls/tls12"]
@@ -206,7 +244,20 @@ tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
 ], optional = true }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "logging"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "logging", "std"] }
-tokio = { version = "1.39", features = ["full"], optional = true }
+# tokio is optional, and carries no features of its own. It used to be a
+# non-optional `features = ["full"]` dependency, which meant no consumer could
+# ever get a tokio-free graph no matter which features it selected: `cargo tree
+# -e normal -i tokio` could not come back empty. Every crate feature whose own
+# code calls tokio now names `dep:tokio` together with the tokio features that
+# code actually uses, so the set is the union of what is enabled, not `full`.
+#
+# `full` was hiding: fs, io-std, process, rt-multi-thread and parking_lot. No
+# module in this crate names `tokio::fs`, `tokio::process` or a multi-thread
+# runtime builder (`server.rs` builds `new_current_thread` per shard).
+# `io-util` is used only in `#[cfg(test)]` code, where the dev-dependency below
+# still supplies it, and by `tokio-util`'s `codec` feature, which names
+# `tokio/io-util` itself.
+tokio = { version = "1.39", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 # The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
 # `nagoya::reactor` does not exist and the error reads like a missing module.

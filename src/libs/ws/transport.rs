@@ -30,6 +30,12 @@
 //! Verified with `cargo tree -e normal -i tokio`, which is the fact; a feature
 //! flag alone is not.
 //!
+//! This became answerable only when `tokio` was made `optional = true` in
+//! `Cargo.toml`. Up to 3.1.1 it was a non-optional `features = ["full"]`
+//! dependency, so every claim below was false by construction, whatever the
+//! feature list said. tokio now hangs off the features whose own code calls it,
+//! and names the tokio features that code uses rather than `full`.
+//!
 //! - `wire-core,framed-transport,nagoya-transport` prints nothing. This is the
 //!   neutral path and it is genuinely runtime-free.
 //! - `types` alone prints nothing either, since the OTLP exporters moved behind
