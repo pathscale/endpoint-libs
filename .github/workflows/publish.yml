@@ -1,0 +1,84 @@
+name: Publish
+
+# House scheme: a version bump on the default branch is the release. No tags,
+# no manual step. Publishing is irreversible, so the trigger has to be
+# something you cannot do by accident, and editing the version field is that.
+#
+# This crate's default branch is `master`. Match the repository rather than
+# copying a sibling, or the workflow silently never runs and the release looks
+# like it worked.
+on:
+  push:
+    branches: [master]
+    paths: ['Cargo.toml']
+  # A release that was merged before this gate was fixed has no Cargo.toml
+  # change left to make, so it cannot be triggered by the push rule alone.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The registry is the only authority on what is already released.
+      #
+      # This compared HEAD against HEAD^, which is only correct when the
+      # version bump is the last commit of the push. A rebased or squashed
+      # merge lands many commits at once and the bump is rarely the last of
+      # them, so the gate read "unchanged", the job went green, and nothing
+      # was published. That is exactly how 0.6.1 and nagoya 0.1.1 came to be
+      # merged, tagged green, and absent from crates.io.
+      - id: version
+        run: |
+          set -eu
+          name=$(cargo read-manifest | jq -er '.name')
+          version=$(cargo read-manifest | jq -er '.version')
+          if cargo info --registry crates-io "$name@$version" >/dev/null 2>&1; then
+            echo "$name $version is already on crates.io, nothing to publish"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$name $version is not on crates.io, publishing"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The gate runs on this commit too, but a release must not depend on job
+      # ordering, so it is re-run here rather than assumed.
+      - if: steps.version.outputs.changed == 'true'
+        run: cargo test --release
+
+      # A consumer that takes this crate with no features must still be able
+      # to build it. `check-features.sh` in the CI workflow checks every
+      # feature standalone; this is the same question asked once more on the
+      # thing about to be uploaded, because a release that only builds with
+      # the default set is not a release.
+      - if: steps.version.outputs.changed == 'true'
+        run: cargo check --no-default-features
+
+      # Checked before the upload rather than during it. This crate has no
+      # repository-level `CARGO_REGISTRY_TOKEN`, and every publish run so far
+      # short-circuited on "version unchanged", so the upload path has never
+      # actually run here. The first real release would be the first time the
+      # token is exercised, and an absent one surfaces as an authentication
+      # error from `cargo publish` after the package is built, which reads like
+      # a registry problem rather than a missing secret.
+      - if: steps.version.outputs.changed == 'true'
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "CARGO_REGISTRY_TOKEN is empty."
+            echo
+            echo "Set it on pathscale/endpoint-libs, or at the organisation level with this"
+            echo "repository in scope:"
+            echo "  gh secret set CARGO_REGISTRY_TOKEN --repo pathscale/endpoint-libs"
+            echo
+            echo "The fleet's WebSocket transport depends on this crate."
+            exit 1
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - if: steps.version.outputs.changed == 'true'
+        run: cargo publish --token "$CARGO_REGISTRY_TOKEN"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
