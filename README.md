@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/crates/l/endpoint-libs)](LICENSE)
-[![Security audit](https://deps.rs/crate/endpoint-libs/2.1.3/status.svg)](https://deps.rs/crate/endpoint-libs/2.1.3)
+[![Security audit](https://deps.rs/crate/endpoint-libs/3.2.0/status.svg)](https://deps.rs/crate/endpoint-libs/3.2.0)
 
 `endpoint-libs` exists to make it fast and easy to launch MCP services — killing
 boilerplate, tightening security, and raising the quality of both hand-written and
@@ -106,7 +106,7 @@ What is actually enforced:
 The release order for the whole chain is in [`docs/release-order.md`](docs/release-order.md).
 
 Version 3 makes `WireMessage` payloads immutable and byte-backed so local framed
-transports and tungstenite WebSockets can hand buffers to the application without
+transports and the WebSocket path can hand buffers to the application without
 cloning them. The wire format is unchanged. See
 [`docs/3.0-migration.md`](docs/3.0-migration.md) for the source migration.
 
@@ -114,44 +114,41 @@ cloning them. The wire format is unchanged. See
 
 The crate is feature-gated. The default feature set is `types` only.
 
-### tokio is optional, and narrower than `full`
+### There is no tokio, on any feature
 
-Up to and including 3.1.1 `tokio` was a **non-optional** dependency of this crate,
-declared as `version = "1.39", features = ["full"]`. No consumer could reach a
-tokio-free graph whatever it selected: `cargo tree -e normal -i tokio` could not come
-back empty, because the manifest named tokio unconditionally. Feature work on the
-consumer side could not fix that; it was one manifest line here.
+No feature of this crate pulls tokio in, and there is no interop flavour held back for
+a consumer that still runs one. `cargo tree -e normal -i tokio` prints nothing for
+every feature set this crate offers, including `full` — that is the claim worth
+checking, because a feature flag on its own is not one.
 
-It is now `optional = true` with no features of its own. tokio is pulled in by exactly
-these features, each naming the tokio features its own code uses:
+The history explains why this took a release rather than a feature edit. Up to and
+including 3.1.1 tokio was a **non-optional** dependency, declared as
+`version = "1.39", features = ["full"]`. No consumer could reach a clean graph whatever
+it selected, and no feature work on the consumer side could fix it: it was one manifest
+line here. 3.2.0 removes the line rather than making it optional, because every use it
+covered has a replacement.
 
-| feature | tokio features | why |
-| --- | --- | --- |
-| `ws-core` | `net`, `rt`, `sync` | TCP listener, per-shard current-thread runtime, `mpsc` in public struct fields. The date-cache sleep is gone with the `Date` header. `TOOLBOX` is a `thread_local`, not `task_local!` |
-| `signal` | `signal` | `tokio::signal::unix` for delivery. The flag is `nagoya::sync::Notify`, and the waits are `futures::future::select` |
-| `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
-| `log_reader` | `rt` | `tokio::task::spawn_blocking` |
-| `error_aggregation` | `rt`, `sync` | `RwLock`, `mpsc`, a spawned aggregation task |
-| `log_throttling` | `rt`, `time` | the spawned metrics reporter |
-| `otel` | `rt` | `opentelemetry_sdk`'s `rt-tokio` batch exporter |
-| `framed-transport-tokio` | none beyond the crate | only `tokio::io::{AsyncRead, AsyncWrite}`, which are unconditional; `tokio-util`'s `codec` names `tokio/io-util` itself |
+What replaced what:
 
-Features that reach tokio only through another feature: `ws`, `ws-client`, `ws-http1`,
-`ws-tls12` and `agent-control`.
+| was tokio | is now |
+| --- | --- |
+| `tokio::net` listener, per-shard `tokio::runtime` | `nagoya::reactor::TcpListener`, one `Reactor::local` under `block_on_with` |
+| `tokio::signal::unix` | `nagoya::signal::Signal`, registered on a reactor `Handle` |
+| `tokio::spawn` / `tokio::time::sleep` | `nagoya::runtime::background().spawn` and `nagoya::sleep` |
+| `tokio::task::spawn_blocking` | a `std::thread` answering over a `futures` oneshot |
+| `tokio::sync::{RwLock, mpsc}` | `nagoya::sync::RwLock`, this crate's own `ws::outbound`, `futures` channels |
+| `tokio::select!` | `futures::future::select` plus `Either`, with a deliberate priority order |
+| `tokio::task_local!` | `TOOLBOX`, a `thread_local` restored on drop and on panic |
 
-Features with no tokio at all: `types` (the default), `wire-core`, `framed-transport`
-and `nagoya-transport`.
+Two dependencies went with it rather than being ported. `framed-transport-tokio` is
+deleted — see [`framed-transport`](#framed-transport) — and so is `otel`, whose edge was
+genuinely upstream's: `opentelemetry-otlp` reaches `tonic` for the OTLP protobuf message
+types and `tonic` reaches tokio through `tokio-stream`. See [`otel` is gone](#otel-is-gone).
 
-`full` was hiding `fs`, `io-std`, `process`, `rt-multi-thread` and `parking_lot`. No
-module in this crate names `tokio::fs`, `tokio::process`, or a multi-threaded runtime
-builder: `server.rs` builds `new_current_thread` per shard. `io-util` appears only in
-`#[cfg(test)]` code, where the dev-dependency still carries `full`.
-
-This is a breaking change to the feature surface, on top of the `otel` split. A
-consumer that relied on this crate to supply tokio's `fs`, `process`, `io-std` or
-`rt-multi-thread` through feature unification has to name them on its own tokio
-dependency. That is the point of the change, but it will surface as a build error in
-someone else's crate rather than here.
+This is a breaking change to the feature surface. A consumer that relied on this crate
+to supply tokio's `fs`, `process`, `io-std` or `rt-multi-thread` through feature
+unification has to name them on its own tokio dependency. That is the point of the
+change, but it surfaces as a build error in someone else's crate rather than here.
 
 ### `types` (default)
 
@@ -173,15 +170,35 @@ borrowed string or byte slices without allocating.
 ### `agent-control`
 
 The minimal built-in local wire surface for always-on application control. It enables
-`WireMessage`, `TransportStream`, and length-delimited `framed_json` without the endpoint
-server, WebSocket, HTTP, TLS, scheduler, or diagnostics layers. Agent-control
+`WireMessage`, `TransportStream`, and length-delimited `framed_json_neutral` without the
+endpoint server, WebSocket, HTTP, TLS, scheduler, or diagnostics layers. It implies
+`framed-transport`, which is the only framing path there is. Agent-control
 messages use the built-in `mcp_wire` JSON-RPC envelopes; application-specific generated
 endpoints define the semantic inspect/action/lifecycle tools.
 
 ### `ws-client`
 
-The connecting half: `WsClient::new` (TCP/TLS), `WsClientBuilder` and the connect helpers.
-Standalone — you can build a client without the server.
+The connecting half: `WsClient::new`, `WsClientBuilder` and the connect helpers. The
+handshake and the framing are `nago-wss` over a nagoya socket. Standalone — you can
+build a client without the server.
+
+**Breaking change: the constructors take a `&nagoya::reactor::Handle`.** tokio supplied
+an ambient runtime, so a client built anywhere inside `#[tokio::main]` found a driver by
+itself. nagoya has no ambient anything: a descriptor is registered with one reactor when
+it is created, and only that reactor ever reports its readiness. A connection opened
+against a reactor nobody polls does not connect slowly, it never completes. Making the
+handle an argument is the only way that constraint is visible at the call site, and it
+matches what `listen()` does on the other side of the wire.
+
+This feature speaks plain `ws://` only. A `wss://` URL is refused with a message naming
+`ws-client-tls`.
+
+### `ws-client-tls`
+
+Client-side TLS for dialling an external `wss://`, off by default and deliberately not
+implied by `ws-client`. TLS is what drags `std`-bound crypto in, and the fleet's internal
+services are moving to plain `ws://` behind a proxy that terminates it, so the common
+build should not compile rustls at all.
 
 ### `framed-transport`
 
@@ -190,25 +207,44 @@ inherited socketpairs. No WebSocket, no TLS, no HTTP. Wire format under
 [Transports (2.0)](#transports-20) below, and machine-readable in the generated AsyncAPI
 document.
 
-This feature is the runtime-neutral half: `framed_json_neutral()` over
-`futures_io::AsyncRead`/`AsyncWrite`. It names no runtime, so a consumer that takes
-only this (plus `nagoya-transport`) has no tokio in its normal dependency graph.
+It is runtime-neutral: `framed_json_neutral()` over
+`futures_io::AsyncRead`/`AsyncWrite`. It names no runtime, and since 3.2.0 it is the
+**only** framing path.
 
-### `framed-transport-tokio`
+**Breaking change: `framed-transport-tokio` and `framed_json()` are deleted.** The tokio
+flavour shared `encode`/`decode` with the neutral one, so it always put identical bytes
+on the wire; what it offered over `framed_json_neutral` was an adapter type and a
+dependency. A consumer holding a tokio `AsyncRead + AsyncWrite` bridges it on their own
+side and nothing on the wire changes:
 
-The tokio-io flavour of the above: `framed_json()` over `tokio::io`, built on
-`tokio_util::codec::Framed`. `encode`/`decode` are shared with the neutral path, so
-the bytes on the wire are identical by construction rather than by agreement. Implies
-`framed-transport` and pulls in `tokio` and `tokio-util`.
+```rust
+use tokio_util::compat::TokioAsyncReadCompatExt;
+
+let transport = framed_json_neutral(tokio_stream.compat());
+```
+
+`tokio-util` is that consumer's dependency now, not this crate's. `agent-control` implies
+plain `framed-transport`.
 
 ### `ws`
 
-Async WebSocket server built on `tokio-tungstenite` with TLS support via `rustls`. Includes:
+WebSocket server. `nago-wss` performs the RFC 6455 upgrade over a nagoya socket; hyper,
+`tokio-tungstenite` and `tokio-rustls` are gone with the HTTP/2 path and the TLS
+listener. Includes:
 
 - Connection management and session tracking
 - Push/subscription infrastructure
 - Request handler and auth subcontroller traits with typed public errors
 - HTTP header parsing helpers
+
+**There is no server-side TLS.** `TlsListener`, `listen_tls` and the `config.insecure`
+branch that chose between them are deleted; this server serves plain `ws://` and
+termination belongs to the edge proxy (fly.io's `[http_service]` with
+`force_https = true`, forwarding plain to the app's internal port). `pub_certs` /
+`priv_key` left in a config are a startup error rather than a warning, because ignoring
+them puts plaintext on a wire an operator believes is encrypted. Dropping TLS also
+removes ALPN, which was the only way h2 was ever negotiated, so RFC 8441 extended CONNECT
+is gone rather than merely unused.
 
 Auth endpoints registered through `EndpointAuthController::add_auth_endpoint` use the same
 typed error model as regular `RequestHandler` implementations. A `SubAuthController` declares
@@ -297,7 +333,7 @@ server.enable_mcp(
     McpServerInfo { name: "my-service".into(), version: env!("CARGO_PKG_VERSION").into() },
 )?;
 
-server.listen().await
+server.listen()
 ```
 
 Behavior notes:
@@ -317,12 +353,11 @@ Behavior notes:
 - `enable_mcp` fails at startup on unresolved `StructRef`/`EnumRef` names or
   duplicate tool names, rather than serving broken schemas.
 
-A runnable end-to-end example (MCP handshake + legacy frame on one
-connection) is provided:
-
-```sh
-cargo run --example mcp_echo --features ws-http1
-```
+The runnable `mcp_echo` example that showed an MCP handshake and a legacy frame on one
+connection was deleted in 3.2.0 along with the rest of the tokio-bound examples, and
+nothing replaces it yet. The remaining example, `ws-echo`, does not call `enable_mcp`.
+`tests/transport_seam.rs` is the executable reference in the meantime: it drives an MCP
+`initialize`, a `tools/call` and a legacy frame over one connection.
 
 Migrating an existing backend from 1.7.x? See the step-by-step guide in
 [docs/mcp-migration.md](docs/mcp-migration.md) (covers the typed-error
@@ -384,7 +419,7 @@ opt-in (`--openapi`, `--asyncapi`).
 > **The OpenAPI document is a projection for tooling, not a servable API.** This transport
 > has no URLs, so paths are synthesized as `/{serviceName}/{endpoint_snake_name}`. Point an
 > HTTP client at them and nothing will answer. The **AsyncAPI** document is the
-> authoritative one *of the two specification documents* — including the `framed_json` byte layout
+> authoritative one *of the two specification documents* — including the `framed_json_neutral` byte layout
 > under `x-framing`, which is the only machine-readable copy of that format.
 
 MCP tool schemas deliberately do **not** go through this path: `to_mcp_input_schema` and
@@ -393,25 +428,43 @@ alone, which consumers depend on. A test asserts that stays true.
 
 ### `ws-http1` / `ws-tls12`
 
-Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HTTP/2;
-`ws-tls12` accepts TLS 1.2 in addition to 1.3. Default is HTTP/2 and TLS 1.3 only.
+**Both are now no-op aliases for `ws`.** HTTP/1.1 is the only thing served, so `ws-http1`
+is what `ws` already is; it named `hyper/http1` back when there was an HTTP/2 arm to
+choose against. `ws-tls12` selected a rustls protocol version back when this crate
+terminated TLS itself, and there is no rustls in this graph to select it on. They are
+kept rather than removed because every backend in the fleet names one or both, and a
+feature that vanishes is a build error in eight repositories for no gain.
 
 ### `full`
 
 `types` + `ws` + `signal` + `scheduler` + `log_reader` +
-`error_aggregation` + `log_throttling` + `otel` + `ws-http1` + `ws-tls12`. Convenience only, and it
-does **not** include `ws-client` or the `framed-transport` features — prefer naming what you use.
+`error_aggregation` + `log_throttling` + `ws-http1` + `ws-tls12`. `otel` is gone from
+this set because the feature is gone. Convenience only, and it does **not** include
+`ws-client` or the `framed-transport` features — prefer naming what you use.
 
 ### `signal`
 
-Unix signal handling (`SIGTERM`/`SIGINT`). Delivery is `tokio::signal::unix`. The process-wide flag is `Shutdown`: `nagoya::sync::Notify` plus an `AtomicBool`, held in `CANCELLATION_TOKEN`.
+Unix signal handling (`SIGTERM`/`SIGINT`). Delivery is `nagoya::signal::Signal`. The
+process-wide flag is `Shutdown`: `nagoya::sync::Notify` plus an `AtomicBool`, held in
+`CANCELLATION_TOKEN`.
+
+**Breaking change: `init_signals` takes a `&nagoya::reactor::Handle`.** tokio's
+`signal()` reached a process-wide driver the runtime was already turning, so the caller
+had nothing to say. A nagoya `Signal` is registered on one reactor and completes only
+while *that* reactor is being polled, so the reactor is a parameter rather than an
+assumption. A signal delivered while nobody polls that reactor is not lost — it stays
+readable on the descriptor — but nothing observes it until polling resumes.
 
 ### `scheduler`
 
-Task scheduling utilities built on `tokio-cron-scheduler`:
+Task scheduling utilities:
 
 - Fixed-interval repeated jobs
 - `AdaptiveJob` — jobs whose interval can be changed at runtime via a `JobTrigger` handle
+
+Ticks are `nagoya::sleep` plus `nagoya::runtime::background().spawn`.
+`tokio-cron-scheduler` is deleted: it was an entire tokio-native crate, and a 500ms tick
+wheel, sitting behind an interface this crate drives itself.
 
 ### `log_reader`
 
@@ -427,76 +480,41 @@ A `tracing` layer that captures recent error-level log events into an in-memory 
 
 Rate-limiting layer for `tracing` events to suppress repeated log spam.
 
-### `otel`
+### `otel` is gone
 
-OTLP export of traces and logs out of `setup_logging`. Off by default. Turning it on
-adds `OtelGuards` and the `setup.otel_guards` field, and makes `OtelConfig` actually do
-something. See [OpenTelemetry (OTel) Integration](#opentelemetry-otel-integration).
+**There is no OTLP export in this crate any more, and no feature that brings it back.**
+The `otel` feature, the exporter in `setup_logging`, the `OtelGuards` type and the
+`LogSetupReturn::otel_guards` field are all deleted, along with all six
+`opentelemetry` crates: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`,
+`opentelemetry-semantic-conventions`, `tracing-opentelemetry` and
+`opentelemetry-appender-tracing`.
 
-**What it costs.** The OTLP exporter stack is `opentelemetry`, `opentelemetry_sdk`
-(`rt-tokio`), `opentelemetry-otlp`, `opentelemetry-semantic-conventions`,
-`tracing-opentelemetry` and `opentelemetry-appender-tracing`. Through
-`opentelemetry-otlp`'s default features that also brings `tonic`, `reqwest` and
-`hyper-rustls`, and every one of those depends on `tokio` unconditionally. Enabling
-`otel` therefore puts a tokio runtime in your graph no matter which transport you use.
+The reason is that the edge was upstream's and not removable from here. The exporter
+stack pulled tokio in for the protobuf *message types* rather than for a runtime:
+`http-proto` requires `opentelemetry-proto/gen-tonic-messages`, that feature is
+`["tonic", "tonic-prost", "prost"]`, and tonic 0.14 lists `tokio-stream` as a
+non-optional dependency, which in turn lists tokio. No transport or encoding choice on
+`opentelemetry-otlp` 0.31 avoids those types. That left hand-rolling an OTLP encoder or
+dropping the exporter, and nothing in the fleet had the feature enabled, so the exporter
+went.
 
-This is why it is a feature rather than part of `types`. While the exporters lived in
-`types`, the default feature set, every consumer compiled tokio, `tonic`, `reqwest` and
-`hyper-rustls`, including one that took only `framed-transport` plus `nagoya-transport`
-and touched no HTTP at all.
+`OtelConfig` **remains** in `types`, inert. It is a bool, two `Option<String>`s and a
+map, carrying no dependency of its own, and four backends name it in a `LoggingConfig`
+struct literal — deleting it would be a source break for no compile-time gain. It is
+also the seam to reattach an exporter to if one ever comes back on a tokio-free
+transport.
 
-Moving them out is necessary but not sufficient for a tokio-free graph. It was not even
-sufficient for `types`: until tokio was made optional (see
-[tokio is optional, and narrower than `full`](#tokio-is-optional-and-narrower-than-full))
-the manifest named tokio unconditionally, so `--features types -i tokio` printed tokio
-too. With `otel` off and tokio optional,
-`cargo tree -e normal --no-default-features --features types -i tokio` prints nothing, but
-`--features ws-core,framed-transport,nagoya-transport -i tokio` still prints tokio, pulled
-by `endpoint-libs` itself. `ws-core` names `dep:tokio` on its own account, for four
-reasons, ranked by how hard each is to remove:
-
-1. **The TCP server path.** `ConnectionListener`/`TcpListener` are `tokio::net` and
-   `tokio::io`; `listen_impl`/`run_shard` build a current-thread `tokio::runtime` per
-   shard plus a `LocalSet`. The date-cache task is gone with the `Date` header.
-   The `futures` crate owns no reactor, so there is no futures-only substitute. This
-   would become a second server over a `nagoya::reactor::TcpListener`.
-2. **Signal delivery.** `ws-core` requires the `signal` feature. The shutdown
-   flag is a `nagoya::sync::Notify` plus an `AtomicBool`, not a `tokio_util`
-   `CancellationToken`, and `listen_impl` waits on `tokio::signal::unix` to set
-   it. `futures` has no signal support and nagoya 0.1.9 has no signal module
-   (`notify_waiters` is there; `EVFILT_SIGNAL` and `signalfd` are not), so the
-   delivery half still names tokio. `signal` also names `dep:nagoya`, and that
-   dependency enables nagoya's `reactor` feature.
-3. **`TOOLBOX` is a `thread_local`.** It is installed for one poll and restored
-   on the way out, including cancel and panic, so an `.await` inside
-   `TOOLBOX.scope` sees it again on the next poll. `scoped-tls` is not used.
-4. **The accept fan-out.** `server.rs` still moves accepted sockets onto shard
-   tasks through `tokio::sync::mpsc`. The per-connection `WsMessage` queue is
-   `ws::outbound`. Its bound is the number of queued messages: a sender does
-   not reserve a slot, which is the depth `drop_conn_on_buffer_full` measures.
-   `futures::channel::mpsc` would reserve one slot per sender and fire that
-   policy later. `WsStreamState::message_queue`, `WebsocketStates::insert` and
-   `Toolbox::send_ws_msg` / `send_serialized_ws_msg` take that queue's
-   `Sender`, not `tokio::sync::mpsc::Sender`.
-
-`TransportStream` over `tokio::io` is deliberate and not on that list: its only consumers
-are the hyper upgrader, tokio-tungstenite and tokio-rustls, which are gated on
-`ws`/`ws-client` and tokio-bound anyway.
-
-The TCP path, signal delivery and the shard accept channel still name tokio. The
-per-connection queue does not. Replacing `TOOLBOX` and the `select!`s does not
-change `cargo tree`. Until the TCP path and signal delivery move, a consumer that
-wants no tokio has to leave `ws-core` out.
-
-`OtelConfig` itself stays in `types` and compiles without this feature, so a
-`LoggingConfig` literal does not have to be `cfg`-ed. Setting `enabled: true` without
-the feature forwards nothing and logs a warning at setup.
+Being inert is the part to read carefully: **setting `enabled: true` exports nothing.**
+It is not ignored silently — `setup_logging` warns once, under the `otel::setup` target
+and naming the configured endpoint, because an operator who pointed a process at a
+collector is entitled to find out that nothing arrives there. But no traces and no logs
+are forwarded, and there is no guard to keep alive because there is nothing to flush.
 
 ## Transports (2.0)
 
-The server core is transport-agnostic. The WebSocket path (`listen()`) is unchanged;
-these entry points let the same handlers, roles, typed errors and MCP surface run over
-a Unix socket, a Windows named pipe, or macOS XPC.
+The server core is transport-agnostic. Alongside the WebSocket path (`listen()`), these
+entry points let the same handlers, roles, typed errors and MCP surface run over a Unix
+socket, a Windows named pipe, or macOS XPC.
 
 ```rust
 // Server: one already-established connection, any transport.
@@ -509,23 +527,22 @@ server.serve_with(my_listener).await?;   // my_listener: SessionListener
 let client = WsClient::from_stream(stream);
 ```
 
-Both sides need a `MessageStream`. For byte-stream transports, the `framed-transport-tokio`
-feature supplies one:
+Both sides need a `MessageStream`. For byte-stream transports, the `framed-transport`
+feature supplies one. It takes `futures_io::AsyncRead`/`AsyncWrite`, so a tokio stream is
+bridged on the caller's side with `tokio-util`'s compat shim:
 
 ```rust
-use endpoint_libs::libs::ws::transport::{TransportStream, framed_json};
+use endpoint_libs::libs::ws::transport::{TransportStream, framed_json_neutral};
 
 let stream: Box<dyn MessageStream> =
-    Box::new(TransportStream::new(framed_json(unix_stream)));
+    Box::new(TransportStream::new(framed_json_neutral(unix_stream)));
 ```
 
-`examples/uds_echo.rs` is a complete worked example over a Unix domain socket:
+The `examples/uds_echo.rs` worked example was deleted in 3.2.0 with the rest of the
+tokio-bound examples. `tests/transport_seam.rs` and `tests/nagoya_transport.rs` are the
+runnable references for this path.
 
-```bash
-cargo run --example uds_echo --features full,framed-transport-tokio,ws-client
-```
-
-### `framed_json` wire format
+### `framed_json_neutral` wire format
 
 One length-delimited frame per message — implementable by a non-Rust peer in a few
 lines:
@@ -538,12 +555,12 @@ lines:
 
 `length` counts the kind byte plus payload. `kind` is `0=Text, 1=Binary, 2=Ping,
 3=Pong, 4=Close`. `Text` is UTF-8; `Close` is empty or `u16 BE code` + UTF-8 reason.
-Default max frame is 16 MiB (`framed_json_with_max_frame` to change it).
+Default max frame is 16 MiB (`framed_json_neutral_with_max_frame` to change it).
 
 ### Peer identity and attestation
 
 `WsConnection.peer` / `RequestContext.peer` carry a `PeerIdentity`:
-`Network(SocketAddr)` for TCP/TLS, or `Local(LocalPeer { pid, uid, attestation })`.
+`Network(SocketAddr)` for TCP, or `Local(LocalPeer { pid, uid, attestation })`.
 `Attestation::Verified { mechanism, subject }` records *code* identity a transport
 verified — an XPC code-signing requirement, an executable digest, a SID. This crate
 defines the vocabulary; the platform implementations live in a sibling crate.
@@ -563,7 +580,12 @@ server.add_on_disconnect_hook(CleanUpConnectionWork);
 ```
 
 > **Note:** `MessageStream`'s futures are not `Send`, so `serve_connection`,
-> `serve_with` and a `from_stream` client must run inside a `tokio::task::LocalSet`.
+> `serve_with` and a `from_stream` client must be polled on the thread that owns the
+> stream. There is no `LocalSet` anywhere in this crate any more — the last one existed
+> because the hyper upgrader `spawn_local`ed onto `TokioExecutor`, and the upgrade is
+> nago-wss's now. Any single-threaded executor satisfies the requirement;
+> `nagoya::reactor::TaskSet` under `block_on_with` is the one this crate reaches for, and
+> a bare `nagoya::block_on` does for a single connection.
 
 ## Logging Setup
 
@@ -574,58 +596,40 @@ The `setup_logging` function (available without any optional features) provides 
 - Runtime log level reloading via `LogReloadHandle`
 - Optional `error_aggregation` layer (requires `error_aggregation` feature)
 
-## OpenTelemetry (OTel) Integration
+## OpenTelemetry (OTel) — removed
 
-The logging framework supports forwarding all `tracing` spans and log events to an OpenTelemetry (OTLP) collector as primary signals (**Traces** and **Logs**). This operates as a parallel layer and does not affect stdout or file logging.
+**This crate no longer forwards anything to an OTLP collector.** The exporter, its
+`tracing` layer, the `OtelGuards` type and the `setup.otel_guards` field are gone, as is
+the `otel` feature that turned them on. Why, and what it cost, is in
+[`otel` is gone](#otel-is-gone). The `OTEL_*` environment variables this section used to
+document are read by nothing here.
 
-### Enabling OTel
-
-Build with the `otel` feature. It is **off by default**; see
-[`otel`](#otel) for what it pulls in:
-
-```toml
-endpoint-libs = { version = "3", features = ["otel"] }
-```
-
-Then configure `OtelConfig` in your `LoggingConfig`:
+`OtelConfig` survives as an inert struct in `types`, so an existing `LoggingConfig`
+literal still compiles unchanged:
 
 ```rust
 use std::collections::HashMap;
 use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig};
 
-let mut headers = HashMap::new();
-headers.insert("x-api-key".to_string(), "your-token".to_string());
-
 let config = LoggingConfig {
     level: LogLevel::Info,
     file_config: None,
+    // Compiles, and forwards nothing. `enabled: true` logs one warning at setup
+    // naming this endpoint, and no trace or log reaches a collector.
     otel_config: OtelConfig {
         enabled: true,
         service_name: Some("my-service".into()),
-        endpoint: Some("http://localhost:4317".into()), // OTLP collector endpoint
-        headers,
+        endpoint: Some("http://localhost:4317".into()),
+        headers: HashMap::new(),
     },
 };
 
 let setup = setup_logging(config)?;
-// CRITICAL: Keep `setup.otel_guards` alive for the duration of the program.
-// It flushes pending traces and logs to the collector on drop.
+// There is no `setup.otel_guards` to keep alive: nothing buffers, so nothing flushes.
 ```
 
-### Environment Variables
-
-OTel can also be configured via standard environment variables:
-
-| Variable | Description |
-|----------|-------------|
-| `OTEL_SERVICE_NAME` | Name of the service |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Collector endpoint for traces |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Collector endpoint for logs (falls back to traces endpoint) |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Key-value pairs for auth (e.g. `api-key=val,other=val`) |
-| `OTEL_PROPAGATORS` | Context propagators (default: `tracecontext,baggage`) |
-
-Note: Values in `OtelConfig` override environment variables. To prevent recursive logging, OTel internal crates are capped at the `WARN` level when global logging is set to `DEBUG` or `TRACE`.
+A service that needs distributed tracing exports it from its own crate, or reattaches an
+exporter to `OtelConfig`, which is kept partly to be that seam.
 
 ## Config Loading
 

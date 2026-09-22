@@ -8,8 +8,8 @@
 //! * [`Transport`] — a *blanket alias* over `Sink + Stream` of [`WireMessage`],
 //!   modelled on tarpc's `Transport`. Implementors never name it: anything that is a
 //!   `Sink` and a `Stream` of the right item types already is one. This composes for
-//!   free with `tokio_util::codec::Framed` and with hand-rolled adapters (XPC
-//!   dictionaries, for instance).
+//!   free with `framed_json_neutral` (the `framed-transport` feature) and with
+//!   hand-rolled adapters (XPC dictionaries, for instance).
 //! * [`MessageStream`] — the object-safe, `async fn`-based trait the session loop
 //!   actually consumes. It is the pre-2.0 `WsStream` under a transport-neutral name;
 //!   `WsStream` remains as an alias.
@@ -20,85 +20,67 @@
 //!
 //! [`MessageStream`] is `#[async_trait(?Send)]` — its futures are **not** `Send`.
 //! `serve_connection` / `serve_with` poll the session and its request handlers
-//! in place on one thread, so they do not need a `LocalSet`. TCP `listen` now
-//! polls connections the same way. A `LocalSet` remains only because the hyper
-//! upgrader `spawn_local`s onto `TokioExecutor`; nago-wss is the tokio-free
-//! replacement for that backend, and is not wired here yet.
+//! in place on one thread, and TCP `listen` polls connections the same way.
+//!
+//! There is no `LocalSet` anywhere in this crate any more, and no executor to
+//! host one. The last one existed because the hyper upgrader `spawn_local`ed
+//! onto `TokioExecutor`; the upgrade is nago-wss's now, and the server runs on
+//! a nagoya reactor it builds itself (`server.rs`: `Reactor::local` plus
+//! `block_on_with`). A caller that polls a session from somewhere else owns the
+//! thread while it does — that is the whole requirement, and any single-threaded
+//! executor satisfies it.
 //!
 //! # Which feature sets are free of tokio
 //!
-//! Verified with `cargo tree -e normal -i tokio`, which is the fact; a feature
-//! flag alone is not.
+//! All of them, with nothing left over. That is a claim about
+//! `cargo tree -e normal -i tokio`, which is the fact; a feature flag alone is
+//! not.
 //!
-//! This became answerable only when `tokio` was made `optional = true` in
-//! `Cargo.toml`. Up to 3.1.1 it was a non-optional `features = ["full"]`
-//! dependency, so every claim below was false by construction, whatever the
-//! feature list said. tokio now hangs off the features whose own code calls it,
-//! and names the tokio features that code uses rather than `full`.
+//! There is no exception and no interop flavour held back for a consumer that
+//! still runs tokio. `framed-transport-tokio` was one and is deleted: the
+//! neutral path put identical bytes on the wire, so it offered an adapter type
+//! and a dependency. `otel` was the other, and the edge there was genuinely
+//! upstream's -- `opentelemetry-otlp` reaches `tonic` for the OTLP protobuf
+//! message types and tonic reaches tokio through tokio-stream -- so rather
+//! than carry a runtime for a feature nothing in the fleet enabled, the OTLP
+//! exporter is deleted too. `OtelConfig` stays, inert, because backends
+//! construct it in a `LoggingConfig` literal.
 //!
-//! - `wire-core,framed-transport,nagoya-transport` prints nothing. This is the
-//!   neutral path and it is genuinely runtime-free.
-//! - `types` alone prints nothing either, since the OTLP exporters moved behind
-//!   the `otel` feature.
-//! - Anything including `ws-core` still carries tokio. This is no longer an
-//!   accident of `types`: `ws-core` names `dep:tokio` on its own account, and
-//!   the code behind it means that.
+//! Everything this crate used to do with tokio, it now does with nagoya or with
+//! `futures`:
 //!
-//! ## What `ws-core` would have to give up
+//! 1. **The TCP server path** is nagoya. `listener.rs` is
+//!    `nagoya::reactor::TcpListener` and `ConnectionListener`'s associated types
+//!    are bounded on `nagoya::io::Stream`, which is an async-fn trait rather
+//!    than a `poll_read`/`ReadBuf` pair. `WebsocketServer::listen_impl` builds a
+//!    `Reactor::local` and drives the accept loop under `block_on_with`; the
+//!    per-shard threads and their accept `mpsc` went with it.
+//! 2. **Signal delivery** is nagoya. The flag is a `nagoya::sync::Notify` plus
+//!    an `AtomicBool` (`Shutdown`), and delivery is `nagoya::reactor::Signal`. A
+//!    `Signal` is registered on one reactor and fires only while that reactor is
+//!    polled, which is why `init_signals` takes the `Handle`.
+//! 3. **The per-connection queue** is `outbound`, this crate's own. Its bound is
+//!    the number of queued `WsMessage`s and a sender does not reserve a slot, so
+//!    `drop_conn_on_buffer_full` fires at exactly the configured depth.
+//!    `futures::channel::mpsc` reserves `buffer + num_senders` and would not.
+//! 4. **The `select!`s** are `futures::future::select` plus `Either`
+//!    (`session.rs::run_loop`, `server.rs::listen_impl`, `signal.rs`). That is
+//!    not a fairness-preserving swap: `select` takes its left arm the moment it
+//!    is ready and never polls the right one, where `tokio::select!` chose at
+//!    random. So the session loop's order is a deliberate priority
+//!    (`session::priority4`): a finished handler, then outbound, then inbound,
+//!    then the policy flag. Handlers come first because they are the one arm a
+//!    peer cannot keep ready, so anywhere below inbound they starve.
+//! 5. **`TOOLBOX`** in `toolbox.rs` is a `thread_local` installed on poll entry
+//!    and restored on return, including on panic and drop — never a
+//!    `tokio::task_local`.
 //!
-//! Ranked by how hard it is to remove, not by how often it is cited.
-//!
-//! 1. **The TCP server path.** `listener.rs` is `tokio::net::TcpListener` and
-//!    `ConnectionListener`'s associated types are bounded on `tokio::io`.
-//!    `WebsocketServer::listen_impl` and `run_shard` build a
-//!    `tokio::runtime::Builder::new_current_thread` runtime per shard and a
-//!    `LocalSet`. The date-cache `tokio::spawn` was removed with the `Date`
-//!    header. The `futures` crate owns no reactor, so there is no futures-only
-//!    substitute for any of it. Replacing it means a second server built on a
-//!    `nagoya::net::TcpListener`, which is a parallel implementation rather
-//!    than a primitive swap.
-//! 2. **Signal delivery.** `ws-core` requires the `signal` feature. The flag
-//!    is a `nagoya::sync::Notify` plus an `AtomicBool` (`Shutdown`); the
-//!    `tokio_util` `CancellationToken` is gone. What remains is
-//!    `tokio::signal::unix`. `listen_impl` waits on it to shut down. nagoya
-//!    0.1.9 has `notify_waiters` and no signal module, so delivery is not
-//!    portable inside this crate yet. `signal` names `dep:nagoya` for the
-//!    flag and `tokio/signal` for delivery, and the nagoya dependency enables
-//!    `reactor`, so the reactor comes along too.
-//! 3. **`TOOLBOX`** in `toolbox.rs` is a `thread_local` installed on poll entry
-//!    and restored on return, including panic and drop. The value is held by
-//!    the scope future, so the awaits inside `TOOLBOX.scope` (`session.rs`
-//!    handler bodies, and the handshake scope in `server.rs`) observe it again
-//!    on the next poll. `scoped-tls` is not a dependency.
-//! 4. **The per-connection queue is `outbound`.** Its bound is the
-//!    number of queued `WsMessage`s. A sender does not keep a slot of its own,
-//!    so `drop_conn_on_buffer_full` still fires at the configured depth.
-//!    `futures::channel::mpsc` reserves one slot per sender and would not.
-//!    Teardown is still `recv() -> None`, classified as `Outbound::Closed`. A
-//!    policy close still cancels `WsStreamState::end`, including when
-//!    `try_send(Close)` cannot take a slot. The `Close` frame is still queued
-//!    behind payloads. The shard accept channel in `server.rs` is separate
-//!    and is still `tokio::sync::mpsc`. The `select!`s are already
-//!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
-//!    `server.rs::listen_impl`, `signal.rs`). That swap is not fairness
-//!    preserving: `select` takes its left arm the moment it is ready and
-//!    never polls the right one, where `tokio::select!` chose at random. The
-//!    session loop's order is `session::priority4`, and it is a priority
-//!    rather than a nesting accident: a finished handler, then outbound,
-//!    then inbound, then the policy flag. Handlers come first because they
-//!    are the one arm a peer cannot keep ready, so anywhere below inbound
-//!    they starve.
-//!
-//! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
-//! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
-//! upgrader, tokio-tungstenite and tokio-rustls, all of which are gated on
-//! `ws`/`ws-client` and tokio-bound regardless.
-//!
-//! The TCP path and signal delivery still name tokio, and so does the shard
-//! accept channel. The per-connection queue does not. Replacing `TOOLBOX` and
-//! the `select!`s does not change `cargo tree`. Until the TCP path and signal
-//! delivery move, a consumer that wants no tokio at all takes the neutral
-//! transport and leaves `ws-core` out.
+//! `RawStream` is the one bound that looks like it should be `futures_io` and is
+//! not: it is an object-safe mirror of `nagoya::io::Stream`, because its
+//! consumers are the nago-wss upgrade path. See the comment on it in
+//! `traits.rs`. Transport code that must stay runtime-neutral takes `futures_io`
+//! and goes through `framed_json_neutral` — that
+//! is the seam, and it is what this module is for.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
@@ -168,10 +150,13 @@ pub mod framed;
 #[cfg(feature = "nagoya-transport")]
 pub mod nagoya;
 
+// `framed_json` was re-exported here alongside these until 3.2.0. It is gone with
+// the tokio flavour, and nothing replaces it at this path: `framed_json_neutral`
+// takes a `futures_io` stream and lives in `framed`, which is public. A consumer
+// that was on `framed_json` bridges its tokio stream with `tokio-util`'s `compat`
+// on its own side; `framed`'s module docs spell out the one line.
 #[cfg(feature = "framed-transport")]
-pub use framed::FramedError;
-#[cfg(feature = "framed-transport-tokio")]
-pub use framed::framed_json;
+pub use framed::{FramedError, framed_json_neutral, framed_json_neutral_with_max_frame};
 
 #[cfg(feature = "nagoya-transport")]
 pub use nagoya::NagoyaStream;

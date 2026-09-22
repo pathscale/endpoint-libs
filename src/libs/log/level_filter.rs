@@ -47,8 +47,15 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     if log_level > LogLevel::Info && log_level != LogLevel::Detail {
         const DIRECTIVES: &[(Level, &str)] = &[
             (Level::DEBUG, "tungstenite::protocol"),
-            (Level::DEBUG, "tokio_util::codec::framed_impl"),
-            (Level::DEBUG, "tokio_tungstenite"),
+            // `tokio_util::codec::framed_impl` and `tokio_tungstenite` used to
+            // sit here. Both crates left the graph with tokio itself -- the
+            // framing is `framed_json_neutral` over `futures_io` and the
+            // WebSocket half is nago-wss -- so neither target can emit an event
+            // any more and the directives only cost a parse and a line in
+            // `EnvFilter`'s output. A consumer that runs tokio in its own graph
+            // and wants those two quiet says so in `RUST_LOG`, which this
+            // filter is built on top of; this list is for the noise *this*
+            // crate's dependencies make.
             (Level::INFO, "h2"),
             (Level::INFO, "rustls::client::hs"),
             (Level::INFO, "rustls::client::tls13"),
@@ -204,8 +211,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_min_logic_filters_verbose_crates() {
+    // Like the pair in `log.rs`: these were `#[tokio::test]` only to have a
+    // runtime in scope. Neither awaits anything -- `setup_logging_test` is
+    // synchronous, the macros are synchronous, and the wait is a
+    // `std::thread::sleep` for the non-blocking appender to drain, which a
+    // runtime would not have helped with anyway.
+    #[test]
+    fn test_min_logic_filters_verbose_crates() {
         // Import necessary items for logging test setup
         use crate::libs::log::{LoggingConfig, setup_logging_test};
         use tracing::{debug, error, info, warn};
@@ -250,8 +262,8 @@ mod tests {
         // The test passes if the logs are emitted without errors
     }
 
-    #[tokio::test]
-    async fn test_no_directives_applied_at_info_level() {
+    #[test]
+    fn test_no_directives_applied_at_info_level() {
         // When log level is Info or above, directives should NOT be applied
         // because the global level is restrictive enough
         use crate::libs::log::{LoggingConfig, setup_logging_test};

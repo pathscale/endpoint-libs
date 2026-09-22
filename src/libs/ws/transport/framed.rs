@@ -19,27 +19,53 @@
 //! * `Text` payloads are UTF-8. `Close` payloads are either empty (no close frame) or
 //!   `u16 BE code` followed by a UTF-8 reason.
 //!
-//! The default maximum frame length is 16 MiB; see [`framed_json_with_max_frame`].
+//! The default maximum frame length is 16 MiB; see
+//! [`framed_json_neutral_with_max_frame`].
 //!
 //! **This format is normative for any non-Rust peer.** It is deliberately trivial to
 //! implement: a 4-byte length prefix, one tag byte, and a payload. It is also recorded
 //! in the AsyncAPI document emitted in 2.1, which is the machine-readable copy.
 //!
-//! Note the implementation uses `tokio_util`'s `LengthDelimitedCodec` for the length
-//! prefix but *not* `tokio_serde`: the kind byte means the payload is not a bare serde
-//! value, so the serde codec layer would buy nothing.
+//! # There is one framing path, and it names no runtime
+//!
+//! The byte stream is [`futures::io::AsyncRead`]/[`AsyncWrite`], which is the trait
+//! pair that belongs to no executor. The length prefix is read and written by hand,
+//! a few dozen lines below, rather than by `tokio_util::codec::LengthDelimitedCodec`.
+//! That is not a reimplementation for its own sake: a codec from `tokio-util` puts
+//! `tokio` in the dependency graph of every consumer of this module, and this crate
+//! is required to have a graph with no tokio in it at all. `tokio_serde` was never
+//! used either — the kind byte means the payload is not a bare serde value, so a
+//! serde codec layer would buy nothing.
+//!
+//! ## Breaking change in 3.2.0: `framed_json` is gone
+//!
+//! Until 3.2.0 this module also exposed `framed_json`, the same wire format over
+//! `tokio::io::{AsyncRead, AsyncWrite}`, behind a `framed-transport-tokio` feature.
+//! Both flavours shared `encode`/`decode`, so they only ever differed in the adapter
+//! type they accepted; the tokio one has been deleted along with the feature.
+//!
+//! A consumer holding a tokio `AsyncRead + AsyncWrite` (a `tokio::net::UnixStream`,
+//! a `tokio::io::DuplexStream`) bridges on its own side, in one call:
+//!
+//! ```ignore
+//! use tokio_util::compat::TokioAsyncReadCompatExt;
+//!
+//! let transport = framed_json_neutral(tokio_stream.compat());
+//! ```
+//!
+//! `tokio-util`'s `compat` feature is then **the consumer's** dependency, declared in
+//! the consumer's `Cargo.toml`. That is the whole point of the removal: the crate that
+//! wants tokio is the crate that pays for it, and everyone else gets a graph without
+//! it. The bytes on the wire do not change, so a bridged peer and an unbridged peer
+//! still talk to each other.
 
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::io::{AsyncRead as FuturesRead, AsyncWrite as FuturesWrite};
+use futures::io::{AsyncRead, AsyncWrite};
 use futures::{Sink, Stream};
-#[cfg(feature = "framed-transport-tokio")]
-use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(feature = "framed-transport-tokio")]
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use super::super::message::{CloseFrame, WireMessage};
 use super::Transport;
@@ -156,143 +182,36 @@ fn decode(mut frame: BytesMut) -> Result<WireMessage, FramedError> {
     })
 }
 
-/// Wrap a byte stream in the framing described in this module's docs.
+/// Wrap a `futures-io` byte stream in the framing described in this module's docs.
 ///
 /// The result is a [`Transport`] of [`WireMessage`], which
 /// [`TransportStream`](super::TransportStream) turns into a
 /// [`MessageStream`](super::super::traits::MessageStream) for the session loop.
-#[cfg(feature = "framed-transport-tokio")]
-pub fn framed_json<S>(
-    io: S,
-) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    framed_json_with_max_frame(io, DEFAULT_MAX_FRAME_BYTES)
-}
-
-/// [`framed_json`] with an explicit maximum frame length.
 ///
-/// Frames longer than `max_frame_bytes` are rejected rather than buffered, which is
-/// what keeps a hostile or broken peer from exhausting memory.
-#[cfg(feature = "framed-transport-tokio")]
-pub fn framed_json_with_max_frame<S>(
-    io: S,
-    max_frame_bytes: usize,
-) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let codec = LengthDelimitedCodec::builder()
-        .big_endian()
-        .length_field_length(4)
-        .max_frame_length(max_frame_bytes)
-        .new_codec();
-
-    WireFramed {
-        inner: Framed::new(io, codec),
-    }
-}
-
-/// Adapts `Framed<S, LengthDelimitedCodec>` (bytes) to `WireMessage` in both
-/// directions.
-#[cfg(feature = "framed-transport-tokio")]
-struct WireFramed<S> {
-    inner: Framed<S, LengthDelimitedCodec>,
-}
-
-#[cfg(feature = "framed-transport-tokio")]
-impl<S> Stream for WireFramed<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    type Item = Result<WireMessage, FramedError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        match std::pin::Pin::new(&mut self.inner).poll_next(cx) {
-            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(decode(frame))),
-            std::task::Poll::Ready(Some(Err(err))) => {
-                std::task::Poll::Ready(Some(Err(FramedError::Io(err))))
-            }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-}
-
-#[cfg(feature = "framed-transport-tokio")]
-impl<S> Sink<WireMessage> for WireFramed<S>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    type Error = FramedError;
-
-    fn poll_ready(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner)
-            .poll_ready(cx)
-            .map_err(FramedError::Io)
-    }
-
-    fn start_send(
-        mut self: std::pin::Pin<&mut Self>,
-        item: WireMessage,
-    ) -> Result<(), Self::Error> {
-        std::pin::Pin::new(&mut self.inner)
-            .start_send(encode(item))
-            .map_err(FramedError::Io)
-    }
-
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner)
-            .poll_flush(cx)
-            .map_err(FramedError::Io)
-    }
-
-    fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::pin::Pin::new(&mut self.inner)
-            .poll_close(cx)
-            .map_err(FramedError::Io)
-    }
-}
-
-/// Length-delimited framing over a `futures-io` byte stream.
-///
-/// The same wire format as [`framed_json`], carried over
-/// [`futures::io::AsyncRead`]/[`AsyncWrite`] rather than tokio's. That trait pair is
-/// the neutral one: tokio adapts to it through `tokio-util`'s `Compat`, and Nagoya
-/// through [`NagoyaStream`](super::nagoya::NagoyaStream) behind the `nagoya-transport`
-/// feature, so a runtime-agnostic caller has a path that does not name a runtime.
-///
-/// `encode` and `decode` are shared with the tokio path, so the bytes on the wire
-/// are identical by construction rather than by agreement.
+/// [`futures::io::AsyncRead`]/[`AsyncWrite`] is the neutral trait pair: Nagoya reaches
+/// it through [`NagoyaStream`](super::nagoya::NagoyaStream) behind the
+/// `nagoya-transport` feature, and a caller still holding a tokio stream reaches it
+/// through `tokio-util`'s `compat` on its own side — see the module docs. Neither
+/// route is named here, which is what keeps this path free of a runtime.
 pub fn framed_json_neutral<S>(
     io: S,
 ) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
 where
-    S: FuturesRead + FuturesWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     framed_json_neutral_with_max_frame(io, DEFAULT_MAX_FRAME_BYTES)
 }
 
 /// [`framed_json_neutral`] with an explicit maximum frame length.
+///
+/// Frames longer than `max_frame_bytes` are rejected rather than buffered, which is
+/// what keeps a hostile or broken peer from exhausting memory.
 pub fn framed_json_neutral_with_max_frame<S>(
     io: S,
     max_frame_bytes: usize,
 ) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
 where
-    S: FuturesRead + FuturesWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     NeutralFramed {
         io,
@@ -303,12 +222,13 @@ where
     }
 }
 
-/// The `futures-io` counterpart of [`WireFramed`].
+/// The framing itself: a `futures-io` byte stream in, [`WireMessage`]s out.
 ///
-/// `tokio_util`'s `Framed` is what the tokio path gets for free; there is no
-/// equivalent in `futures-util`, so the buffering is here. It is the same two
-/// buffers `Framed` keeps: one accumulating what has been read but not yet framed,
-/// one holding what has been encoded but not yet written.
+/// `tokio_util`'s `Framed` is the thing this would have been built on if a tokio
+/// dependency were acceptable; it is not, and `futures-util` has no equivalent, so
+/// the buffering is here. It is the same two buffers `Framed` keeps: one accumulating
+/// what has been read but not yet framed, one holding what has been encoded but not
+/// yet written.
 struct NeutralFramed<S> {
     io: S,
     max_frame_bytes: usize,
@@ -359,7 +279,7 @@ impl<S> NeutralFramed<S> {
 
 impl<S> Stream for NeutralFramed<S>
 where
-    S: FuturesRead + FuturesWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     type Item = Result<WireMessage, FramedError>;
 
@@ -412,7 +332,7 @@ where
 
 impl<S> Sink<WireMessage> for NeutralFramed<S>
 where
-    S: FuturesRead + FuturesWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     type Error = FramedError;
 
@@ -492,10 +412,117 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the async cases drive a sink or a stream, and those all run over a
-    // tokio duplex, so they go with the tokio flavour.
-    #[cfg(feature = "framed-transport-tokio")]
-    use futures::{SinkExt, StreamExt};
+
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::task::Waker;
+
+    use futures::executor::block_on;
+    use futures::{AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt};
+
+    /// One direction of [`duplex`]: bytes in at one end, out at the other.
+    ///
+    /// The async cases used to run over `tokio::io::duplex`, bridged into `futures-io`
+    /// with `tokio-util`'s `compat`. Both are gone with the tokio flavour, and a test
+    /// pipe is not worth a dependency that would put a runtime back in the graph — so
+    /// it is thirty lines here instead. Unbounded on purpose: a writer never blocks,
+    /// which is what lets a test send and then read back on one thread under
+    /// `block_on` without a second task to drain it.
+    #[derive(Default)]
+    struct Pipe {
+        bytes: VecDeque<u8>,
+        writer_gone: bool,
+        reader_waker: Option<Waker>,
+    }
+
+    /// One end of an in-memory bidirectional byte stream.
+    struct DuplexEnd {
+        incoming: Arc<Mutex<Pipe>>,
+        outgoing: Arc<Mutex<Pipe>>,
+    }
+
+    /// A connected pair. Whatever one end writes, the other end reads.
+    fn duplex() -> (DuplexEnd, DuplexEnd) {
+        let left_to_right = Arc::new(Mutex::new(Pipe::default()));
+        let right_to_left = Arc::new(Mutex::new(Pipe::default()));
+        (
+            DuplexEnd {
+                incoming: Arc::clone(&right_to_left),
+                outgoing: Arc::clone(&left_to_right),
+            },
+            DuplexEnd {
+                incoming: left_to_right,
+                outgoing: right_to_left,
+            },
+        )
+    }
+
+    impl DuplexEnd {
+        /// Mark the write side finished, so the peer's reader sees EOF rather than
+        /// waiting forever. Both `poll_close` and the drop go through here: dropping
+        /// a socket closes it, and a test that hangs up without closing first is
+        /// exactly the truncation case worth exercising.
+        fn hang_up(&self) {
+            let mut pipe = self.outgoing.lock().expect("pipe lock");
+            pipe.writer_gone = true;
+            if let Some(waker) = pipe.reader_waker.take() {
+                waker.wake();
+            }
+        }
+    }
+
+    impl Drop for DuplexEnd {
+        fn drop(&mut self) {
+            self.hang_up();
+        }
+    }
+
+    impl AsyncRead for DuplexEnd {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut pipe = self.incoming.lock().expect("pipe lock");
+            if pipe.bytes.is_empty() {
+                return if pipe.writer_gone {
+                    Poll::Ready(Ok(0))
+                } else {
+                    pipe.reader_waker = Some(cx.waker().clone());
+                    Poll::Pending
+                };
+            }
+            let take = pipe.bytes.len().min(buffer.len());
+            for slot in buffer.iter_mut().take(take) {
+                *slot = pipe.bytes.pop_front().expect("checked length");
+            }
+            Poll::Ready(Ok(take))
+        }
+    }
+
+    impl AsyncWrite for DuplexEnd {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut pipe = self.outgoing.lock().expect("pipe lock");
+            pipe.bytes.extend(buffer.iter().copied());
+            if let Some(waker) = pipe.reader_waker.take() {
+                waker.wake();
+            }
+            Poll::Ready(Ok(buffer.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.hang_up();
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn every_variant_round_trips_through_the_codec() {
@@ -571,199 +598,145 @@ mod tests {
         assert_eq!(text_bytes.as_ptr(), payload_pointer);
     }
 
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn duplex_pipe_carries_messages_both_ways() {
-        let (a, b) = tokio::io::duplex(64 * 1024);
-        let mut left = framed_json(a);
-        let mut right = framed_json(b);
+    /// The length prefix belongs to the sink, not to `encode`, so the byte-level
+    /// check above does not cover it. It used to be covered indirectly, by comparing
+    /// this path's output against `tokio_util`'s `LengthDelimitedCodec`. With the
+    /// tokio flavour deleted there is no second implementation to agree with, and
+    /// the format is still normative for non-Rust peers — so assert the whole frame
+    /// against the ASCII art in the module docs directly.
+    #[test]
+    fn the_sink_writes_the_length_prefix_the_docs_promise() {
+        let (sender, mut receiver) = duplex();
 
-        left.send(WireMessage::Text("ping".into())).await.unwrap();
-        let got = right.next().await.unwrap().unwrap();
-        assert_eq!(got, WireMessage::Text("ping".into()));
+        block_on(async {
+            let mut framed = framed_json_neutral(sender);
+            framed
+                .send(WireMessage::Text("hi".into()))
+                .await
+                .expect("send");
+            framed.flush().await.expect("flush");
 
-        right
-            .send(WireMessage::Binary(vec![7, 7].into()))
-            .await
-            .unwrap();
-        let got = left.next().await.unwrap().unwrap();
-        assert_eq!(got, WireMessage::Binary(vec![7, 7].into()));
+            // Three bytes of body: the kind byte plus "hi".
+            let mut got = [0u8; 7];
+            receiver.read_exact(&mut got).await.expect("read");
+            assert_eq!(got, [0, 0, 0, 3, KIND_TEXT, b'h', b'i']);
+        });
     }
 
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn oversized_outbound_frames_are_refused_by_the_encoder() {
-        let (a, _b) = tokio::io::duplex(64 * 1024);
-        let mut left = framed_json_with_max_frame(a, 64);
+    #[test]
+    fn a_duplex_pipe_carries_messages_both_ways() {
+        let (client, server) = duplex();
 
-        // The limit is enforced on the way out too, so we never emit a frame a
-        // conforming peer would have to reject.
-        let result = left.send(WireMessage::Binary(vec![0u8; 4096].into())).await;
-        assert!(
-            matches!(result, Err(FramedError::Io(_))),
-            "expected the encoder to refuse an oversized frame, got {result:?}"
-        );
+        block_on(async {
+            let mut client = framed_json_neutral(client);
+            let mut server = framed_json_neutral(server);
+
+            let sent = WireMessage::Text("ping".into());
+            client.send(sent.clone()).await.expect("send");
+            let got = server.next().await.expect("a frame").expect("decode");
+            assert_eq!(sent, got);
+
+            let back = WireMessage::Binary(vec![7, 7, 7].into());
+            server.send(back.clone()).await.expect("send back");
+            let got = client.next().await.expect("a frame").expect("decode");
+            assert_eq!(back, got);
+        });
     }
 
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn oversized_inbound_frames_are_rejected_rather_than_buffered() {
-        use tokio::io::AsyncWriteExt;
+    /// The limit is enforced on the way out too, so we never emit a frame a
+    /// conforming peer would have to reject.
+    #[test]
+    fn oversized_outbound_frames_are_refused_by_the_encoder() {
+        let (client, _server) = duplex();
 
-        let (a, mut b) = tokio::io::duplex(64 * 1024);
-        let mut left = framed_json_with_max_frame(a, 64);
-
-        // Write the length prefix by hand — a hostile peer is not using our encoder,
-        // so this is the case that actually protects memory.
-        b.write_all(&5000u32.to_be_bytes()).await.unwrap();
-        b.write_all(&[KIND_BINARY]).await.unwrap();
-        b.write_all(&[0u8; 128]).await.unwrap();
-        b.flush().await.unwrap();
-
-        let got = left.next().await;
-        assert!(
-            matches!(got, Some(Err(FramedError::Io(_)))),
-            "expected an io error for an oversized declared length, got {got:?}"
-        );
-    }
-    /// The neutral path must put the same bytes on the wire as the tokio path.
-    /// Not "equivalent": identical, because the format is normative for non-Rust
-    /// peers and there are now two implementations that could drift.
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn the_neutral_path_writes_the_same_bytes_as_the_tokio_path() {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
-
-        let cases = vec![
-            WireMessage::Text("hello".into()),
-            WireMessage::Binary(vec![0, 1, 2, 255].into()),
-            WireMessage::Ping(vec![9].into()),
-            WireMessage::Close(Some(CloseFrame {
-                code: 1000,
-                reason: "bye".into(),
-            })),
-        ];
-
-        for case in cases {
-            let (mut tokio_sink, tokio_reader) = tokio::io::duplex(4096);
-            let mut tokio_framed = framed_json(tokio_reader);
-            tokio_framed.send(case.clone()).await.expect("tokio send");
-            let mut tokio_bytes = Vec::new();
-            tokio::io::AsyncReadExt::read_buf(&mut tokio_sink, &mut tokio_bytes)
-                .await
-                .expect("tokio read");
-
-            let (mut neutral_sink, neutral_reader) = tokio::io::duplex(4096);
-            let mut neutral_framed = framed_json_neutral(neutral_reader.compat());
-            neutral_framed
-                .send(case.clone())
-                .await
-                .expect("neutral send");
-            let mut neutral_bytes = Vec::new();
-            tokio::io::AsyncReadExt::read_buf(&mut neutral_sink, &mut neutral_bytes)
-                .await
-                .expect("neutral read");
-
-            assert_eq!(
-                tokio_bytes, neutral_bytes,
-                "the two framing paths disagree on the wire format for {case:?}"
+        block_on(async {
+            let mut framed = framed_json_neutral_with_max_frame(client, 64);
+            let result = framed
+                .send(WireMessage::Binary(vec![0u8; 4096].into()))
+                .await;
+            assert!(
+                matches!(result, Err(FramedError::Io(_))),
+                "expected the encoder to refuse an oversized frame, got {result:?}"
             );
-        }
-    }
-
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn the_neutral_path_carries_messages_both_ways() {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
-
-        let (client, server) = tokio::io::duplex(4096);
-        let mut client = framed_json_neutral(client.compat());
-        let mut server = framed_json_neutral(server.compat());
-
-        let sent = WireMessage::Text("ping".into());
-        client.send(sent.clone()).await.expect("send");
-        let got = server.next().await.expect("a frame").expect("decode");
-        assert_eq!(sent, got);
-
-        let back = WireMessage::Binary(vec![7, 7, 7].into());
-        server.send(back.clone()).await.expect("send back");
-        let got = client.next().await.expect("a frame").expect("decode");
-        assert_eq!(back, got);
+        });
     }
 
     /// A length prefix naming more than the maximum is refused before the body is
     /// buffered. Believing it is how a peer asks for an allocation it never sends.
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn the_neutral_path_rejects_an_oversized_length_prefix() {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
+    #[test]
+    fn an_oversized_length_prefix_is_rejected_rather_than_buffered() {
+        let (mut writer, reader) = duplex();
 
-        let (mut writer, reader) = tokio::io::duplex(4096);
-        let mut framed = framed_json_neutral_with_max_frame(reader.compat(), 64);
+        block_on(async {
+            // Written by hand: a hostile peer is not using our encoder, so this is
+            // the case that actually protects memory.
+            writer
+                .write_all(&u32::MAX.to_be_bytes())
+                .await
+                .expect("write prefix");
 
-        tokio::io::AsyncWriteExt::write_all(&mut writer, &u32::MAX.to_be_bytes())
-            .await
-            .expect("write prefix");
-
-        let err = framed
-            .next()
-            .await
-            .expect("a result")
-            .expect_err("must refuse");
-        assert!(
-            matches!(err, FramedError::Io(_)),
-            "expected an io error, got {err:?}"
-        );
+            let mut framed = framed_json_neutral_with_max_frame(reader, 64);
+            let err = framed
+                .next()
+                .await
+                .expect("a result")
+                .expect_err("must refuse");
+            assert!(
+                matches!(err, FramedError::Io(_)),
+                "expected an io error, got {err:?}"
+            );
+        });
     }
 
     /// A stream that ends mid-frame is truncation, not a clean close. A clean close
     /// lands on a frame boundary with nothing buffered.
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn the_neutral_path_reports_a_truncated_frame() {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
+    #[test]
+    fn a_truncated_frame_is_reported() {
+        let (mut writer, reader) = duplex();
 
-        let (mut writer, reader) = tokio::io::duplex(4096);
-        let mut framed = framed_json_neutral(reader.compat());
+        block_on(async {
+            // Promise ten bytes, send three, then hang up.
+            writer
+                .write_all(&10u32.to_be_bytes())
+                .await
+                .expect("write prefix");
+            writer
+                .write_all(&[KIND_TEXT, b'h', b'i'])
+                .await
+                .expect("write partial body");
+            drop(writer);
 
-        // Promise ten bytes, send three, then hang up.
-        tokio::io::AsyncWriteExt::write_all(&mut writer, &10u32.to_be_bytes())
-            .await
-            .expect("write prefix");
-        tokio::io::AsyncWriteExt::write_all(&mut writer, &[KIND_TEXT, b'h', b'i'])
-            .await
-            .expect("write partial body");
-        drop(writer);
-
-        let err = framed
-            .next()
-            .await
-            .expect("a result")
-            .expect_err("must refuse");
-        assert!(
-            matches!(err, FramedError::Io(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
-            "expected UnexpectedEof, got {err:?}"
-        );
+            let mut framed = framed_json_neutral(reader);
+            let err = framed
+                .next()
+                .await
+                .expect("a result")
+                .expect_err("must refuse");
+            assert!(
+                matches!(err, FramedError::Io(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
+                "expected UnexpectedEof, got {err:?}"
+            );
+        });
     }
 
     /// A clean close after a whole frame ends the stream rather than erroring.
-    #[cfg(feature = "framed-transport-tokio")]
-    #[tokio::test]
-    async fn the_neutral_path_ends_cleanly_on_a_frame_boundary() {
-        use tokio_util::compat::TokioAsyncReadCompatExt;
+    #[test]
+    fn a_stream_ending_on_a_frame_boundary_ends_cleanly() {
+        let (writer, reader) = duplex();
 
-        let (writer, reader) = tokio::io::duplex(4096);
-        let mut sender = framed_json_neutral(writer.compat());
-        let mut framed = framed_json_neutral(reader.compat());
+        block_on(async {
+            let mut sender = framed_json_neutral(writer);
+            let mut framed = framed_json_neutral(reader);
 
-        sender
-            .send(WireMessage::Text("only".into()))
-            .await
-            .expect("send");
-        sender.close().await.expect("close");
+            sender
+                .send(WireMessage::Text("only".into()))
+                .await
+                .expect("send");
+            sender.close().await.expect("close");
 
-        let got = framed.next().await.expect("a frame").expect("decode");
-        assert_eq!(WireMessage::Text("only".into()), got);
-        assert!(framed.next().await.is_none(), "expected a clean end");
+            let got = framed.next().await.expect("a frame").expect("decode");
+            assert_eq!(WireMessage::Text("only".into()), got);
+            assert!(framed.next().await.is_none(), "expected a clean end");
+        });
     }
 }
