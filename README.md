@@ -465,8 +465,8 @@ reasons, ranked by how hard each is to remove:
    `futures` has no signal support and nagoya 0.1.9 has no signal module.
 3. **`tokio::task_local!`** for `TOOLBOX`. `futures` has no task-local, and `scoped-tls`
    is not a substitute because its scope does not survive an `.await`.
-4. **Channels and `select!`** in `session.rs`, `conn.rs`, `toolbox.rs` and the server's
-   `message_receiver`. This is the only mechanical part: it maps onto
+4. **Channels and `select!`** in `session.rs`, `conn.rs` and `toolbox.rs`. This is the
+   only mechanical part: it maps onto
    `futures::channel::mpsc` and `futures::future::select`, at the cost of a breaking
    change to `WsStreamState::message_queue`, `WebsocketStates::insert` and
    `Toolbox::send_ws_msg`/`send_serialized_ws_msg`, and a behaviour change to

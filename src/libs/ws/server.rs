@@ -40,7 +40,6 @@ use super::{AuthController, ConnectionId, SimpleAuthController, WebsocketStates,
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
     pub handlers: HashMap<u32, WsEndpoint>,
-    pub message_receiver: parking_lot::Mutex<Option<mpsc::Receiver<ConnectionId>>>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
     pub cached_date: RwLock<String>,
@@ -64,7 +63,6 @@ impl WebsocketServer {
         Self {
             auth_controller: Arc::new(SimpleAuthController),
             handlers: Default::default(),
-            message_receiver: parking_lot::Mutex::new(None),
             toolbox: Toolbox::new(),
             cached_date: RwLock::new(httpdate::fmt_http_date(std::time::SystemTime::now())),
             config,
