@@ -15,6 +15,12 @@ pub struct Shutdown {
     notify: Notify,
 }
 
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Shutdown {
     /// A flag that has not been cancelled.
     #[must_use]
