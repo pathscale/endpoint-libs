@@ -116,3 +116,35 @@ x86_64-unknown-linux-gnu --features reactor --lib` typechecked the
 endpoint-libs still depends on crates.io nagoya `0.1.9`, which has no
 `Signal`. Item 12 is the caller in `libs/signal.rs`, which still uses
 `tokio::signal`. It does not get a path dependency.
+
+## End state. No tokio, and no path
+
+Appended 2026-09-22, after endpoint-libs `3531fd6`. This withdraws the
+part of P0.5 that treated hyper's tokio as something the port keeps.
+
+Every feature of endpoint-libs loses its dependency on tokio. Nothing is
+left on purpose: not `signal`, not the shard channel, not `TcpListener`,
+not hyper, not the per-shard runtime, not `scheduler`, `log_reader`,
+`error_aggregation`, `log_throttling`, or `otel`. A feature that still
+names tokio is unfinished.
+
+The replacements are published crates: nagoya, nago-wss, nago-rustls, and
+the other Pathscale forks (`parking_lot_lite_hack` is already the
+`parking_lot` dependency). Versions go in `Cargo.toml`. There is no
+`Cargo.lock` in this repository, and no path dependency on a sibling
+checkout. `ps-spsc` is a single-producer queue and is not the
+per-connection outbound queue.
+
+crates.io nagoya is `0.1.9`. It has `Notify::notify_waiters` and no
+`reactor::Signal`, `resolve`, or `connect_any`. Those three are on the
+sibling `feat/resolve` at `ee8fca0` (version `0.1.10`) and nowhere else.
+A caller that needs them waits until a published nagoya contains them.
+Pointing `Cargo.toml` at `../nagoya` is not how this branch builds.
+
+nago-wss `feat/nagoya-resolve` at `6e52935` already path-depends on
+`../nagoya` and `../nago-rustls`. That was `3d069ed` ("Benchmark against
+the local nagoya, not the published one"), which replaced crates.io
+nagoya `0.1.6` and nago-rustls `0.1.1`. This port did not add it and did
+not edit nago-wss, nagoya, or nago-rustls. nago-wss and nago-rustls each
+commit a `Cargo.lock`. endpoint-libs does not. Do not copy the path or
+the lock into endpoint-libs.
