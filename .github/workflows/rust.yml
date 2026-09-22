@@ -132,10 +132,27 @@ jobs:
       - name: Publish a reviewed version bump
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if git diff --quiet "$BEFORE_SHA" "$GITHUB_SHA" -- Cargo.toml; then
-            echo "Cargo.toml did not change; nothing to publish"
+          # Ask the registry, not the diff. This used to be
+          # `git diff "$BEFORE_SHA" "$GITHUB_SHA" -- Cargo.toml`, which asks
+          # whether *this push* touched the manifest. A version bump that lands
+          # in a run which then fails on another job is never published, and no
+          # later push republishes it, because that later push did not touch
+          # Cargo.toml either. 3.2.0 was stranded exactly that way: the commit
+          # carrying it went red on clippy, and the commit that turned clippy
+          # green changed only a test.
+          #
+          # The question that actually decides a release is whether this
+          # version is on crates.io, so that is the question asked.
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "could not read a version out of Cargo.toml" >&2
+            exit 1
+          fi
+          if curl -sf -H 'User-Agent: pathscale-ci' \
+              "https://crates.io/api/v1/crates/endpoint-libs/$VERSION" >/dev/null; then
+            echo "endpoint-libs $VERSION is already on crates.io; nothing to publish"
             exit 0
           fi
+          echo "publishing endpoint-libs $VERSION"
           cargo publish --registry crates-io
