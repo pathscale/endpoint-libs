@@ -85,11 +85,24 @@ impl ErrorStorage {
 }
 
 /// Container for aggregated errors with async query methods
+///
+/// The channel is `futures::channel::mpsc::unbounded` rather than this crate's
+/// own `ws::outbound` queue, which is bounded: the producer here is
+/// [`ErrorAggregationLayer::on_event`], a `tracing` layer callback that runs on
+/// whatever thread emitted the error and cannot await. A bounded queue leaves
+/// only two behaviours at the boundary - block a logging call site, or silently
+/// drop the error an operator is trying to see - and an aggregator that loses
+/// errors under load is worst exactly when it matters. `futures`'s flavour is
+/// already a dependency of this crate, names no runtime, and its
+/// `unbounded_send` takes `&self` and never blocks, which is what the tokio
+/// sender gave us.
 #[derive(Debug)]
 pub struct ErrorAggregationContainer {
-    storage: Arc<tokio::sync::RwLock<ErrorStorage>>,
-    sender: tokio::sync::mpsc::UnboundedSender<ErrorEntry>,
-    task_handle: tokio::task::JoinHandle<()>,
+    storage: Arc<nagoya::sync::RwLock<ErrorStorage>>,
+    sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>,
+    /// `Option` only so [`Drop`] can take the handle: nagoya's
+    /// `JoinHandle::cancel` consumes it, where tokio's `abort` took `&self`.
+    task_handle: Option<nagoya::JoinHandle<()>>,
     config: ErrorAggregationConfig,
 }
 
@@ -99,14 +112,18 @@ impl ErrorAggregationContainer {
     /// Create a new error aggregation container
     pub fn new(config: ErrorAggregationConfig) -> Self {
         let storage = ErrorStorage::new();
-        let storage = Arc::new(tokio::sync::RwLock::new(storage));
+        let storage = Arc::new(nagoya::sync::RwLock::new(storage));
 
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
 
         // Spawn background aggregation task
         let storage_clone = Arc::clone(&storage);
         let config_clone = config.clone();
-        let task_handle = tokio::spawn(aggregation_task(receiver, storage_clone, config_clone));
+        let task_handle = Some(nagoya::runtime::background().spawn(aggregation_task(
+            receiver,
+            storage_clone,
+            config_clone,
+        )));
 
         Self {
             storage,
@@ -182,17 +199,21 @@ impl ErrorAggregationContainer {
 
 impl Drop for ErrorAggregationContainer {
     fn drop(&mut self) {
-        self.task_handle.abort();
+        if let Some(handle) = self.task_handle.take() {
+            handle.cancel();
+        }
     }
 }
 
 /// Background task that aggregates errors from the channel
 async fn aggregation_task(
-    mut receiver: tokio::sync::mpsc::UnboundedReceiver<ErrorEntry>,
-    storage: Arc<tokio::sync::RwLock<ErrorStorage>>,
+    mut receiver: futures::channel::mpsc::UnboundedReceiver<ErrorEntry>,
+    storage: Arc<nagoya::sync::RwLock<ErrorStorage>>,
     config: ErrorAggregationConfig,
 ) {
-    while let Some(entry) = receiver.recv().await {
+    use futures::StreamExt;
+
+    while let Some(entry) = receiver.next().await {
         let mut storage_lock = storage.write().await;
         let map = &mut storage_lock.storage;
 
@@ -293,11 +314,11 @@ fn normalize_message(message: &str) -> String {
 
 /// Tracing layer that captures ERROR level events and sends them to the aggregator
 pub struct ErrorAggregationLayer {
-    sender: tokio::sync::mpsc::UnboundedSender<ErrorEntry>,
+    sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>,
 }
 
 impl ErrorAggregationLayer {
-    fn new(sender: tokio::sync::mpsc::UnboundedSender<ErrorEntry>) -> Self {
+    fn new(sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>) -> Self {
         Self { sender }
     }
 }
@@ -343,8 +364,11 @@ impl<S: tracing::Subscriber> Layer<S> for ErrorAggregationLayer {
             count: 1, // Will be recalculated by aggregation task
         };
 
-        // Ignore send errors (channel closed means container dropped)
-        let _ = self.sender.send(entry);
+        // Ignore send errors (channel closed means container dropped).
+        // `unbounded_send` is the `&self`, never-blocking half of the futures
+        // sender; its `Sink::send` would need `&mut self` and an await, neither
+        // of which a layer callback has.
+        let _ = self.sender.unbounded_send(entry);
     }
 }
 
@@ -403,8 +427,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_raw_mode_eviction() {
+    // The bodies below genuinely need a runtime: the container's query methods
+    // are `async`, and the aggregation task they wait on runs on nagoya's shared
+    // pool. Each test is a plain `#[test]` that drives its own body with
+    // `nagoya::block_on`, which parks this thread between polls rather than
+    // spinning, and the body stays an `async fn` so the diff is the wrapper.
+    #[test]
+    fn test_raw_mode_eviction() {
+        nagoya::block_on(test_raw_mode_eviction_body());
+    }
+
+    async fn test_raw_mode_eviction_body() {
         let config = ErrorAggregationConfig {
             limit: 3,
             normalize: false,
@@ -415,7 +448,7 @@ mod tests {
         for i in 0..4 {
             container
                 .sender
-                .send(ErrorEntry {
+                .unbounded_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -425,7 +458,7 @@ mod tests {
         }
 
         // Wait for background task to process
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         let errors = container.get_all_errors().await;
         assert_eq!(errors.len(), 3);
@@ -436,8 +469,12 @@ mod tests {
         assert_eq!(errors[2].message, "Error 1");
     }
 
-    #[tokio::test]
-    async fn test_normalized_mode_counting() {
+    #[test]
+    fn test_normalized_mode_counting() {
+        nagoya::block_on(test_normalized_mode_counting_body());
+    }
+
+    async fn test_normalized_mode_counting_body() {
         let config = ErrorAggregationConfig {
             limit: 10,
             normalize: true,
@@ -447,7 +484,7 @@ mod tests {
         // Add similar errors with different IPs
         container
             .sender
-            .send(ErrorEntry {
+            .unbounded_send(ErrorEntry {
                 message: "Connection failed to 192.168.1.1".to_string(),
                 timestamp: 1000,
                 target: "network".to_string(),
@@ -457,7 +494,7 @@ mod tests {
 
         container
             .sender
-            .send(ErrorEntry {
+            .unbounded_send(ErrorEntry {
                 message: "Connection failed to 10.0.0.1".to_string(),
                 timestamp: 2000,
                 target: "network".to_string(),
@@ -466,7 +503,7 @@ mod tests {
             .unwrap();
 
         // Wait for background task
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         // Should be normalized to 1 entry
         assert_eq!(container.count().await, 1);
@@ -478,8 +515,12 @@ mod tests {
         assert_eq!(stats[0].first_seen, 1000);
     }
 
-    #[tokio::test]
-    async fn test_pagination() {
+    #[test]
+    fn test_pagination() {
+        nagoya::block_on(test_pagination_body());
+    }
+
+    async fn test_pagination_body() {
         let config = ErrorAggregationConfig {
             limit: 100,
             normalize: false,
@@ -490,7 +531,7 @@ mod tests {
         for i in 0..50 {
             container
                 .sender
-                .send(ErrorEntry {
+                .unbounded_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -500,7 +541,7 @@ mod tests {
         }
 
         // Wait for background task
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         let page1 = container.get_errors(10, 0, None).await;
         let page2 = container.get_errors(10, 10, None).await;
@@ -514,8 +555,12 @@ mod tests {
         assert_eq!(page2[9].message, "Error 30");
     }
 
-    #[tokio::test]
-    async fn test_normalized_mode_eviction() {
+    #[test]
+    fn test_normalized_mode_eviction() {
+        nagoya::block_on(test_normalized_mode_eviction_body());
+    }
+
+    async fn test_normalized_mode_eviction_body() {
         let config = ErrorAggregationConfig {
             limit: 2,
             normalize: true,
@@ -525,7 +570,7 @@ mod tests {
         // Add 3 different error types
         container
             .sender
-            .send(ErrorEntry {
+            .unbounded_send(ErrorEntry {
                 message: "Error type A".to_string(),
                 timestamp: 1000,
                 target: "test".to_string(),
@@ -535,7 +580,7 @@ mod tests {
 
         container
             .sender
-            .send(ErrorEntry {
+            .unbounded_send(ErrorEntry {
                 message: "Error type B".to_string(),
                 timestamp: 2000,
                 target: "test".to_string(),
@@ -545,7 +590,7 @@ mod tests {
 
         container
             .sender
-            .send(ErrorEntry {
+            .unbounded_send(ErrorEntry {
                 message: "Error type C".to_string(),
                 timestamp: 3000,
                 target: "test".to_string(),
@@ -554,7 +599,7 @@ mod tests {
             .unwrap();
 
         // Wait for background task
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         // Should have 2 entries (oldest by first_seen evicted)
         assert_eq!(container.count().await, 2);
@@ -566,8 +611,12 @@ mod tests {
         assert!(stats.iter().any(|s| s.message.contains("type C")));
     }
 
-    #[tokio::test]
-    async fn test_clear() {
+    #[test]
+    fn test_clear() {
+        nagoya::block_on(test_clear_body());
+    }
+
+    async fn test_clear_body() {
         let config = ErrorAggregationConfig {
             limit: 10,
             normalize: false,
@@ -578,7 +627,7 @@ mod tests {
         for i in 0..5 {
             container
                 .sender
-                .send(ErrorEntry {
+                .unbounded_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -588,7 +637,7 @@ mod tests {
         }
 
         // Wait for background task
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         assert_eq!(container.count().await, 5);
 
@@ -598,8 +647,12 @@ mod tests {
         assert_eq!(container.count().await, 0);
     }
 
-    #[tokio::test]
-    async fn test_get_latest() {
+    #[test]
+    fn test_get_latest() {
+        nagoya::block_on(test_get_latest_body());
+    }
+
+    async fn test_get_latest_body() {
         let config = ErrorAggregationConfig {
             limit: 100,
             normalize: false,
@@ -610,7 +663,7 @@ mod tests {
         for i in 0..20 {
             container
                 .sender
-                .send(ErrorEntry {
+                .unbounded_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -620,7 +673,7 @@ mod tests {
         }
 
         // Wait for background task
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        nagoya::sleep(std::time::Duration::from_millis(100)).await;
 
         let latest = container.get_latest(10).await;
 

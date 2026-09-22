@@ -165,10 +165,11 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     if let Some(metrics_duration) = throttling_config.metrics_emission_interval {
         let metrics = rate_limit_filter.metrics().clone();
 
-        // Periodic metrics reporting
-        tokio::spawn(async move {
+        // Periodic metrics reporting. Detached, as before: nothing collects this
+        // handle, and dropping a nagoya `JoinHandle` detaches rather than cancels.
+        nagoya::runtime::background().spawn(async move {
             loop {
-                tokio::time::sleep(metrics_duration).await;
+                nagoya::sleep(metrics_duration).await;
 
                 let snapshot = metrics.snapshot();
                 tracing::info!(
@@ -456,8 +457,11 @@ mod tests {
     }
 
     /// Basic test that verifies logging setup succeeds and logs can be emitted
-    #[tokio::test]
-    async fn test_basic_logging_stdout() {
+    // These were `#[tokio::test]` only to have a runtime in scope; not one of
+    // them awaits anything, and the waits are `std::thread::sleep` for the
+    // non-blocking appender to drain. They are plain tests now.
+    #[test]
+    fn test_basic_logging_stdout() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
@@ -480,8 +484,8 @@ mod tests {
     /// - Basic file logging
     /// - Log level filtering (separate stdout vs file levels)
     /// - Log level reloading at runtime
-    #[tokio::test]
-    async fn test_file_logging_comprehensive() {
+    #[test]
+    fn test_file_logging_comprehensive() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let config = LoggingConfig {
@@ -550,8 +554,8 @@ mod tests {
     /// Test that setup succeeds when OTel is disabled (default config)
     /// and otel_guards is None
     #[cfg(feature = "otel")]
-    #[tokio::test]
-    async fn test_otel_disabled_returns_none_guards() {
+    #[test]
+    fn test_otel_disabled_returns_none_guards() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
@@ -576,8 +580,8 @@ mod tests {
     /// The SDK initializes asynchronously, so guards ARE present even if the endpoint
     /// is unreachable. Export failures happen at runtime, not at setup time.
     #[cfg(feature = "otel")]
-    #[tokio::test]
-    async fn test_otel_graceful_degradation_unreachable_endpoint() {
+    #[test]
+    fn test_otel_graceful_degradation_unreachable_endpoint() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
@@ -611,8 +615,8 @@ mod tests {
 
     /// Test that file logging works alongside OTel enabled (but with invalid endpoint)
     /// This verifies that the layer composition doesn't break when OTel is attempted
-    #[tokio::test]
-    async fn test_file_logging_with_otel_attempted() {
+    #[test]
+    fn test_file_logging_with_otel_attempted() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let config = LoggingConfig {
@@ -653,8 +657,8 @@ mod tests {
     }
 
     /// Test that log level reload works correctly when OTel is enabled
-    #[tokio::test]
-    async fn test_log_level_reload_with_otel_enabled() {
+    #[test]
+    fn test_log_level_reload_with_otel_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let config = LoggingConfig {
@@ -714,8 +718,8 @@ mod tests {
     }
 
     /// Test that OTel config fields are correctly structured
-    #[tokio::test]
-    async fn test_otel_config_fields() {
+    #[test]
+    fn test_otel_config_fields() {
         use std::collections::HashMap;
 
         let config = OtelConfig {
@@ -748,8 +752,8 @@ mod tests {
     /// Test that setup succeeds with OTel enabled but no endpoint specified
     /// (should use env var fallback or SDK defaults)
     #[cfg(feature = "otel")]
-    #[tokio::test]
-    async fn test_otel_enabled_no_endpoint_uses_fallback() {
+    #[test]
+    fn test_otel_enabled_no_endpoint_uses_fallback() {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: None,
