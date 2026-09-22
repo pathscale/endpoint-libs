@@ -127,7 +127,7 @@ these features, each naming the tokio features its own code uses:
 
 | feature | tokio features | why |
 | --- | --- | --- |
-| `ws-core` | `net`, `rt`, `sync`, `time` | TCP listener, per-shard current-thread runtime, `mpsc` in public struct fields, date-cache sleep. `TOOLBOX` is a `thread_local`, not `task_local!` |
+| `ws-core` | `net`, `rt`, `sync` | TCP listener, per-shard current-thread runtime, `mpsc` in public struct fields. The date-cache sleep is gone with the `Date` header. `TOOLBOX` is a `thread_local`, not `task_local!` |
 | `signal` | `signal` | `tokio::signal::unix` for delivery. The flag is `nagoya::sync::Notify`, and the waits are `futures::future::select` |
 | `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
 | `log_reader` | `rt` | `tokio::task::spawn_blocking` |
@@ -457,7 +457,7 @@ reasons, ranked by how hard each is to remove:
 
 1. **The TCP server path.** `ConnectionListener`/`TcpListener` are `tokio::net` and
    `tokio::io`; `listen_impl`/`run_shard` build a current-thread `tokio::runtime` per
-   shard plus a `LocalSet`, a `tokio::spawn`ed date-cache task and `tokio::time::sleep`.
+   shard plus a `LocalSet`. The date-cache task is gone with the `Date` header.
    The `futures` crate owns no reactor, so there is no futures-only substitute. This
    would become a second server over a `nagoya::reactor::TcpListener`.
 2. **Signal delivery.** `ws-core` requires the `signal` feature. The shutdown

@@ -42,7 +42,6 @@ pub struct WebsocketServer {
     pub handlers: HashMap<u32, WsEndpoint>,
     pub toolbox: ArcToolbox,
     pub config: WsServerConfig,
-    pub cached_date: RwLock<String>,
     pub upgrader: Option<Arc<dyn WsUpgrader>>,
     /// MCP surface state; `None` (the default) disables MCP entirely and the
     /// server behaves exactly as before. See [`WebsocketServer::enable_mcp`].
@@ -64,7 +63,6 @@ impl WebsocketServer {
             auth_controller: Arc::new(SimpleAuthController),
             handlers: Default::default(),
             toolbox: Toolbox::new(),
-            cached_date: RwLock::new(httpdate::fmt_http_date(std::time::SystemTime::now())),
             config,
             upgrader: default_upgrader(),
             mcp: None,
@@ -159,15 +157,12 @@ impl WebsocketServer {
         states: Arc<WebsocketStates>,
         stream: BoxedStream,
     ) -> Result<()> {
-        let cached_date = self.cached_date.read().clone();
         let upgrader = self.upgrader.as_ref().ok_or_else(|| {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
         })?;
 
         // Get upgrade event receiver - H2 yields multiple events, H1 yields one
-        let mut rx = upgrader
-            .upgrade_stream(stream, addr, &self.config, &cached_date)
-            .await?;
+        let mut rx = upgrader.upgrade_stream(stream, addr, &self.config).await?;
 
         use futures::StreamExt;
         use futures::future::FutureExt;
@@ -500,18 +495,6 @@ impl WebsocketServer {
             });
             shard_senders.push(tx);
         }
-
-        // Date cache updater — runs on the multi-thread scheduler, no LocalSet needed.
-        tokio::spawn({
-            let this = Arc::clone(&this);
-            async move {
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    *this.cached_date.write() =
-                        httpdate::fmt_http_date(std::time::SystemTime::now());
-                }
-            }
-        });
 
         let (mut sigterm, mut sigint) = crate::libs::signal::init_signals()?;
         let mut shard_idx: usize = 0;

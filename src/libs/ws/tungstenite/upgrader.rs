@@ -35,7 +35,6 @@ fn build_response(
     origin: &Option<String>,
     config: &WsServerConfig,
     access_control_request_headers: &Option<String>,
-    cached_date: &str,
 ) -> Response<Empty<Bytes>> {
     let mut resp = Response::new(Empty::<Bytes>::new());
     *resp.status_mut() = status;
@@ -81,9 +80,6 @@ fn build_response(
         })
         .clone();
     add_cors_headers(&mut resp, origin, config, access_control_request_headers);
-    if let Ok(v) = cached_date.parse::<HeaderValue>() {
-        resp.headers_mut().append("Date", v);
-    }
     if status.is_client_error() || status.is_server_error() {
         resp.headers_mut()
             .append("Cache-Control", HeaderValue::from_static("no-store"));
@@ -100,19 +96,16 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
         stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
-        cached_date: &str,
     ) -> Result<Receiver<UpgradeEvent>> {
         let io = TokioIo::new(stream);
         let (tx, rx) = channel::<UpgradeEvent>(2);
 
         let svc_config = config.clone();
-        let svc_date = cached_date.to_owned();
         let svc_addr = addr;
 
         let service = service_fn(move |mut req: Request<Incoming>| {
             let mut tx = tx.clone();
             let config = svc_config.clone();
-            let cached_date = svc_date.clone();
             let addr = svc_addr;
 
             async move {
@@ -149,7 +142,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                         &origin,
                         &config,
                         &access_control_request_headers,
-                        &cached_date,
                     ));
                 }
 
@@ -160,7 +152,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                         &origin,
                         &config,
                         &access_control_request_headers,
-                        &cached_date,
                     ));
                 }
 
@@ -171,7 +162,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             &origin,
                             &config,
                             &access_control_request_headers,
-                            &cached_date,
                         ));
                     }
                     if req.method() != Method::CONNECT {
@@ -181,7 +171,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             &origin,
                             &config,
                             &access_control_request_headers,
-                            &cached_date,
                         );
                         resp.headers_mut().append(
                             "Allow",
@@ -212,7 +201,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             &origin,
                             &config,
                             &access_control_request_headers,
-                            &cached_date,
                         ));
                     }
                     debug!(
@@ -235,7 +223,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                                 &origin,
                                 &config,
                                 &access_control_request_headers,
-                                &cached_date,
                             ));
                         }
                         debug!(
@@ -248,7 +235,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             &origin,
                             &config,
                             &access_control_request_headers,
-                            &cached_date,
                         );
                         resp.headers_mut().append(
                             "Allow",
@@ -267,7 +253,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                             &origin,
                             &config,
                             &access_control_request_headers,
-                            &cached_date,
                         ));
                     };
                     debug!(
@@ -308,7 +293,6 @@ impl WsUpgrader for HyperTungsteniteUpgrader {
                     &origin,
                     &config,
                     &access_control_request_headers,
-                    &cached_date,
                 );
                 if let Some(derived) = derived {
                     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
