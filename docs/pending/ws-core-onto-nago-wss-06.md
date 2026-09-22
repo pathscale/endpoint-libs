@@ -44,17 +44,46 @@ re-check, not one to build on.
 | 2 | `endpoint-libs/TODO.md` | Decided work that waits on this file. One pointer line back here is enough. |
 | record | `endpoint-libs/docs/decisions/ws-core-onto-nago-wss.md` | A settled P0, including "decided not to". Append only. |
 
-**Do not fold this port into endpoint-libs PR #52.** That PR is
-`fix/restore-release-trigger`, 3.2.0 and tokio-optional, and merging it
-publishes. endpoint-libs work stays on `fix/ws-core-lane1`, branched from
-that branch at `8ccb574`. Nothing here waits on PR #52, and nothing here may
-be smuggled into it.
+**The port is now in PR #52, by the owner's decision, and the rule that kept
+it out is withdrawn.** Every revision 01 through 06 said not to fold it in.
+On 2026-09-22 `fix/ws-core-lane1` was fast-forwarded onto
+`fix/restore-release-trigger` at `ea676b3`; `27e75e7` was an ancestor, so
+nothing was discarded. What that changes for whoever reads this next:
+
+- **Merging #52 publishes.** `.github/workflows/rust.yml` runs `cargo publish`
+  on a push to master whenever `Cargo.toml` differs from the previous commit.
+  There is no version check in that job. This branch changes `Cargo.toml`.
+- **The version is still `3.2.0`, and the branch carries fourteen breaking
+  changes to reachable public API.** Removed `pub` fields
+  (`WebsocketServer::message_receiver`, `::cached_date`), a public trait
+  method that lost a parameter (`WsUpgrader::upgrade_stream`, which breaks
+  every out-of-crate implementor), changed `pub` field and parameter types
+  everywhere the outbound queue is named, a `pub` field added to an
+  all-public struct with no `#[non_exhaustive]` (`WsStreamState::end`),
+  changed `pub static` types (`TOOLBOX`, `CANCELLATION_TOKEN`), and one
+  silent type-identity break with no visible diff: `WsConnection::roles` is
+  `parking_lot::RwLock` on both sides, but `parking_lot` is now the fork.
+  A minor bump does not describe that. The bump is the owner's call and was
+  deliberately not taken here.
+- The PR body still describes only the tokio-optional release. It says
+  `ws-core` takes `net, rt, sync, time, macros`, that the queue is the
+  `futures` mpsc, and lists five tokio blockers of which three are done.
+  Read the commits, not the body.
+- No CI check has ever attached to that branch, so the gates under "Run,
+  this roll" are the only evidence the branch is green.
+
+Nothing here waits on PR #52. The port is still unfinished: tokio is still
+in the tree.
 
 ## 2. State
 
 Read on 2026-09-22 with `git rev-parse` and `git status --short`. Re-read
-before trusting the table. Nothing here is pushed. No repository in this
-table was given a path dependency by this port.
+before trusting the table. No repository in this table was given a path
+dependency by this port.
+
+endpoint-libs is pushed, as `fix/restore-release-trigger` and therefore as
+PR #52; see section 1. `~/code/nagoya` is not pushed, and neither is
+anything in nago-wss or nago-rustls.
 
 | Repo | Branch | HEAD | Version | Tree |
 | --- | --- | --- | --- | --- |
@@ -450,6 +479,8 @@ identifier before editing it.
 - The multi-thread and already-blocked cases the P0.2 fixes are about. The
   waiter's tests cover delivery, `EBUSY`, cross-thread delivery and drop;
   none of them would have failed on the defects, and none were added.
-- A version bump, a publish, and any push. Nothing in `~/code/nagoya` is
-  pushed either.
+- A version bump and a publish. endpoint-libs was pushed onto PR #52's
+  branch; nothing in `~/code/nagoya` was pushed.
+- Any CI run. No check has ever attached to `fix/restore-release-trigger`,
+  so nothing on the server has verified this branch.
 - Any edit under `~/code/nago-wss` or `~/code/nago-rustls`.
