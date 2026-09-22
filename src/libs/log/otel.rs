@@ -14,17 +14,26 @@
 //! # Graceful Degradation
 //! If the OTel layer fails to initialize (e.g., invalid endpoint, network issues), a warning
 //! is logged and the application continues with stdout/file logging only.
+//!
+//! # Feature gating
+//! The exporters live behind the non-default `otel` feature. [`OtelConfig`] is compiled
+//! either way, so a `LoggingConfig` literal keeps compiling without the feature; with the
+//! feature off, an `OtelConfig` with `enabled: true` logs a warning and forwards nothing.
 
 use std::collections::HashMap;
 
+#[cfg(feature = "otel")]
 use opentelemetry::propagation::{TextMapCompositePropagator, TextMapPropagator};
+#[cfg(feature = "otel")]
 use opentelemetry_otlp::WithHttpConfig;
+#[cfg(feature = "otel")]
 use opentelemetry_sdk::{
     Resource,
     logs::SdkLoggerProvider,
     propagation::{BaggagePropagator, TraceContextPropagator},
     trace::{SdkTracerProvider, Tracer},
 };
+#[cfg(feature = "otel")]
 use opentelemetry_semantic_conventions::resource::SERVICE_VERSION;
 
 /// Configuration for OpenTelemetry integration
@@ -41,6 +50,7 @@ pub struct OtelConfig {
 }
 
 /// Guards for OpenTelemetry providers to ensure traces and logs are flushed on drop
+#[cfg(feature = "otel")]
 pub struct OtelGuards {
     /// The tracer provider guard
     pub tracer_provider: SdkTracerProvider,
@@ -48,6 +58,7 @@ pub struct OtelGuards {
     pub logger_provider: SdkLoggerProvider,
 }
 
+#[cfg(feature = "otel")]
 impl Drop for OtelGuards {
     fn drop(&mut self) {
         tracing::debug!(target: "otel::setup", "OTel layer shutting down - flushing pending traces and logs");
@@ -55,6 +66,7 @@ impl Drop for OtelGuards {
 }
 
 /// Result of building the OTel layer
+#[cfg(feature = "otel")]
 pub struct OtelLayerResult {
     /// The guards that must be kept alive to ensure traces/logs are flushed on drop
     pub guards: Option<OtelGuards>,
@@ -63,6 +75,7 @@ pub struct OtelLayerResult {
 }
 
 /// Build OpenTelemetry tracer and logger providers for forwarding logs and spans
+#[cfg(feature = "otel")]
 pub fn build_otel_layer(config: &OtelConfig) -> OtelLayerResult {
     if !config.enabled {
         tracing::debug!(target: "otel::setup", "OTel layer disabled by config");
@@ -108,6 +121,7 @@ pub fn build_otel_layer(config: &OtelConfig) -> OtelLayerResult {
     }
 }
 
+#[cfg(feature = "otel")]
 struct OtelLayerBuild {
     tracer_provider: SdkTracerProvider,
     logger_provider: SdkLoggerProvider,
@@ -115,6 +129,7 @@ struct OtelLayerBuild {
     service_name: String,
 }
 
+#[cfg(feature = "otel")]
 fn build_otel_layer_inner(
     config: &OtelConfig,
 ) -> Result<OtelLayerBuild, Box<dyn std::error::Error + Send + Sync>> {
@@ -148,6 +163,7 @@ fn build_otel_layer_inner(
     })
 }
 
+#[cfg(feature = "otel")]
 fn build_tracer_provider(
     resource: &Resource,
     config: &OtelConfig,
@@ -180,6 +196,7 @@ fn build_tracer_provider(
     Ok(builder.build())
 }
 
+#[cfg(feature = "otel")]
 fn build_logger_provider(
     resource: &Resource,
     config: &OtelConfig,
@@ -214,6 +231,7 @@ fn build_logger_provider(
     Ok(builder.build())
 }
 
+#[cfg(feature = "otel")]
 fn init_propagator() {
     let value =
         std::env::var("OTEL_PROPAGATORS").unwrap_or_else(|_| "tracecontext,baggage".to_string());

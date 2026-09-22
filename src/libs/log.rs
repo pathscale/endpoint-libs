@@ -6,6 +6,7 @@ use chrono::SecondsFormat;
 use eyre::{DefaultHandler, EyreHandler, bail};
 use tracing::Subscriber;
 use tracing_appender::rolling::RollingFileAppender;
+#[cfg(feature = "otel")]
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
@@ -32,7 +33,9 @@ pub mod level_filter;
 pub mod otel;
 
 pub use level_filter::*;
-pub use otel::{OtelConfig, OtelGuards};
+pub use otel::OtelConfig;
+#[cfg(feature = "otel")]
+pub use otel::OtelGuards;
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
 pub use tracing_appender::rolling::Rotation as LogRotation;
@@ -46,6 +49,10 @@ pub struct LoggingConfig {
     /// OpenTelemetry configuration for log/trace forwarding to an OTLP collector.
     /// By default, OTel is disabled. Set `enabled: true` and configure the endpoint
     /// to forward traces and logs to an OTel collector.
+    ///
+    /// Honoured only when the `otel` feature is on. Without it this field is still
+    /// present and still compiles, but `enabled: true` forwards nothing and logs a
+    /// warning at setup.
     pub otel_config: OtelConfig,
     #[cfg(feature = "error_aggregation")]
     pub error_aggregation: ErrorAggregationConfig,
@@ -93,6 +100,7 @@ pub struct LogSetupReturn {
     pub log_guards: (WorkerGuard, Option<WorkerGuard>),
     /// OpenTelemetry guards (tracer + logger providers). Must be kept alive to ensure
     /// pending traces and logs are flushed to the OTLP collector on shutdown.
+    #[cfg(feature = "otel")]
     pub otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     pub errors_container: Arc<ErrorAggregationContainer>,
@@ -107,6 +115,7 @@ struct LoggingSubscriberParts {
     reload_handle: LogReloadHandle,
     log_guards: (WorkerGuard, Option<WorkerGuard>), // Stdout and optional file log guards
     /// OpenTelemetry guards (tracer + logger providers).
+    #[cfg(feature = "otel")]
     otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
     errors_container: Arc<ErrorAggregationContainer>,
@@ -207,9 +216,23 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let reload_handle = LogReloadHandle(global_reload_handle);
 
     // Build OTel layer (separate, parallel to stdout/file layers)
+    #[cfg(feature = "otel")]
     let otel_result = otel::build_otel_layer(&config.otel_config);
+    #[cfg(feature = "otel")]
     let otel_guards = otel_result.guards;
+    #[cfg(feature = "otel")]
     let otel_tracer = otel_result.tracer;
+
+    // Without the `otel` feature there is no exporter to build. Say so out loud
+    // rather than silently dropping a collector the operator configured.
+    #[cfg(not(feature = "otel"))]
+    if config.otel_config.enabled {
+        tracing::warn!(
+            target: "otel::setup",
+            "otel_config.enabled is true but endpoint-libs was built without the `otel` feature - \
+             no traces or logs will be forwarded to a collector"
+        );
+    }
 
     // --- Subscriber Composition ---
 
@@ -231,6 +254,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     let subscriber = subscriber.with(sinks);
 
     // Add OTel Traces and Logs layers if enabled
+    #[cfg(feature = "otel")]
     let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = match (otel_tracer, &otel_guards)
     {
         (Some(tracer), Some(guards)) => {
@@ -243,10 +267,14 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
         _ => Box::new(subscriber),
     };
 
+    #[cfg(not(feature = "otel"))]
+    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = Box::new(subscriber);
+
     Ok(LoggingSubscriberParts {
         subscriber,
         reload_handle,
         log_guards: (stdout_guard, file_guard),
+        #[cfg(feature = "otel")]
         otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container,
@@ -281,6 +309,7 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     Ok(LogSetupReturn {
         reload_handle: parts.reload_handle,
         log_guards: parts.log_guards,
+        #[cfg(feature = "otel")]
         otel_guards: parts.otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container: parts.errors_container,
@@ -384,6 +413,7 @@ pub struct LogSetupReturnTest {
     reload_handle: LogReloadHandle,
     #[allow(dead_code)]
     log_guards: (WorkerGuard, Option<WorkerGuard>),
+    #[cfg(feature = "otel")]
     #[allow(dead_code)]
     otel_guards: Option<OtelGuards>,
     #[cfg(feature = "error_aggregation")]
@@ -404,6 +434,7 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
         _guard: guard,
         reload_handle: parts.reload_handle,
         log_guards: parts.log_guards,
+        #[cfg(feature = "otel")]
         otel_guards: parts.otel_guards,
         #[cfg(feature = "error_aggregation")]
         errors_container: parts.errors_container,
@@ -518,6 +549,7 @@ mod tests {
 
     /// Test that setup succeeds when OTel is disabled (default config)
     /// and otel_guards is None
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn test_otel_disabled_returns_none_guards() {
         let config = LoggingConfig {
@@ -543,6 +575,7 @@ mod tests {
     /// Test that OTel initialization succeeds even with an unreachable endpoint
     /// The SDK initializes asynchronously, so guards ARE present even if the endpoint
     /// is unreachable. Export failures happen at runtime, not at setup time.
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn test_otel_graceful_degradation_unreachable_endpoint() {
         let config = LoggingConfig {
@@ -714,6 +747,7 @@ mod tests {
 
     /// Test that setup succeeds with OTel enabled but no endpoint specified
     /// (should use env var fallback or SDK defaults)
+    #[cfg(feature = "otel")]
     #[tokio::test]
     async fn test_otel_enabled_no_endpoint_uses_fallback() {
         let config = LoggingConfig {
