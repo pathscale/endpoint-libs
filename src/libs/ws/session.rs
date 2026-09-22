@@ -401,51 +401,41 @@ impl WsClientSession {
                 return Ok(());
             }
 
-            // Outbound, then inbound, then a finished handler, then the policy
-            // flag. The handler arm stays disabled while the set is empty.
+            // A finished handler, then outbound, then inbound, then the policy
+            // flag. `futures::future::select` returns on its left arm the
+            // moment that arm is ready and never polls the right one, so this
+            // order is a strict priority. `tokio::select!` picked at random,
+            // so nothing here inherits its fairness and the order has to earn
+            // itself.
+            //
+            // Handlers go first because they are the only arm that cannot
+            // feed itself. The set is finite, each entry completes once, and
+            // new entries arrive only from inbound, so draining it cannot
+            // starve anything: it empties, and then the arm is disabled
+            // again. Behind inbound it starves instead -- a peer that keeps a
+            // frame available makes inbound ready on every poll, and the set
+            // grows without ever being polled, so a queued request never
+            // completes and never answers.
+            //
+            // The handler arm stays disabled while the set is empty, because
+            // `FuturesUnordered::next` on an empty set is `Ready(None)` and
+            // would spin.
             // The flag is last so a frame that is already ready is not dropped
             // on the floor when the flag trips in the same poll.
             let ready = {
                 let outbound = self.rx.recv();
-                futures::pin_mut!(outbound);
                 let inbound = self.conn.recv();
-                futures::pin_mut!(inbound);
                 let end = self.end.cancelled();
-                futures::pin_mut!(end);
-                if handlers.is_empty() {
-                    match futures::future::select(outbound, futures::future::select(inbound, end))
-                        .await
-                    {
-                        futures::future::Either::Left((msg, _)) => {
-                            Ready::Outbound(classify_outbound(msg))
-                        }
-                        futures::future::Either::Right((inner, _)) => match inner {
-                            futures::future::Either::Left((msg, _)) => Ready::Inbound(msg),
-                            futures::future::Either::Right(_) => Ready::End,
-                        },
-                    }
+                let handler = if handlers.is_empty() {
+                    None
                 } else {
-                    let handler = handlers.next();
-                    futures::pin_mut!(handler);
-                    match futures::future::select(
-                        outbound,
-                        futures::future::select(inbound, futures::future::select(handler, end)),
-                    )
-                    .await
-                    {
-                        futures::future::Either::Left((msg, _)) => {
-                            Ready::Outbound(classify_outbound(msg))
-                        }
-                        futures::future::Either::Right((inner, _)) => match inner {
-                            futures::future::Either::Left((msg, _)) => Ready::Inbound(msg),
-                            futures::future::Either::Right((handler_or_end, _)) => {
-                                match handler_or_end {
-                                    futures::future::Either::Left(_) => Ready::Handler,
-                                    futures::future::Either::Right(_) => Ready::End,
-                                }
-                            }
-                        },
-                    }
+                    Some(handlers.next())
+                };
+                match priority4(handler, outbound, inbound, end).await {
+                    Arm::Handler(_) => Ready::Handler,
+                    Arm::Outbound(msg) => Ready::Outbound(classify_outbound(msg)),
+                    Arm::Inbound(msg) => Ready::Inbound(msg),
+                    Arm::End(()) => Ready::End,
                 }
             };
             match ready {
@@ -544,6 +534,64 @@ pub(crate) fn classify_outbound(msg: Option<Message>) -> Outbound {
     }
 }
 
+/// Which arm of [`priority4`] fired, carrying that arm's output.
+pub(crate) enum Arm<H, O, I, E> {
+    Handler(H),
+    Outbound(O),
+    Inbound(I),
+    End(E),
+}
+
+/// Await four futures in strict priority order: `handler`, then `outbound`,
+/// then `inbound`, then `end`.
+///
+/// `futures::future::select` returns on its left arm the moment that arm is
+/// ready and never polls the right one, so nesting it is a priority and not
+/// the random choice `tokio::select!` made. Every arm that can be made ready
+/// on demand by a peer therefore has to sit below one that cannot, or it
+/// starves.
+///
+/// `handler` is [`None`] when there is nothing to wait for, which parks that
+/// arm forever instead of disabling it by hand.
+/// `FuturesUnordered::next` on an empty set is `Ready(None)`, so passing it
+/// here while empty would take this arm on every poll and spin.
+pub(crate) async fn priority4<HF, OF, IF, EF>(
+    handler: Option<HF>,
+    outbound: OF,
+    inbound: IF,
+    end: EF,
+) -> Arm<HF::Output, OF::Output, IF::Output, EF::Output>
+where
+    HF: std::future::Future,
+    OF: std::future::Future,
+    IF: std::future::Future,
+    EF: std::future::Future,
+{
+    use futures::future::{Either, select};
+
+    let handler = async move {
+        match handler {
+            Some(fut) => fut.await,
+            None => futures::future::pending::<HF::Output>().await,
+        }
+    };
+    futures::pin_mut!(handler);
+    futures::pin_mut!(outbound);
+    futures::pin_mut!(inbound);
+    futures::pin_mut!(end);
+
+    match select(handler, select(outbound, select(inbound, end))).await {
+        Either::Left((fired, _)) => Arm::Handler(fired),
+        Either::Right((inner, _)) => match inner {
+            Either::Left((fired, _)) => Arm::Outbound(fired),
+            Either::Right((inner, _)) => match inner {
+                Either::Left((fired, _)) => Arm::Inbound(fired),
+                Either::Right((fired, _)) => Arm::End(fired),
+            },
+        },
+    }
+}
+
 fn check_roles(actual_roles: &[u32], allowed_roles: &HashSet<u32>) -> bool {
     if allowed_roles.is_empty() || actual_roles.is_empty() {
         return false;
@@ -586,6 +634,58 @@ mod tests {
             classify_outbound(Some(Message::from("hi"))),
             Outbound::Frame(_)
         ));
+    }
+
+    /// A ready handler beats a ready inbound frame.
+    ///
+    /// This is the arm that cannot feed itself: new entries arrive only from
+    /// inbound, so it drains. Below inbound it starves instead, because a
+    /// peer that keeps a frame available makes inbound ready on every poll
+    /// and the handler set is then never polled at all.
+    #[tokio::test]
+    async fn a_ready_handler_beats_a_ready_inbound() {
+        use futures::future::{pending, ready};
+
+        use super::{Arm, priority4};
+
+        let fired = priority4(Some(ready("handler")), pending::<()>(), ready("inbound"), ready(()))
+            .await;
+        assert!(
+            matches!(fired, Arm::Handler("handler")),
+            "a finished handler lost to an inbound frame that was also ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_handler_does_not_take_the_arm() {
+        use futures::future::{Ready, pending, ready};
+
+        use super::{Arm, priority4};
+
+        let absent: Option<Ready<()>> = None;
+        let fired = priority4(absent, ready("outbound"), pending::<()>(), pending::<()>()).await;
+        assert!(
+            matches!(fired, Arm::Outbound("outbound")),
+            "an empty handler set took the arm instead of parking it"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_beats_inbound_and_both_beat_the_flag() {
+        use futures::future::{Ready, pending, ready};
+
+        use super::{Arm, priority4};
+
+        let absent: Option<Ready<()>> = None;
+        let fired = priority4(absent, ready("outbound"), ready("inbound"), ready(())).await;
+        assert!(matches!(fired, Arm::Outbound("outbound")));
+
+        let absent: Option<Ready<()>> = None;
+        let fired = priority4(absent, pending::<()>(), ready("inbound"), ready(())).await;
+        assert!(
+            matches!(fired, Arm::Inbound("inbound")),
+            "the policy flag dropped a frame that was already ready"
+        );
     }
 
     struct PendingStream {

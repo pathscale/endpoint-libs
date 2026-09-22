@@ -80,7 +80,14 @@
 //!    behind payloads. The shard accept channel in `server.rs` is separate
 //!    and is still `tokio::sync::mpsc`. The `select!`s are already
 //!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
-//!    `server.rs::listen_impl`, `signal.rs`).
+//!    `server.rs::listen_impl`, `signal.rs`). That swap is not fairness
+//!    preserving: `select` takes its left arm the moment it is ready and
+//!    never polls the right one, where `tokio::select!` chose at random. The
+//!    session loop's order is `session::priority4`, and it is a priority
+//!    rather than a nesting accident: a finished handler, then outbound,
+//!    then inbound, then the policy flag. Handlers come first because they
+//!    are the one arm a peer cannot keep ready, so anywhere below inbound
+//!    they starve.
 //!
 //! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
 //! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
