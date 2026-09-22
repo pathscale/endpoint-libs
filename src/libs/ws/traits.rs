@@ -102,6 +102,5 @@ pub trait WsUpgrader: Send + Sync {
         stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,
-        cached_date: &str,
     ) -> Result<Receiver<UpgradeEvent>>;
 }

@@ -51,9 +51,9 @@
 //! 1. **The TCP server path.** `listener.rs` is `tokio::net::TcpListener` and
 //!    `ConnectionListener`'s associated types are bounded on `tokio::io`.
 //!    `WebsocketServer::listen_impl` and `run_shard` build a
-//!    `tokio::runtime::Builder::new_current_thread` runtime per shard, a
-//!    `LocalSet`, a `tokio::spawn`ed date-cache task and a `tokio::time::sleep`.
-//!    The `futures` crate owns no reactor, so there is no futures-only
+//!    `tokio::runtime::Builder::new_current_thread` runtime per shard and a
+//!    `LocalSet`. The date-cache `tokio::spawn` was removed with the `Date`
+//!    header. The `futures` crate owns no reactor, so there is no futures-only
 //!    substitute for any of it. Replacing it means a second server built on a
 //!    `nagoya::reactor::TcpListener`, which is a parallel implementation rather
 //!    than a primitive swap.

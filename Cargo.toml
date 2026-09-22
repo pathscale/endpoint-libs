@@ -73,26 +73,24 @@ ws-core = [
     "dep:parking_lot",
     "dep:dashmap",
     "dep:async-trait",
-    "dep:httpdate",
     # `net`: `listener.rs` is `tokio::net::TcpListener`/`TcpStream` and
     #   `server.rs` calls `tokio::net::lookup_host`.
-    # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread`, the
-    #   `LocalSet` and `tokio::spawn`. `TOOLBOX` is a `thread_local` installed
-    #   for one poll, not `tokio::task_local!`.
+    # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread` and
+    #   the `LocalSet`. `TOOLBOX` is a `thread_local` installed for one poll,
+    #   not `tokio::task_local!`. The date-cache `tokio::spawn` is gone.
     # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs` and `toolbox.rs`,
     #   all of it in public struct fields.
-    # `time`: the date-cache `tokio::time::sleep` in `server.rs`.
     # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
     # `traits.rs`) are unconditional in tokio and need no feature.
     # `tokio/signal` arrives through the `signal` feature, which `ws-core`
     # already requires. The selects in `session.rs`, `server.rs` and
     # `signal.rs` are `futures::future::select`, so `tokio/macros` is not
-    # named here.
+    # named here. `tokio/time` is not named either: the date cache was the
+    # only non-test use, and it was dropped.
     "dep:tokio",
     "tokio/net",
     "tokio/rt",
     "tokio/sync",
-    "tokio/time",
 ]
 framed-transport = [
     # Length-delimited WireMessage framing over any byte stream (Unix sockets,
@@ -286,7 +284,6 @@ async-trait = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["http2", "server", "client"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
 http-body-util = { version = "0.1", optional = true }
-httpdate = { version = "1.0", optional = true }
 tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 webpki-roots = { version = "1.0.7", optional = true }
 # Force bundled CA roots for hyper-rustls (used by instant-acme inside
