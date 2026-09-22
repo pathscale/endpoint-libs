@@ -57,12 +57,14 @@
 //!    substitute for any of it. Replacing it means a second server built on a
 //!    `nagoya::reactor::TcpListener`, which is a parallel implementation rather
 //!    than a primitive swap.
-//! 2. **Signals.** `ws-core` requires the `signal` feature, and `libs/signal.rs`
-//!    is `tokio::signal::unix` plus a `tokio_util` `CancellationToken`.
-//!    `listen_impl` selects on it to shut down. `futures` has no signal support
-//!    and nagoya 0.1.9 has no signal module, so this is not portable inside this
-//!    crate either; it would have to move behind whatever feature carries the
-//!    TCP path.
+//! 2. **Signal delivery.** `ws-core` requires the `signal` feature. The flag
+//!    is a `nagoya::sync::Notify` plus an `AtomicBool` (`Shutdown`); the
+//!    `tokio_util` `CancellationToken` is gone. What remains is
+//!    `tokio::signal::unix`. `listen_impl` waits on it to shut down. nagoya
+//!    0.1.9 has `notify_waiters` and no signal module, so delivery is not
+//!    portable inside this crate yet. `signal` names `dep:nagoya` for the
+//!    flag and `tokio/signal` for delivery, and the nagoya dependency enables
+//!    `reactor`, so the reactor comes along too.
 //! 3. **`tokio::task_local!`** for `TOOLBOX` in `toolbox.rs`. `futures` has no
 //!    task-local. `scoped-tls` is not a substitute: its scope is synchronous and
 //!    does not survive an `.await`, and `TOOLBOX.scope(..).await` spans awaits.
