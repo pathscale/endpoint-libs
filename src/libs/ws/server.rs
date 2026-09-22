@@ -356,7 +356,13 @@ impl WebsocketServer {
             ?conn_id,
             "Starting websocket session"
         );
-        let session = WsClientSession::new(conn, stream, rx, self);
+        let end = states
+            .get_state(conn.connection_id)
+            .map(|state| Arc::clone(&state.end));
+        let mut session = WsClientSession::new(conn, stream, rx, self);
+        if let Some(end) = end {
+            session.bind_end(end);
+        }
         session.run().await;
 
         states.remove(context.connection_id);

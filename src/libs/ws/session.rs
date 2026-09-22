@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::*;
 
+use crate::libs::signal::Shutdown;
+
 /// What the session loop does after one inbound frame.
 ///
 /// Handler bodies are polled in place on this task (`Task`) so a slow hook
@@ -37,6 +39,10 @@ pub struct WsClientSession {
     conn: Box<dyn MessageStream>,
     rx: mpsc::Receiver<Message>,
     server: Arc<WebsocketServer>,
+    /// Policy close, shared with [`crate::libs::ws::WsStreamState::end`].
+    /// A session built with [`WsClientSession::new`] and never [`WsClientSession::bind_end`]
+    /// holds a flag nobody else can set.
+    end: Arc<Shutdown>,
 }
 
 impl WsClientSession {
@@ -51,7 +57,14 @@ impl WsClientSession {
             conn,
             rx,
             server,
+            end: Arc::new(Shutdown::new()),
         }
+    }
+
+    /// Use the connection's policy-close flag. [`WebsocketServer`] does this
+    /// after `WebsocketStates::insert` has created the flag.
+    pub fn bind_end(&mut self, end: Arc<Shutdown>) {
+        self.end = end;
     }
 
     pub fn conn(&self) -> &dyn MessageStream {
@@ -367,9 +380,10 @@ impl WsClientSession {
         // Owned so the recv futures can drop before the arms borrow `self` again.
         // `pin_mut` holds those borrows to the end of its scope.
         enum Ready {
-            Outbound(Option<Message>),
+            Outbound(Outbound),
             Inbound(Option<std::result::Result<Message, StreamError>>),
             Handler,
+            End,
         }
         loop {
             while let Ok(msg) = self.rx.try_recv() {
@@ -380,39 +394,62 @@ impl WsClientSession {
                     return Ok(());
                 }
             }
+            // After the queue is drained. A payload already queued is sent
+            // above; the flag only wins once there is nothing left to send.
+            if self.end.is_cancelled() {
+                debug!(ws_server = true, ?conn_id, "Session end flagged");
+                return Ok(());
+            }
 
-            // Three-way select, nested. Outbound is polled before inbound, and
-            // both before a finished handler. The handler arm stays disabled
-            // while the set is empty, matching the old `if` guard.
+            // Outbound, then inbound, then a finished handler, then the policy
+            // flag. The handler arm stays disabled while the set is empty.
+            // The flag is last so a frame that is already ready is not dropped
+            // on the floor when the flag trips in the same poll.
             let ready = {
                 let outbound = self.rx.recv();
                 futures::pin_mut!(outbound);
                 let inbound = self.conn.recv();
                 futures::pin_mut!(inbound);
+                let end = self.end.cancelled();
+                futures::pin_mut!(end);
                 if handlers.is_empty() {
-                    match futures::future::select(outbound, inbound).await {
-                        futures::future::Either::Left((msg, _)) => Ready::Outbound(msg),
-                        futures::future::Either::Right((msg, _)) => Ready::Inbound(msg),
+                    match futures::future::select(outbound, futures::future::select(inbound, end))
+                        .await
+                    {
+                        futures::future::Either::Left((msg, _)) => {
+                            Ready::Outbound(classify_outbound(msg))
+                        }
+                        futures::future::Either::Right((inner, _)) => match inner {
+                            futures::future::Either::Left((msg, _)) => Ready::Inbound(msg),
+                            futures::future::Either::Right(_) => Ready::End,
+                        },
                     }
                 } else {
                     let handler = handlers.next();
                     futures::pin_mut!(handler);
                     match futures::future::select(
-                        futures::future::select(outbound, inbound),
-                        handler,
+                        outbound,
+                        futures::future::select(inbound, futures::future::select(handler, end)),
                     )
                     .await
                     {
-                        futures::future::Either::Left((inner, _)) => match inner {
-                            futures::future::Either::Left((msg, _)) => Ready::Outbound(msg),
-                            futures::future::Either::Right((msg, _)) => Ready::Inbound(msg),
+                        futures::future::Either::Left((msg, _)) => {
+                            Ready::Outbound(classify_outbound(msg))
+                        }
+                        futures::future::Either::Right((inner, _)) => match inner {
+                            futures::future::Either::Left((msg, _)) => Ready::Inbound(msg),
+                            futures::future::Either::Right((handler_or_end, _)) => {
+                                match handler_or_end {
+                                    futures::future::Either::Left(_) => Ready::Handler,
+                                    futures::future::Either::Right(_) => Ready::End,
+                                }
+                            }
                         },
-                        futures::future::Either::Right(_) => Ready::Handler,
                     }
                 }
             };
             match ready {
-                Ready::Outbound(Some(msg)) => {
+                Ready::Outbound(Outbound::Frame(msg)) => {
                     if !self.send_message(msg).await {
                         break;
                     }
@@ -420,8 +457,12 @@ impl WsClientSession {
                         break;
                     }
                 }
-                Ready::Outbound(None) => {
+                Ready::Outbound(Outbound::Closed) => {
                     debug!(ws_server = true, ?conn_id, "Outbound channel closed");
+                    break;
+                }
+                Ready::End => {
+                    debug!(ws_server = true, ?conn_id, "Session end flagged");
                     break;
                 }
                 Ready::Inbound(Some(msg_result)) => {
@@ -489,6 +530,20 @@ impl WsClientSession {
     }
 }
 
+/// What an outbound `recv` means. `Closed` is the teardown edge: every sender
+/// is gone. It is not a frame and it ends the session.
+pub(crate) enum Outbound {
+    Frame(Message),
+    Closed,
+}
+
+pub(crate) fn classify_outbound(msg: Option<Message>) -> Outbound {
+    match msg {
+        Some(frame) => Outbound::Frame(frame),
+        None => Outbound::Closed,
+    }
+}
+
 fn check_roles(actual_roles: &[u32], allowed_roles: &HashSet<u32>) -> bool {
     if allowed_roles.is_empty() || actual_roles.is_empty() {
         return false;
@@ -519,5 +574,129 @@ mod tests {
 
         let allowed_roles: HashSet<u32> = HashSet::new();
         assert!(!check_roles(&[1], &allowed_roles));
+    }
+
+    #[test]
+    fn closed_outbound_is_not_a_frame() {
+        use super::{Outbound, classify_outbound};
+        use crate::libs::ws::WsMessage as Message;
+
+        assert!(matches!(classify_outbound(None), Outbound::Closed));
+        assert!(matches!(
+            classify_outbound(Some(Message::from("hi"))),
+            Outbound::Frame(_)
+        ));
+    }
+
+    struct PendingStream {
+        parked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl super::MessageStream for PendingStream {
+        async fn send(
+            &mut self,
+            _msg: super::Message,
+        ) -> std::result::Result<(), super::StreamError> {
+            Ok(())
+        }
+
+        async fn recv(
+            &mut self,
+        ) -> Option<std::result::Result<super::Message, super::StreamError>> {
+            self.parked
+                .store(true, std::sync::atomic::Ordering::Release);
+            std::future::pending().await
+        }
+    }
+
+    fn test_conn() -> std::sync::Arc<super::WsConnection> {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        use parking_lot::RwLock;
+
+        use crate::libs::peer::{Extensions, PeerIdentity};
+
+        Arc::new(super::WsConnection {
+            connection_id: 1,
+            user_id: AtomicU64::new(0),
+            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            peer: PeerIdentity::Unknown,
+            extensions: Extensions::new(),
+            log_id: 0,
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_the_outbound_sender_ends_the_session() {
+        use std::time::Duration;
+
+        use tokio::sync::mpsc;
+
+        use super::WsClientSession;
+        use crate::libs::ws::{WebsocketServer, WsServerConfig};
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+        let session = WsClientSession::new(
+            test_conn(),
+            Box::new(PendingStream {
+                parked: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }),
+            rx,
+            std::sync::Arc::new(WebsocketServer::new(WsServerConfig::default())),
+        );
+        let finished = tokio::time::timeout(Duration::from_secs(1), session.run()).await;
+        assert!(
+            finished.is_ok(),
+            "session kept running after every outbound sender was dropped"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn policy_flag_ends_a_session_blocked_on_recv() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        use tokio::sync::mpsc;
+
+        use super::WsClientSession;
+        use crate::libs::signal::Shutdown;
+        use crate::libs::ws::{WebsocketServer, WsServerConfig};
+
+        let (_tx, rx) = mpsc::channel(1);
+        let parked = Arc::new(AtomicBool::new(false));
+        let end = Arc::new(Shutdown::new());
+        let mut session = WsClientSession::new(
+            test_conn(),
+            Box::new(PendingStream {
+                parked: Arc::clone(&parked),
+            }),
+            rx,
+            Arc::new(WebsocketServer::new(WsServerConfig::default())),
+        );
+        session.bind_end(Arc::clone(&end));
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let running = tokio::task::spawn_local(async move { session.run().await });
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while !parked.load(Ordering::Acquire) {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("session never waited on the connection");
+                end.cancel();
+                let finished = tokio::time::timeout(Duration::from_secs(1), running).await;
+                assert!(
+                    finished.is_ok(),
+                    "session kept running after the policy flag was set"
+                );
+            })
+            .await;
     }
 }

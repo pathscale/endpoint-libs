@@ -76,7 +76,12 @@
 //!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
 //!    `server.rs::listen_impl`, `signal.rs`). A `futures` bounded channel is not
 //!    a drop-in for the queues: it reserves a slot per sender, so
-//!    `drop_conn_on_buffer_full` would fire at a different depth.
+//!    `drop_conn_on_buffer_full` would fire at a different depth. Two edges that
+//!    used to live only on that queue now have their own homes: teardown is
+//!    `recv() -> None`, classified as `Outbound::Closed`, and a policy close
+//!    (`drop_conn_on_buffer_full`, `header_only`) cancels the connection's
+//!    `WsStreamState::end` flag, which still fires when `try_send(Close)` cannot
+//!    take a slot. The `Close` frame is still queued behind payloads.
 //!
 //! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
 //! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
