@@ -271,12 +271,11 @@ nagoya = { version = "0.1.11", default-features = false, features = ["reactor"],
 # this crate is trying not to compile. `ws-client-tls` turns them back on for
 # a consumer that dials an external `wss://`.
 #
-# PATH, NOT A VERSION, AND THIS MUST NOT REACH master, for the same reason as
-# the nagoya line above. The published 0.2.0 cannot carry the kept HTTP extras
-# (`build_response` emits a fixed 101, and `parse_request` discards every header
-# but five, so `Origin` and a CORS policy are not expressible), so this needs
-# nago-wss 0.3.0.
-nago-wss = { path = "../nago-wss", default-features = false, features = [
+# 0.3.0 is the release that can carry the kept HTTP extras: 0.2.0's
+# `build_response` emitted a fixed 101 and its `parse_request` discarded every
+# header but five, so `Origin` and a CORS policy were not expressible at all.
+# Registry, not a sibling path.
+nago-wss = { version = "0.3.0", default-features = false, features = [
     "reactor",
     "simd-utf8",
 ], optional = true }
