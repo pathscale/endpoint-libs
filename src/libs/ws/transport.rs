@@ -32,16 +32,57 @@
 //!
 //! - `wire-core,framed-transport,nagoya-transport` prints nothing. This is the
 //!   neutral path and it is genuinely runtime-free.
-//! - Anything including `ws-core` still carries tokio, and *not* because of the
-//!   transport code. `ws-core` requires `types`, and `types` pulls in the
-//!   observability stack — `opentelemetry-otlp`, `tonic`, `reqwest`,
-//!   `hyper-rustls` — every one of which depends on tokio unconditionally. The
-//!   `ws` path additionally needs it for real (hyper, tokio-tungstenite,
-//!   tokio-rustls).
+//! - `types` alone prints nothing either, since the OTLP exporters moved behind
+//!   the `otel` feature.
+//! - Anything including `ws-core` still carries tokio. This is no longer an
+//!   accident of `types`: `ws-core` names `dep:tokio` on its own account, and
+//!   the code behind it means that.
 //!
-//! So a consumer that wants no tokio at all takes the neutral transport without
-//! `types`. Making `ws-core` tokio-free is a separate project: it means getting
-//! the OTLP exporters out of `types` and behind their own feature.
+//! ## What `ws-core` would have to give up
+//!
+//! Ranked by how hard it is to remove, not by how often it is cited.
+//!
+//! 1. **The TCP server path.** `listener.rs` is `tokio::net::TcpListener` and
+//!    `ConnectionListener`'s associated types are bounded on `tokio::io`.
+//!    `WebsocketServer::listen_impl` and `run_shard` build a
+//!    `tokio::runtime::Builder::new_current_thread` runtime per shard, a
+//!    `LocalSet`, a `tokio::spawn`ed date-cache task and a `tokio::time::sleep`.
+//!    The `futures` crate owns no reactor, so there is no futures-only
+//!    substitute for any of it. Replacing it means a second server built on a
+//!    `nagoya::reactor::TcpListener`, which is a parallel implementation rather
+//!    than a primitive swap.
+//! 2. **Signals.** `ws-core` requires the `signal` feature, and `libs/signal.rs`
+//!    is `tokio::signal::unix` plus a `tokio_util` `CancellationToken`.
+//!    `listen_impl` selects on it to shut down. `futures` has no signal support
+//!    and nagoya 0.1.9 has no signal module, so this is not portable inside this
+//!    crate either; it would have to move behind whatever feature carries the
+//!    TCP path.
+//! 3. **`tokio::task_local!`** for `TOOLBOX` in `toolbox.rs`. `futures` has no
+//!    task-local. `scoped-tls` is not a substitute: its scope is synchronous and
+//!    does not survive an `.await`, and `TOOLBOX.scope(..).await` spans awaits.
+//!    A replacement has to be a hand-rolled future that sets a `thread_local!`
+//!    on poll entry and restores it on return, which is what tokio's own
+//!    `TaskLocalFuture` is.
+//! 4. **Channels and `select!`**, the part usually named first and the only part
+//!    that is mechanical: `tokio::sync::mpsc` in `session.rs`, `conn.rs`,
+//!    `toolbox.rs` and `WebsocketServer::message_receiver`, and `tokio::select!`
+//!    in `session.rs::run_loop`. These map onto `futures::channel::mpsc` and
+//!    `futures::future::select` plus `Either`. Note the semantics are not
+//!    identical: a `futures` bounded channel reserves a slot per sender, so
+//!    `drop_conn_on_buffer_full` would fire at a different depth.
+//!
+//! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
+//! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
+//! upgrader, tokio-tungstenite and tokio-rustls, all of which are gated on
+//! `ws`/`ws-client` and tokio-bound regardless.
+//!
+//! Doing only 3 and 4 changes the public API and moves the `cargo tree` output
+//! not at all, because 1 and 2 still name tokio. So the useful shape is a
+//! feature split first: put the TCP/TLS/upgrade cluster and `signal` behind
+//! their own feature, leaving a `ws-core` that offers `serve_connection` and
+//! `serve_with` over a `SessionListener`, and only
+//! then port 3 and 4. Until that lands, a consumer that wants no tokio at all
+//! takes the neutral transport and leaves `ws-core` out.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
