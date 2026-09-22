@@ -152,12 +152,16 @@ ws = [
 ]
 signal = [
     # Feature dependencies
-    "dep:tokio-util",
-    # `signal.rs` is `tokio::signal::unix`. The two waits are
-    # `futures::future::select`, so this feature does not name `tokio/macros`.
+    # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`.
+    # Delivery is still `tokio::signal::unix`. nagoya 0.1.9 has
+    # `Notify::notify_waiters` and no signal module. The dependency line
+    # below enables nagoya's `reactor` feature, so this feature pulls the
+    # reactor along with `sync`.
+    "dep:nagoya",
+    # `signal.rs` waits with `futures::future::select`, so this feature does
+    # not name `tokio/macros` or `tokio-util`.
     "dep:tokio",
     "tokio/signal",
-    "dep:lazy_static",
     # `signal.rs` logs the signal it caught. `types` happens to pull tracing in,
     # so this was never missed until somebody enabled `signal` on its own.
     "dep:tracing",

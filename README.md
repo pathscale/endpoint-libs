@@ -128,7 +128,7 @@ these features, each naming the tokio features its own code uses:
 | feature | tokio features | why |
 | --- | --- | --- |
 | `ws-core` | `net`, `rt`, `sync`, `time` | TCP listener, per-shard current-thread runtime and `task_local!`, `mpsc` in public struct fields, date-cache sleep |
-| `signal` | `signal` | `tokio::signal::unix`. The waits are `futures::future::select` |
+| `signal` | `signal` | `tokio::signal::unix` for delivery. The flag is `nagoya::sync::Notify`, and the waits are `futures::future::select` |
 | `scheduler` | `rt`, `time` | `tokio::spawn` and `tokio::time::sleep` |
 | `log_reader` | `rt` | `tokio::task::spawn_blocking` |
 | `error_aggregation` | `rt`, `sync` | `RwLock`, `mpsc`, a spawned aggregation task |
@@ -404,7 +404,7 @@ does **not** include `ws-client` or the `framed-transport` features — prefer n
 
 ### `signal`
 
-Unix signal handling (`SIGTERM`/`SIGINT`) with a global `CancellationToken` for coordinating graceful shutdown across async tasks.
+Unix signal handling (`SIGTERM`/`SIGINT`). Delivery is `tokio::signal::unix`. The process-wide flag is `Shutdown`: `nagoya::sync::Notify` plus an `AtomicBool`, held in `CANCELLATION_TOKEN`.
 
 ### `scheduler`
 
@@ -460,9 +460,13 @@ reasons, ranked by how hard each is to remove:
    shard plus a `LocalSet`, a `tokio::spawn`ed date-cache task and `tokio::time::sleep`.
    The `futures` crate owns no reactor, so there is no futures-only substitute. This
    would become a second server over a `nagoya::reactor::TcpListener`.
-2. **Signals.** `ws-core` requires the `signal` feature, which is `tokio::signal::unix`
-   plus a `tokio_util` `CancellationToken`, and `listen_impl` selects on it to shut down.
-   `futures` has no signal support and nagoya 0.1.9 has no signal module.
+2. **Signal delivery.** `ws-core` requires the `signal` feature. The shutdown
+   flag is a `nagoya::sync::Notify` plus an `AtomicBool`, not a `tokio_util`
+   `CancellationToken`, and `listen_impl` waits on `tokio::signal::unix` to set
+   it. `futures` has no signal support and nagoya 0.1.9 has no signal module
+   (`notify_waiters` is there; `EVFILT_SIGNAL` and `signalfd` are not), so the
+   delivery half still names tokio. `signal` also names `dep:nagoya`, and that
+   dependency enables nagoya's `reactor` feature.
 3. **`tokio::task_local!`** for `TOOLBOX`. `futures` has no task-local, and `scoped-tls`
    is not a substitute because its scope does not survive an `.await`.
 4. **Channels** in `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are
