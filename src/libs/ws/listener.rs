@@ -94,9 +94,7 @@ impl TcpListener {
             }
         }
         match last {
-            Some(err) => Err(err).map_err(|err| {
-                err.wrap_err(format!("None of {addrs:?} could be bound; last failure"))
-            }),
+            Some(err) => Err(err.wrap_err(format!("None of {addrs:?} could be bound"))),
             None => bail!("no address to bind"),
         }
     }

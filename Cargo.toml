@@ -73,25 +73,13 @@ ws-core = [
     "dep:parking_lot",
     "dep:dashmap",
     "dep:async-trait",
-    # `net`: `listener.rs` is `tokio::net::TcpListener`/`TcpStream` and
-    #   `server.rs` calls `tokio::net::lookup_host`.
-    # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread` and
-    #   the `LocalSet`. `TOOLBOX` is a `thread_local` installed for one poll,
-    #   not `tokio::task_local!`. The date-cache `tokio::spawn` is gone.
-    # `sync`: the accept fan-out in `server.rs` (`mpsc::channel` of depth 256,
-    #   then `send().await`). The per-connection `WsMessage` queue is
-    #   `ws::outbound` and does not use tokio.
-    # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
-    # `traits.rs`) are unconditional in tokio and need no feature.
-    # `tokio/signal` arrives through the `signal` feature, which `ws-core`
-    # already requires. The selects in `session.rs`, `server.rs` and
-    # `signal.rs` are `futures::future::select`, so `tokio/macros` is not
-    # named here. `tokio/time` is not named either: the date cache was the
-    # only non-test use, and it was dropped.
-    "dep:tokio",
-    "tokio/net",
-    "tokio/rt",
-    "tokio/sync",
+    # Named directly, not taken through `signal`. Every feature has to name the
+    # dependencies its own code uses or it does not compile alone, and this is
+    # the runtime now: `listener.rs` is `nagoya::reactor::TcpListener`,
+    # `server.rs` resolves with `nagoya::reactor::resolve` and drives the
+    # accept loop with `Reactor::local` and `block_on_with`, and `traits.rs`
+    # bounds `RawStream` on `nagoya::io::Stream`.
+    "dep:nagoya",
 ]
 framed-transport = [
     # Length-delimited WireMessage framing over any byte stream (Unix sockets,

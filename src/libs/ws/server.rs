@@ -463,9 +463,8 @@ impl WebsocketServer {
     /// exactly the cost `Reactor::sharded` exists to avoid. The shape that does work
     /// is a listening socket per reactor, and nagoya cannot yet produce one: its
     /// `TcpListener` has no `try_clone` and no `SO_REUSEPORT` bind, and a bound
-    /// listener cannot be adopted by a second reactor. See `docs/` for the tracking
-    /// note. [`shard_count`] still reads the operator's intent, and says so when it
-    /// cannot honour it.
+    /// listener cannot be adopted by a second reactor. `shard_count` still reads the
+    /// operator's intent, and the server says so when it cannot honour it.
     pub fn listen(self) -> Result<()> {
         self.validate_protocol_mode()?;
         debug!(ws_server = true, "Listening on {}", self.config.address);
@@ -516,7 +515,29 @@ impl WebsocketServer {
         bail!("TLS requires the `ws` feature, which provides the TLS-capable backend")
     }
 
-    async fn listen_impl<T: ConnectionListener + 'static>(self, listener: Arc<T>) -> Result<()> {
+    /// Accept, handshake and serve, all on the reactor `handle` names.
+    ///
+    /// One loop, three things to wait on, and no channel between them: the accept
+    /// fan-out and its per-shard `mpsc` are gone with the shard threads, because
+    /// there is nowhere to hand a connection to. See [`Self::listen`] for why.
+    ///
+    /// Connections are held in a `FuturesUnordered` and polled in place, the same
+    /// model `serve_with` uses. nagoya's `TaskSet` is the purpose-built runner for
+    /// non-`Send` tasks on one thread and would otherwise be the right choice, but
+    /// it never removes a finished task's entry — the slot stays so a late wake
+    /// still has a link to follow — so a set fed by an unbounded connection churn
+    /// grows one entry per connection ever accepted and panics past four billion.
+    /// It fits a fixed population of tasks, which a server's connections are not.
+    /// `FuturesUnordered` drops what finishes and wakes in O(woken) just the same.
+    async fn listen_impl<T: ConnectionListener + 'static>(
+        self,
+        listener: Arc<T>,
+        handle: &Handle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+        use futures::future::{Either, FutureExt, select};
+        use futures::stream::FuturesUnordered;
+
         let states = Arc::new(WebsocketStates::new());
         let this = Arc::new(self);
         this.toolbox.set_ws_states(
@@ -526,127 +547,90 @@ impl WebsocketServer {
         );
 
         let num_shards = shard_count();
-        debug!(ws_server = true, "Starting {} WebSocket shards", num_shards);
-
-        let mut shard_senders = Vec::with_capacity(num_shards);
-        for _ in 0..num_shards {
-            let (tx, rx) = mpsc::channel::<(T::Channel1, SocketAddr)>(256);
-            let this = Arc::clone(&this);
-            let states = Arc::clone(&states);
-            let listener = Arc::clone(&listener);
-            std::thread::spawn(move || {
-                WebsocketServer::run_shard(this, states, listener, rx);
-            });
-            shard_senders.push(tx);
+        if num_shards > 1 {
+            warn!(
+                ws_server = true,
+                "{} shards were asked for; serving on one thread because a nagoya \
+                 listener cannot be shared between reactors yet",
+                num_shards
+            );
         }
 
-        let (mut sigterm, mut sigint) = crate::libs::signal::init_signals()?;
-        let mut shard_idx: usize = 0;
+        // Registered on this reactor, and awaited on it below. A `Signal` only
+        // fires while its own reactor is polled, so creating it anywhere else
+        // would be creating a wait that never ends.
+        let (mut sigterm, mut sigint) = crate::libs::signal::init_signals(handle)?;
+        let mut connections = FuturesUnordered::new();
         loop {
-            // Shutdown is the left arm, so a pending signal is not stuck behind
-            // an accept that is also ready.
+            // Shutdown is the outermost left arm, so a pending signal is not stuck
+            // behind an accept or a live connection that is also ready.
             let shutdown = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint);
             let accepted = listener.accept();
             futures::pin_mut!(shutdown, accepted);
-            match futures::future::select(shutdown, accepted).await {
-                futures::future::Either::Left(_) => break,
-                futures::future::Either::Right((accepted, _)) => {
-                    let (stream, addr) = match accepted {
-                        Ok(x) => x,
+            let accepted = if connections.is_empty() {
+                match select(shutdown, accepted).await {
+                    Either::Left(_) => break,
+                    Either::Right((accepted, _)) => accepted,
+                }
+            } else {
+                let progress = select(accepted, connections.next());
+                futures::pin_mut!(progress);
+                match select(shutdown, progress).await {
+                    Either::Left(_) => break,
+                    Either::Right((Either::Left((accepted, _)), _)) => accepted,
+                    // A connection finished. There is nothing to place, and the
+                    // set has already dropped it, so go round again.
+                    Either::Right((Either::Right(_), _)) => continue,
+                }
+            };
+            let (stream, addr) = match accepted {
+                Ok(x) => x,
+                Err(err) => {
+                    error!(ws_server = true, "Error while accepting stream: {:?}", err);
+                    continue;
+                }
+            };
+
+            let this = Arc::clone(&this);
+            let states = Arc::clone(&states);
+            let listener = Arc::clone(&listener);
+            connections.push(
+                async move {
+                    let stream = match listener.handshake(stream).await {
+                        Ok(channel) => {
+                            debug!(ws_server = true, "Accepted stream from {}", addr);
+                            channel
+                        }
                         Err(err) => {
-                            error!(ws_server = true, "Error while accepting stream: {:?}", err);
-                            continue;
+                            error!(
+                                ws_server = true,
+                                "Error while handshaking stream: {:?}", err
+                            );
+                            return;
                         }
                     };
-                    let shard = &shard_senders[shard_idx % num_shards];
-                    shard_idx = shard_idx.wrapping_add(1);
-                    if shard.send((stream, addr)).await.is_err() {
+                    if let Err(err) = TOOLBOX
+                        .scope(
+                            this.toolbox.clone(),
+                            this.handle_ws_handshake_and_connection(addr, states, Box::new(stream)),
+                        )
+                        .await
+                    {
                         error!(
                             ws_server = true,
-                            "Shard channel closed unexpectedly for addr {}", addr
+                            ?addr,
+                            "Failed to handle WS connection: {err}"
                         );
                     }
                 }
-            }
+                .boxed_local(),
+            );
         }
 
+        // Breaking out drops `connections`, which closes every live session at
+        // once. That was already the observable behaviour: the shard threads were
+        // detached and died with the process, and nothing waited for them either.
         Ok(())
-    }
-
-    fn run_shard<T: ConnectionListener + 'static>(
-        this: Arc<Self>,
-        states: Arc<WebsocketStates>,
-        listener: Arc<T>,
-        mut rx: mpsc::Receiver<(T::Channel1, SocketAddr)>,
-    ) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to build shard runtime");
-        // LocalSet remains only because the hyper upgrader `spawn_local`s onto
-        // TokioExecutor. Connection tasks themselves are polled in place.
-        let local_set = LocalSet::new();
-        rt.block_on(local_set.run_until(async move {
-            use futures::StreamExt;
-            use futures::future::FutureExt;
-            use futures::stream::FuturesUnordered;
-
-            let mut connections = FuturesUnordered::new();
-            loop {
-                let received = if connections.is_empty() {
-                    rx.recv().await
-                } else {
-                    let recv = rx.recv();
-                    futures::pin_mut!(recv);
-                    match futures::future::select(recv, connections.next()).await {
-                        futures::future::Either::Left((received, _)) => received,
-                        futures::future::Either::Right(_) => continue,
-                    }
-                };
-                let Some((stream, addr)) = received else {
-                    while connections.next().await.is_some() {}
-                    break;
-                };
-                let this = Arc::clone(&this);
-                let states = Arc::clone(&states);
-                let listener = Arc::clone(&listener);
-                connections.push(
-                    async move {
-                        let stream = match listener.handshake(stream).await {
-                            Ok(channel) => {
-                                debug!(ws_server = true, "Accepted stream from {}", addr);
-                                channel
-                            }
-                            Err(err) => {
-                                error!(
-                                    ws_server = true,
-                                    "Error while handshaking stream: {:?}", err
-                                );
-                                return;
-                            }
-                        };
-                        if let Err(err) = TOOLBOX
-                            .scope(
-                                this.toolbox.clone(),
-                                this.handle_ws_handshake_and_connection(
-                                    addr,
-                                    states,
-                                    Box::new(stream),
-                                ),
-                            )
-                            .await
-                        {
-                            error!(
-                                ws_server = true,
-                                ?addr,
-                                "Failed to handle WS connection: {err}"
-                            );
-                        }
-                    }
-                    .boxed_local(),
-                );
-            }
-        }));
     }
 
     pub fn dump_schemas(&self) -> Result<()> {
@@ -669,7 +653,36 @@ impl WebsocketServer {
     }
 }
 
-/// Determine the number of WebSocket shards to spawn.
+/// Split `host:port` for [`resolve`], which takes the two separately.
+///
+/// `tokio::net::lookup_host` took the whole string and did this itself. nagoya's
+/// resolver does not, on purpose: the port never goes to `getaddrinfo` as a service
+/// string, it is stamped onto every address the name resolves to, so it has to be a
+/// number before the lookup rather than after.
+///
+/// The host is split from the right and unbracketed, which is what makes a literal
+/// IPv6 address work: `[::1]:8080` has a colon in the host and brackets exist to say
+/// where it ends.
+fn split_host_port(address: &str) -> Result<(&str, u16)> {
+    let (host, port) = address
+        .rsplit_once(':')
+        .with_context(|| format!("address has no port: {address}"))?;
+    let port: u16 = port
+        .parse()
+        .wrap_err_with(|| format!("address has no usable port: {address}"))?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    Ok((host, port))
+}
+
+/// Determine the number of WebSocket shards the operator asked for.
+///
+/// Read but not yet honoured: [`WebsocketServer::listen`] serves on one thread
+/// because a nagoya listener cannot be shared between reactors, and says so when
+/// this returns more than one. The detection is kept because it is the part that
+/// was right, and the fan-out is the part that has to come back.
 ///
 /// Resolution order (first match wins):
 /// 1. `WS_SHARDS` environment variable — explicit operator override.
