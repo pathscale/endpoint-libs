@@ -648,8 +648,13 @@ mod tests {
 
         use super::{Arm, priority4};
 
-        let fired = priority4(Some(ready("handler")), pending::<()>(), ready("inbound"), ready(()))
-            .await;
+        let fired = priority4(
+            Some(ready("handler")),
+            pending::<()>(),
+            ready("inbound"),
+            ready(()),
+        )
+        .await;
         assert!(
             matches!(fired, Arm::Handler("handler")),
             "a finished handler lost to an inbound frame that was also ready"
