@@ -80,3 +80,39 @@ and `upgrade_stream`'s `Receiver<UpgradeEvent>` stays with it. Item 13 moves
 `./scripts/check-chain.sh` was not run. The `--all-targets` form of the
 feature script was not re-run; it pulls the dev-dependency's `tokio` with
 `features = ["full"]` and would hide a missing `tokio/time`.
+
+## P0.2. Signal delivery
+
+The waiter is `nagoya::reactor::Signal` on `feat/resolve` at `ee8fca0`.
+
+`Signal::new(kind, &Handle)` registers one descriptor. `recv` completes
+once per delivery. `SignalKind::interrupt`, `terminate` and `hangup` are
+`SIGINT`, `SIGTERM` and `SIGHUP`. A second waiter for the same number gets
+`EBUSY`. A number outside `1..32`, and `SIGKILL` or `SIGSTOP`, gets
+`EINVAL`.
+
+Linux uses `signalfd`. The signal is blocked on the calling thread and
+stays blocked after drop. A thread created afterwards inherits the block.
+A thread that already existed does not, and a signal delivered there takes
+the default action. `pthread_sigmask` is per thread.
+
+The BSDs have no `signalfd`. `EVFILT_SIGNAL` names a signal number, and
+`Registration` names a file descriptor, so it is not used. A pipe written
+from a handler is the descriptor. The handler is installed while the
+signal is blocked, and the write end is published before the block is
+lifted. Both ends stay open for the process: the handler may already have
+loaded the write end. Drop restores the previous disposition. A signal
+still pending at that moment is discarded, because restoring the default
+and then unblocking would terminate the process on `SIGINT`.
+
+The kqueue path was executed on macOS. `cargo test --features reactor
+--lib` ran 42 tests, 7 of them this waiter: delivery of `SIGHUP`,
+`SIGINT` and `SIGTERM` without killing the process, a parked `SIGTERM`,
+a cross-thread `SIGHUP`, two waiters not completing each other, and drop
+restoring the previous disposition. `cargo check --target
+x86_64-unknown-linux-gnu --features reactor --lib` typechecked the
+`signalfd` path. That path was not executed.
+
+endpoint-libs still depends on crates.io nagoya `0.1.9`, which has no
+`Signal`. Item 12 is the caller in `libs/signal.rs`, which still uses
+`tokio::signal`. It does not get a path dependency.
