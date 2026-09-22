@@ -129,10 +129,7 @@ impl AuthController for AllowAllAuthController {
 }
 
 fn build_server(enable_mcp: bool) -> WebsocketServer {
-    let config = WsServerConfig {
-        insecure: true,
-        ..Default::default()
-    };
+    let config = WsServerConfig::default();
     let mut server = WebsocketServer::new(config);
     server.set_auth_controller(AllowAllAuthController);
     server.add_handler(MethodEcho);
@@ -418,10 +415,7 @@ impl RequestHandler for MethodClaims {
 }
 
 fn server_with_hooks(recorder: RecordOutcomes, mcp: bool) -> WebsocketServer {
-    let config = WsServerConfig {
-        insecure: true,
-        ..Default::default()
-    };
+    let config = WsServerConfig::default();
     let mut server = WebsocketServer::new(config);
     server.set_auth_controller(AllowAllAuthController);
     server.add_handler(MethodClaims);
@@ -567,10 +561,7 @@ fn on_connect_hook_can_refuse_a_peer() {
         }
     }
 
-    let config = WsServerConfig {
-        insecure: true,
-        ..Default::default()
-    };
+    let config = WsServerConfig::default();
     let mut server = WebsocketServer::new(config);
     server.set_auth_controller(AllowAllAuthController);
     server.add_handler(MethodEcho);
