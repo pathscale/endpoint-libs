@@ -112,7 +112,7 @@ ws = [
 ]
 signal = [
     # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`, and
-    # delivery is `nagoya::reactor::Signal`. The dependency line enables
+    # delivery is `nagoya::signal::Signal`. The dependency line enables
     # nagoya's `reactor` feature, so this feature pulls the reactor along with
     # `sync`, which is what `Signal` registers on. A `Signal` is bound to one
     # reactor and only fires while that reactor is polled, so `init_signals`
