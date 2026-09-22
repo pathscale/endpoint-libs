@@ -1,9 +1,10 @@
+SUPERSEDED by `ws-core-onto-nago-wss-03.md`. Work that file. Do not mine this one for line numbers.
+
 # `ws-core`, `ws` and `ws-client` onto `nago-wss`: 02
 
 Date: 2026-09-22
-Revision: 1. Bump this line on every edit, and say which revision a claim was
-checked against. Successor of `ws-core-onto-nago-wss-01.md`. Completed work is
-one line plus the proof commit. Do not copy line numbers out of 01.
+Revision: 2. This edit is the superseded banner only. The queue text below is
+revision 1 and is frozen.
 
 ## How this series works
 

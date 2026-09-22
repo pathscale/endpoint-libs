@@ -69,3 +69,14 @@ that wants no tokio does not enable them.
 Item 11 replaces the hyper upgrader for H1 only. The H2 arm stays on hyper,
 and `upgrade_stream`'s `Receiver<UpgradeEvent>` stays with it. Item 13 moves
 `connect_plain` and `connect_secure`. `connect_h2` stays where it is.
+
+## Follow-up
+
+`Date`'s deletion landed in `9f43c32` on `fix/ws-core-lane1`. Under
+`--features ws-core,framed-transport,nagoya-transport`, `cargo tree -e normal
+-i tokio` prints tokio with features `net`, `rt`, `sync` and `signal`.
+`time` is absent. `./scripts/check-features.sh` with
+`CHECK_CMD="cargo check --offline --lib"` passed on that commit.
+`./scripts/check-chain.sh` was not run. The `--all-targets` form of the
+feature script was not re-run; it pulls the dev-dependency's `tokio` with
+`features = ["full"]` and would hide a missing `tokio/time`.
