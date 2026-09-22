@@ -15,6 +15,8 @@ pub mod mcp;
 pub mod mcp_wire;
 mod message;
 #[cfg(feature = "ws-core")]
+pub mod outbound;
+#[cfg(feature = "ws-core")]
 mod push;
 #[cfg(feature = "ws-core")]
 mod server;

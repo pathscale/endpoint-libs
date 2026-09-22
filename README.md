@@ -470,21 +470,23 @@ reasons, ranked by how hard each is to remove:
 3. **`TOOLBOX` is a `thread_local`.** It is installed for one poll and restored
    on the way out, including cancel and panic, so an `.await` inside
    `TOOLBOX.scope` sees it again on the next poll. `scoped-tls` is not used.
-4. **Channels** in `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are
-   already `futures::future::select`. The queues are the remaining mechanical part:
-   they map onto `futures::channel::mpsc` at the cost of a breaking
-   change to `WsStreamState::message_queue`, `WebsocketStates::insert` and
-   `Toolbox::send_ws_msg`/`send_serialized_ws_msg`, and a behaviour change to
-   `drop_conn_on_buffer_full` (a `futures` bounded channel reserves a slot per sender).
+4. **The accept fan-out.** `server.rs` still moves accepted sockets onto shard
+   tasks through `tokio::sync::mpsc`. The per-connection `WsMessage` queue is
+   `ws::outbound`. Its bound is the number of queued messages: a sender does
+   not reserve a slot, which is the depth `drop_conn_on_buffer_full` measures.
+   `futures::channel::mpsc` would reserve one slot per sender and fire that
+   policy later. `WsStreamState::message_queue`, `WebsocketStates::insert` and
+   `Toolbox::send_ws_msg` / `send_serialized_ws_msg` take that queue's
+   `Sender`, not `tokio::sync::mpsc::Sender`.
 
 `TransportStream` over `tokio::io` is deliberate and not on that list: its only consumers
 are the hyper upgrader, tokio-tungstenite and tokio-rustls, which are gated on
 `ws`/`ws-client` and tokio-bound anyway.
 
-The TCP path and signal delivery still name tokio, and the per-connection queues do
-too. Replacing `TOOLBOX` and the `select!`s does not change `cargo tree`. Until the
-TCP path and signal delivery move, a consumer that wants no tokio has to leave
-`ws-core` out.
+The TCP path, signal delivery and the shard accept channel still name tokio. The
+per-connection queue does not. Replacing `TOOLBOX` and the `select!`s does not
+change `cargo tree`. Until the TCP path and signal delivery move, a consumer that
+wants no tokio has to leave `ws-core` out.
 
 `OtelConfig` itself stays in `types` and compiles without this feature, so a
 `LoggingConfig` literal does not have to be `cfg`-ed. Setting `enabled: true` without

@@ -4,7 +4,6 @@ use futures::future::{FutureExt, LocalBoxFuture};
 use futures::stream::FuturesUnordered;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::*;
 
 use crate::libs::signal::Shutdown;
@@ -21,6 +20,7 @@ enum Dispatch {
 }
 
 use crate::libs::ws::WsMessage as Message;
+use crate::libs::ws::outbound::Receiver;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::toolbox::{RequestContext, TOOLBOX};
@@ -37,7 +37,7 @@ use super::{
 pub struct WsClientSession {
     conn_info: Arc<WsConnection>,
     conn: Box<dyn MessageStream>,
-    rx: mpsc::Receiver<Message>,
+    rx: Receiver<Message>,
     server: Arc<WebsocketServer>,
     /// Policy close, shared with [`crate::libs::ws::WsStreamState::end`].
     /// A session built with [`WsClientSession::new`] and never [`WsClientSession::bind_end`]
@@ -49,7 +49,7 @@ impl WsClientSession {
     pub fn new(
         conn_info: Arc<WsConnection>,
         conn: Box<dyn MessageStream>,
-        rx: mpsc::Receiver<Message>,
+        rx: Receiver<Message>,
         server: Arc<WebsocketServer>,
     ) -> Self {
         Self {
@@ -632,12 +632,11 @@ mod tests {
     async fn dropping_the_outbound_sender_ends_the_session() {
         use std::time::Duration;
 
-        use tokio::sync::mpsc;
-
         use super::WsClientSession;
+        use crate::libs::ws::outbound;
         use crate::libs::ws::{WebsocketServer, WsServerConfig};
 
-        let (tx, rx) = mpsc::channel(1);
+        let (tx, rx) = outbound::channel(1);
         drop(tx);
         let session = WsClientSession::new(
             test_conn(),
@@ -660,13 +659,12 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
-        use tokio::sync::mpsc;
-
         use super::WsClientSession;
         use crate::libs::signal::Shutdown;
+        use crate::libs::ws::outbound;
         use crate::libs::ws::{WebsocketServer, WsServerConfig};
 
-        let (_tx, rx) = mpsc::channel(1);
+        let (_tx, rx) = outbound::channel(1);
         let parked = Arc::new(AtomicBool::new(false));
         let end = Arc::new(Shutdown::new());
         let mut session = WsClientSession::new(

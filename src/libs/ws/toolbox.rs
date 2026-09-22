@@ -17,6 +17,7 @@ use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::HandlerError;
 use crate::libs::log::LogLevel;
 use crate::libs::signal::Shutdown;
+use crate::libs::ws::outbound::{self, Sender};
 use crate::libs::ws::{
     ConnectionId, WsConnection, WsLogResponse, WsRequest, WsResponseError, WsResponseValue,
     WsStreamState, WsSuccessResponse, custom_error_to_resp, internal_error_to_resp,
@@ -223,7 +224,7 @@ impl Toolbox {
     }
 
     pub fn send_ws_msg(
-        sender: &tokio::sync::mpsc::Sender<Message>,
+        sender: &Sender<Message>,
         resp: WsResponseValue,
         oneshot: bool,
         conn_id: ConnectionId,
@@ -240,7 +241,7 @@ impl Toolbox {
     }
 
     pub fn send_serialized_ws_msg(
-        sender: &tokio::sync::mpsc::Sender<Message>,
+        sender: &Sender<Message>,
         serialized: String,
         oneshot: bool,
         conn_id: ConnectionId,
@@ -255,7 +256,7 @@ impl Toolbox {
     /// `end` is what still fires when that `try_send` cannot take a slot.
     /// Callers that pass `None` keep the old queue-only behaviour.
     fn enqueue(
-        sender: &tokio::sync::mpsc::Sender<Message>,
+        sender: &Sender<Message>,
         end: Option<&Shutdown>,
         serialized: String,
         oneshot: bool,
@@ -264,7 +265,7 @@ impl Toolbox {
     ) {
         match sender.try_send(serialized.into()) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(outbound::TrySendError::Full(_)) => {
                 error!(
                     ws_server = true,
                     conn_id, "Send buffer full — client too slow or disconnected"
@@ -273,7 +274,7 @@ impl Toolbox {
                     Self::close_for_policy(sender, end);
                 }
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(outbound::TrySendError::Closed(_)) => {
                 debug!(
                     ws_server = true,
                     conn_id, "Send channel closed — client already disconnected"
@@ -285,7 +286,7 @@ impl Toolbox {
         }
     }
 
-    fn close_for_policy(sender: &tokio::sync::mpsc::Sender<Message>, end: Option<&Shutdown>) {
+    fn close_for_policy(sender: &Sender<Message>, end: Option<&Shutdown>) {
         let _ = sender.try_send(Message::Close(None));
         if let Some(end) = end {
             end.cancel();
@@ -554,10 +555,10 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     use parking_lot::RwLock;
-    use tokio::sync::mpsc;
 
     use super::Toolbox;
     use crate::libs::peer::{Extensions, PeerIdentity};
+    use crate::libs::ws::outbound;
     use crate::libs::ws::{WebsocketStates, WsConnection, WsMessage as Message};
 
     fn conn(id: u32) -> Arc<WsConnection> {
@@ -574,7 +575,7 @@ mod tests {
     #[test]
     fn buffer_full_policy_cancels_without_a_free_slot() {
         let states = WebsocketStates::new();
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = outbound::channel(1);
         tx.try_send(Message::from("queued")).unwrap();
         states.insert(7, tx, conn(7));
         let toolbox = Toolbox::new();
@@ -590,7 +591,7 @@ mod tests {
     #[test]
     fn header_only_cancels_even_when_the_frame_fits() {
         let states = WebsocketStates::new();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (tx, mut rx) = outbound::channel(4);
         states.insert(7, tx, conn(7));
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), true, false);
@@ -694,9 +695,28 @@ mod tests {
     }
 
     #[test]
+    fn a_cloned_sender_does_not_move_the_full_depth() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = outbound::channel(1);
+        let _extra = tx.clone();
+        tx.try_send(Message::from("queued")).unwrap();
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, true);
+
+        assert!(toolbox.send_raw(7, "next".into()));
+
+        // One queued frame fills a capacity of 1. The extra sender did not
+        // open another slot, so the policy still fires and `next` is not queued.
+        assert!(states.get_state(7).unwrap().end.is_cancelled());
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn a_full_buffer_without_the_policy_does_not_cancel() {
         let states = WebsocketStates::new();
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, _rx) = outbound::channel(1);
         tx.try_send(Message::from("queued")).unwrap();
         states.insert(7, tx, conn(7));
         let toolbox = Toolbox::new();

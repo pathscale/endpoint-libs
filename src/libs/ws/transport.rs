@@ -70,27 +70,28 @@
 //!    the scope future, so the awaits inside `TOOLBOX.scope` (`session.rs`
 //!    handler bodies, and the handshake scope in `server.rs`) observe it again
 //!    on the next poll. `scoped-tls` is not a dependency.
-//! 4. **Channels**, the part usually named first. `tokio::sync::mpsc` remains in
-//!    `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are already
+//! 4. **The per-connection queue is `outbound`.** Its bound is the
+//!    number of queued `WsMessage`s. A sender does not keep a slot of its own,
+//!    so `drop_conn_on_buffer_full` still fires at the configured depth.
+//!    `futures::channel::mpsc` reserves one slot per sender and would not.
+//!    Teardown is still `recv() -> None`, classified as `Outbound::Closed`. A
+//!    policy close still cancels `WsStreamState::end`, including when
+//!    `try_send(Close)` cannot take a slot. The `Close` frame is still queued
+//!    behind payloads. The shard accept channel in `server.rs` is separate
+//!    and is still `tokio::sync::mpsc`. The `select!`s are already
 //!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
-//!    `server.rs::listen_impl`, `signal.rs`). A `futures` bounded channel is not
-//!    a drop-in for the queues: it reserves a slot per sender, so
-//!    `drop_conn_on_buffer_full` would fire at a different depth. Two edges that
-//!    used to live only on that queue now have their own homes: teardown is
-//!    `recv() -> None`, classified as `Outbound::Closed`, and a policy close
-//!    (`drop_conn_on_buffer_full`, `header_only`) cancels the connection's
-//!    `WsStreamState::end` flag, which still fires when `try_send(Close)` cannot
-//!    take a slot. The `Close` frame is still queued behind payloads.
+//!    `server.rs::listen_impl`, `signal.rs`).
 //!
 //! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
 //! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
 //! upgrader, tokio-tungstenite and tokio-rustls, all of which are gated on
 //! `ws`/`ws-client` and tokio-bound regardless.
 //!
-//! The TCP path and signal delivery still name tokio, and the per-connection
-//! queues do too. Replacing `TOOLBOX` and the `select!`s does not change
-//! `cargo tree`. Until the TCP path and signal delivery move, a consumer that
-//! wants no tokio at all takes the neutral transport and leaves `ws-core` out.
+//! The TCP path and signal delivery still name tokio, and so does the shard
+//! accept channel. The per-connection queue does not. Replacing `TOOLBOX` and
+//! the `select!`s does not change `cargo tree`. Until the TCP path and signal
+//! delivery move, a consumer that wants no tokio at all takes the neutral
+//! transport and leaves `ws-core` out.
 
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};

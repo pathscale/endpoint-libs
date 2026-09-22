@@ -35,6 +35,7 @@ use crate::libs::ws::{
 };
 use crate::model::{EndpointSchema, TypeRegistry};
 
+use super::outbound;
 use super::{AuthController, SimpleAuthController, WebsocketStates, WsEndpoint};
 
 pub struct WebsocketServer {
@@ -288,7 +289,7 @@ impl WebsocketServer {
             conn
         );
 
-        let (tx, rx) = mpsc::channel(self.config.message_buffer_size);
+        let (tx, rx) = outbound::channel(self.config.message_buffer_size);
         states.insert(conn.connection_id, tx, conn.clone());
 
         let auth_result = Arc::clone(&self.auth_controller)
@@ -338,7 +339,7 @@ impl WebsocketServer {
         conn: Arc<WsConnection>,
         states: Arc<WebsocketStates>,
         stream: Box<dyn MessageStream>,
-        rx: mpsc::Receiver<Message>,
+        rx: outbound::Receiver<Message>,
     ) {
         let addr = conn.peer.display();
         let context = RequestContext::from_conn(&conn);
