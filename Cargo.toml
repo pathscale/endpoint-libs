@@ -78,8 +78,9 @@ ws-core = [
     # `rt`: the per-shard `tokio::runtime::Builder::new_current_thread` and
     #   the `LocalSet`. `TOOLBOX` is a `thread_local` installed for one poll,
     #   not `tokio::task_local!`. The date-cache `tokio::spawn` is gone.
-    # `sync`: `tokio::sync::mpsc` in `conn.rs`, `session.rs` and `toolbox.rs`,
-    #   all of it in public struct fields.
+    # `sync`: the accept fan-out in `server.rs` (`mpsc::channel` of depth 256,
+    #   then `send().await`). The per-connection `WsMessage` queue is
+    #   `ws::outbound` and does not use tokio.
     # `tokio::io::{AsyncRead, AsyncWrite}` (the `TransportStream` bound in
     # `traits.rs`) are unconditional in tokio and need no feature.
     # `tokio/signal` arrives through the `signal` feature, which `ws-core`

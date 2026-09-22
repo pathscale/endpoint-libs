@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use std::sync::Arc;
 
 use super::WsMessage as Message;
+use super::outbound::Sender;
 
 use super::{ConnectionId, WsConnection};
 use crate::libs::signal::Shutdown;
@@ -28,7 +29,7 @@ impl WebsocketStates {
     pub fn insert(
         &self,
         connection_id: u32,
-        message_queue: tokio::sync::mpsc::Sender<Message>,
+        message_queue: Sender<Message>,
         conn: Arc<WsConnection>,
     ) {
         self.states.insert(
@@ -44,7 +45,9 @@ impl WebsocketStates {
 
 pub struct WsStreamState {
     pub conn: Arc<WsConnection>,
-    pub message_queue: tokio::sync::mpsc::Sender<Message>,
+    /// Per-connection outbound queue. The bound is the number of queued
+    /// messages; see [`super::outbound`].
+    pub message_queue: Sender<Message>,
     /// Policy close for this connection.
     ///
     /// `Shutdown::cancel` sticks, so the session still observes it after the
