@@ -19,7 +19,7 @@
 //!
 //! ```no_run
 //! # use endpoint_libs::libs::ws::transport::{framed::framed_json_neutral, nagoya::NagoyaStream};
-//! # fn example(socket: nagoya::reactor::TcpStream) {
+//! # fn example(socket: nagoya::net::TcpStream) {
 //! let transport = framed_json_neutral(NagoyaStream::new(socket));
 //! # let _ = transport;
 //! # }
@@ -31,7 +31,7 @@ use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncWrite};
 use nagoya::io::StreamError;
-use nagoya::reactor::TcpStream;
+use nagoya::net::TcpStream;
 
 /// A Nagoya [`TcpStream`] presented as a `futures-io` byte stream.
 #[derive(Debug)]
