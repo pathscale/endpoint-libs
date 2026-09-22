@@ -69,13 +69,12 @@
 //!    A replacement has to be a hand-rolled future that sets a `thread_local!`
 //!    on poll entry and restores it on return, which is what tokio's own
 //!    `TaskLocalFuture` is.
-//! 4. **Channels and `select!`**, the part usually named first and the only part
-//!    that is mechanical: `tokio::sync::mpsc` in `session.rs`, `conn.rs` and
-//!    `toolbox.rs`, and `tokio::select!` in `session.rs::run_loop`. These map
-//!    onto `futures::channel::mpsc` and `futures::future::select` plus `Either`.
-//!    Note the semantics are not identical: a `futures` bounded channel reserves
-//!    a slot per sender, so `drop_conn_on_buffer_full` would fire at a different
-//!    depth.
+//! 4. **Channels**, the part usually named first. `tokio::sync::mpsc` remains in
+//!    `session.rs`, `conn.rs` and `toolbox.rs`. The `select!`s are already
+//!    `futures::future::select` plus `Either` (`session.rs::run_loop`,
+//!    `server.rs::listen_impl`, `signal.rs`). A `futures` bounded channel is not
+//!    a drop-in for the queues: it reserves a slot per sender, so
+//!    `drop_conn_on_buffer_full` would fire at a different depth.
 //!
 //! `TransportStream`/`RawStream` over `tokio::io` is *not* on this list. See the
 //! comment on `RawStream` in `traits.rs`: its only consumers are the hyper
