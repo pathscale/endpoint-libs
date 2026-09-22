@@ -59,7 +59,7 @@ table was given a path dependency by this port.
 | Repo | Branch | HEAD | Version | Tree |
 | --- | --- | --- | --- | --- |
 | `~/code/endpoint-libs` | `fix/ws-core-lane1` | `1393176` | 3.2.0 | clean, apart from this file when it is the edit in progress |
-| `~/code/nagoya` | `feat/resolve` | `ee8fca0` | 0.1.10 | see the P0.2 row: the signal waiter is being corrected |
+| `~/code/nagoya` | `feat/resolve` | `b5e12aa` | 0.1.10 | clean. Four commits past `ee8fca0`; see the P0.2 row |
 | `~/code/nago-wss` | `feat/nagoya-resolve` | `6e52935` | 0.2.0 | clean |
 | `~/code/nago-rustls` | `master` | `91a55f0` | 0.1.1 | clean |
 
@@ -69,7 +69,9 @@ rather than copying this cell: the commit that adds a roll sits on top of the
 row it describes, so this cell is one commit behind as soon as it is written.
 
 `feat/resolve` is `fix/taskset-push-order` at `a0dd8ad`, plus name resolution
-at `e0ff612`, plus the signal waiter at `ee8fca0`. `feat/nagoya-resolve` is
+at `e0ff612`, plus the signal waiter at `ee8fca0`, plus the four corrections
+this roll made to those two: `5010e33` the waiter, `a191d8b` the `errno`
+spelling, `9cdad95` and `b5e12aa` the resolver. `feat/nagoya-resolve` is
 `bench/nagoya-write-path` at `3d069ed` plus the caller commit. Neither new
 branch may be merged while nago-wss path-depends on nagoya or nago-rustls.
 
@@ -151,13 +153,16 @@ from 05.
   only. `resolve` returns every address, with the caller's port stamped on,
   and the byte order is correct on both families. An empty `connect_any`
   fails with `ECONNREFUSED`. nago-wss maps `Nul` to the URL error and every
-  other resolve failure to `EAI_NONAME`. Two known defects, neither fixed:
-  `resolve` calls `getaddrinfo`, which blocks, and nagoya has no
-  `spawn_blocking`, so calling it from a task stalls every other socket on
-  that reactor for the whole DNS timeout, and nothing in the docs says so;
-  and `connect_any` returns the last error rather than the most informative
-  one, so a dual-stack host with no v6 route reports `ENETUNREACH` instead of
-  the real `ECONNREFUSED`.
+  other resolve failure to `EAI_NONAME`. Two defects were found and both are
+  fixed on `feat/resolve`. `resolve` calls `getaddrinfo`, which blocks, and
+  nagoya has no `spawn_blocking`, so calling it from a task stalls every
+  other socket on that reactor for the whole DNS timeout; that is now said
+  plainly in its documentation (`9cdad95`) rather than left to be discovered,
+  and **the endpoint-libs caller has to resolve before entering the reactor**.
+  `connect_any` returned the last error, so a dual-stack host with no v6
+  route reported `ENETUNREACH` over the real `ECONNREFUSED`; it now reports
+  the first error that is about the service rather than this machine's
+  routing (`b5e12aa`).
 - `Addr` is `V4` / `V6` / `Path`. A Unix peer has no arm on
   `PeerIdentity::Network`.
 - `nagoya::reactor::TcpListener`, `Reactor::local`, `block_on_with` and
@@ -287,10 +292,25 @@ The "keep tokio" sentence in P0.5 is withdrawn by the "End state" row.
   or dropping a `Signal` unblocks a signal the program had deliberately
   blocked on that thread.
 
-  These are being fixed on `feat/resolve`. **Until that is committed and the
-  macOS tests rerun, treat P0.2 as open and do not cite `ee8fca0` as its
-  settlement.** The decision file's P0.2 row needs a correction appended; do
-  not edit the existing row, the file is append only.
+  All five are fixed on `feat/resolve` at `5010e33`, with the `errno` cell's
+  three BSD spellings gated in `a191d8b` because `error::last` had the same
+  defect. The BSD path no longer masks anything: the pipe's write end is
+  published, then one `sigaction` ends the exposure, because only `sigaction`
+  displaces the default action and it does so for every thread at once. Linux
+  blocks on every path through `arm`, including a cache hit. `registration`
+  is declared before `claim`. The handler saves and restores `errno`. A
+  signal the program had already blocked stays blocked.
+
+  **P0.2 is still not settled, for two reasons that are not defects.** The
+  Linux `signalfd` path typechecks and has never been executed, and the one
+  Linux-specific defect above was found by reading rather than by running.
+  And none of this is published: crates.io nagoya `0.1.9` has no `Signal` at
+  all. Item 12 waits on a published nagoya, not on this branch. Do not cite
+  `ee8fca0` as the settlement; cite `5010e33` and say it is unpublished and
+  unrun on Linux.
+
+  The decision file carries this as an appended correction. Do not edit the
+  original P0.2 row; that file is append only.
 
 ### Lane 3
 
@@ -415,11 +435,21 @@ identifier before editing it.
   `Default` for `Shutdown`, pre-existing from `5d6ae8e`.
 - The arm-priority regression test was confirmed to fail on the previous
   nesting before the fix was kept.
+- In `~/code/nagoya`, `cargo test --offline --features reactor --lib`: 43
+  passed, 0 failed, including all seven waiter tests and the new resolver
+  one. `cargo check --target x86_64-unknown-linux-gnu --features reactor
+  --lib` typechecks. `cargo clippy` on both targets: one warning, a
+  `double_must_use` on `Signal::recv`, pre-existing from `ee8fca0`.
 
 ### Not run, this roll
 
 - `./scripts/check-chain.sh`. It has not been run anywhere in this series.
-- The Linux `signalfd` path. It typechecked on `ee8fca0`. It has never been
-  executed, and the P0.2 defects above include a Linux-only one.
-- A version bump, a publish, and any push.
+- The Linux `signalfd` path. It typechecks. It has never been executed, on
+  `ee8fca0` or on `5010e33`, and one of the five P0.2 defects was Linux only
+  and was found by reading. Running it is the remaining work on P0.2.
+- The multi-thread and already-blocked cases the P0.2 fixes are about. The
+  waiter's tests cover delivery, `EBUSY`, cross-thread delivery and drop;
+  none of them would have failed on the defects, and none were added.
+- A version bump, a publish, and any push. Nothing in `~/code/nagoya` is
+  pushed either.
 - Any edit under `~/code/nago-wss` or `~/code/nago-rustls`.
