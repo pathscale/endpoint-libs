@@ -197,3 +197,26 @@ P0.2 is settled when a nagoya waiter observes `SIGINT`, `SIGTERM` and
 `SIGHUP` without tokio **and** without a window in which a thread can take
 the default action, on both platforms. The Linux path has still never been
 executed. Item 12 in the queue waits on that, and then on a publish.
+
+### The five, fixed
+
+Appended the same day. All five landed on nagoya `feat/resolve` at
+`5010e33`, plus `a191d8b` for the `errno` cell, which `error::last` was
+spelling wrongly for three of the BSDs in the same way the handler was.
+
+The BSD path masks nothing now. The pipe's write end is published and then a
+single `sigaction` ends the exposure, because only `sigaction` displaces the
+default action and it displaces it for every thread at once; the mask never
+did, and taking it first only widened the window it appeared to close. Linux
+blocks on every path through `arm`, cache hit included. `registration` is
+declared before `claim` so the descriptor leaves the poller first. The
+handler saves and restores `errno`. A signal the program had already blocked
+on that thread is left blocked, and the `SIG_IGN` flush in `disarm` is
+skipped in that case.
+
+This does not settle P0.2. crates.io nagoya `0.1.9` has no `Signal`, so item
+12 still waits on a publish, and the Linux path still has never been
+executed -- it typechecks, and the one Linux-specific defect of the five was
+found by reading it rather than by running it. The waiter's seven macOS tests
+pass, but none of them would have failed on any of the five, because none
+exercises a second thread's disposition or a pre-blocked signal.
