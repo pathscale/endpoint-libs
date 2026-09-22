@@ -24,8 +24,13 @@ mod server;
 mod session;
 #[cfg(feature = "ws-core")]
 mod subs;
-#[cfg(feature = "ws")]
-mod tls;
+// `tls` is gone. Server-side TLS is terminated at the edge — fly.io's
+// `[http_service]` with `force_https`, speaking plain to the internal port — so
+// this crate serves `ws://` only. It was deleted rather than ported because TLS
+// is what pins this path to `std`, and the fleet's internal services want to
+// stay no_std-friendly. `TlsListener`, the certificate loading, the ALPN list and
+// the `ws-tls12` version gate went with it; a client still gets `wss://` through
+// `ws-client`, which is a separate feature and a separate graph.
 #[cfg(feature = "ws-core")]
 pub mod toolbox;
 mod traits;
@@ -33,7 +38,7 @@ pub mod transport;
 
 #[cfg(feature = "ws-core")]
 mod client;
-#[cfg(any(feature = "ws", feature = "ws-client"))]
+#[cfg(feature = "ws")]
 pub(crate) mod tungstenite;
 
 #[cfg(feature = "ws-core")]
@@ -53,8 +58,6 @@ pub use server::*;
 pub use session::*;
 #[cfg(feature = "ws-core")]
 pub use subs::*;
-#[cfg(feature = "ws")]
-pub use tls::*;
 pub use traits::*;
 pub use transport::*;
 

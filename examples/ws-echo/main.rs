@@ -196,8 +196,7 @@ impl AuthController for AllowAllAuthController {
 
 // --- Entry point ---
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let _log = setup_logging(LoggingConfig {
         level: LogLevel::Debug,
         otel_config: OtelConfig::default(),
@@ -213,38 +212,22 @@ async fn main() -> Result<()> {
 
     tracing::info!("Logging initialised at DEBUG level");
 
-    // ── Self-signed TLS certificate (local development) ────────────────────
-    //
-    // Generates a self-signed cert at runtime so the server can serve TLS
-    // without any pre-provisioning. The cert and key are written to a temp
-    // directory that lives for the duration of the process.
-
-    let cert_dir = tempfile::tempdir()?;
-    let cert_path = cert_dir.path().join("cert.pem");
-    let key_path = cert_dir.path().join("key.pem");
-
-    let key_pair = rcgen::KeyPair::generate()?;
-    let params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])?;
-    let cert = params.self_signed(&key_pair)?;
-
-    std::fs::write(&cert_path, cert.pem())?;
-    std::fs::write(&key_path, key_pair.serialize_pem())?;
-
-    tracing::info!("Self-signed TLS certificate generated");
-
+    // This server speaks plain `ws://`. It used to generate a self-signed
+    // certificate here and serve `wss://` itself; it does not terminate TLS
+    // any more, because terminating it is what drags `std`-bound crypto into
+    // a crate the fleet wants to keep no_std-friendly. In deployment the edge
+    // proxy terminates and forwards plain to this port, and locally there is
+    // nothing to terminate.
     let config = WsServerConfig {
         name: "ws-echo".to_string(),
         address: "0.0.0.0:8443".to_string(),
-        insecure: false,
-        pub_certs: Some(vec![cert_path]),
-        priv_key: Some(key_path),
         ..Default::default()
     };
 
     tracing::info!(
         name    = %config.name,
         address = %config.address,
-        "Starting WebSocket server (TLS)"
+        "Starting WebSocket server"
     );
 
     let mut server = WebsocketServer::new(config);
@@ -253,5 +236,5 @@ async fn main() -> Result<()> {
     server.add_handler(MethodReceiveUserInfo);
 
     tracing::info!("Registered handlers: Echo (1), ReceiveUserInfo (211)");
-    server.listen().await
+    server.listen()
 }

@@ -21,12 +21,8 @@ use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
 #[cfg(feature = "ws")]
-use crate::libs::ws::HyperTungsteniteUpgrader;
-#[cfg(feature = "ws")]
-use crate::libs::ws::TlsListener;
+use crate::libs::ws::NagoWssUpgrader;
 use crate::libs::ws::mcp::{McpServerInfo, McpState};
-#[cfg(feature = "ws")]
-use crate::libs::ws::tungstenite::upgrader::create_ws_stream;
 use crate::libs::ws::{
     AfterRequest, BeforeRequest, BoxedStream, ConnectionListener, Hooks, MessageStream, OnConnect,
     OnDisconnect, SessionListener, TcpListener, WsClientSession, WsConnection, WsRequest,
@@ -53,12 +49,10 @@ pub struct WebsocketServer {
 
 impl WebsocketServer {
     pub fn new(config: WsServerConfig) -> Self {
-        if config.insecure {
-            tracing::warn!(
-                ws_server = true,
-                "WS Server has been configured with insecure=true, is this desired?"
-            )
-        }
+        // The `insecure = true` warning is gone with the TLS it was about. It
+        // would now fire on the only supported configuration and stay silent on
+        // the one that is actually wrong, which is a cert configured against a
+        // server that cannot serve one; `listen` refuses that outright.
         Self {
             auth_controller: Arc::new(SimpleAuthController),
             handlers: Default::default(),
@@ -161,69 +155,39 @@ impl WebsocketServer {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
         })?;
 
-        // Get upgrade event receiver - H2 yields multiple events, H1 yields one
-        let mut rx = upgrader.upgrade_stream(stream, addr, &self.config).await?;
-
-        use futures::StreamExt;
-        use futures::future::FutureExt;
-        use futures::stream::FuturesUnordered;
-
-        // Poll sessions in place, the same one-thread model `serve_with` and
-        // `listen_impl` use. The hyper upgrader still `spawn_local`s onto
-        // TokioExecutor, which no longer has a LocalSet under it here; that call
-        // is the last tokio-shaped thing on this path and porting it is what
-        // makes the `ws` feature usable again.
-        let mut sessions = FuturesUnordered::new();
-        loop {
-            let event = if sessions.is_empty() {
-                match rx.next().await {
-                    Some(event) => event,
-                    None => break,
-                }
-            } else {
-                let recv = rx.next();
-                futures::pin_mut!(recv);
-                match futures::future::select(recv, sessions.next()).await {
-                    futures::future::Either::Left((Some(event), _)) => event,
-                    futures::future::Either::Left((None, _)) => {
-                        while sessions.next().await.is_some() {}
-                        break;
-                    }
-                    futures::future::Either::Right(_) => continue,
-                }
-            };
-
-            let this = Arc::clone(&self);
-            let states = Arc::clone(&states);
-            let addr_clone = addr;
-            sessions.push(
-                async move {
-                    let ws_stream = match create_ws_stream(event.on_upgrade).await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!(ws_server = true, ?addr_clone, "on_upgrade failed: {e}");
-                            return;
-                        }
-                    };
-
-                    debug!(
-                        ws_server = true,
-                        ?addr_clone,
-                        protocol = %event.protocol,
-                        "WsServer: upgrade succeeded, protocol received"
-                    );
-
-                    this.post_upgrade_connection(addr_clone, states, ws_stream, event.protocol)
-                        .await;
-                }
-                .boxed_local(),
+        // One TCP connection, at most one WebSocket. The loop, the
+        // `FuturesUnordered` of sessions and the `Receiver` they drained all
+        // existed for the HTTP/2 arm, where one connection multiplexed a CONNECT
+        // per stream. With no server TLS there is no ALPN, with no ALPN there is
+        // no h2, and HTTP/1.1 upgrades exactly once and then the socket is
+        // WebSocket frames to the end. So the upgrader hands back the connection
+        // directly and this is a straight line.
+        let Some(event) = upgrader.upgrade_stream(stream, addr, &self.config).await? else {
+            // The request was answered in HTTP — a preflight, a HEAD, a health
+            // check, or a refusal. Not an error and not a session: the response
+            // is already on the wire and the socket is finished.
+            debug!(
+                ws_server = true,
+                ?addr,
+                "request answered in HTTP without upgrading"
             );
-        }
+            return Ok(());
+        };
 
         debug!(
             ws_server = true,
             ?addr,
-            "Connection handler loop exited (TCP connection closed)"
+            protocol = %event.protocol,
+            "WsServer: upgrade succeeded, protocol received"
+        );
+
+        self.post_upgrade_connection(addr, states, event.stream, event.protocol)
+            .await;
+
+        debug!(
+            ws_server = true,
+            ?addr,
+            "Connection handler finished (TCP connection closed)"
         );
         Ok(())
     }
@@ -321,7 +285,7 @@ impl WebsocketServer {
             .await;
     }
 
-    /// The WebSocket-specific wrapper: everything TCP/TLS/upgrade-shaped stops here,
+    /// The WebSocket-specific wrapper: everything TCP and upgrade-shaped stops here,
     /// and the generic path continues in [`Self::serve_connection`].
     #[cfg(feature = "ws")]
     async fn post_upgrade_connection(
@@ -467,6 +431,7 @@ impl WebsocketServer {
     /// operator's intent, and the server says so when it cannot honour it.
     pub fn listen(self) -> Result<()> {
         self.validate_protocol_mode()?;
+        self.refuse_tls_config()?;
         debug!(ws_server = true, "Listening on {}", self.config.address);
 
         // Resolved here, while this is still an ordinary blocking function and no
@@ -485,34 +450,33 @@ impl WebsocketServer {
         let handle = reactor.handle();
         let listener = TcpListener::bind_any(&addrs, &handle)?;
 
-        let insecure = self.config.insecure;
+        // One path. `listen_tls`, the `TlsListener` it built and the
+        // `config.insecure` branch that chose between them are gone: this server
+        // serves plain `ws://` and nothing else, with TLS terminated at the edge.
         block_on_with(&reactor, async move {
-            if insecure {
-                self.listen_impl(Arc::new(listener), &handle).await
-            } else {
-                self.listen_tls(listener, &handle).await
-            }
+            self.listen_impl(Arc::new(listener), &handle).await
         })
     }
 
-    #[cfg(feature = "ws")]
-    async fn listen_tls(self, listener: TcpListener, handle: &Handle) -> Result<()> {
-        if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
-            let listener = TlsListener::bind(
-                listener,
-                self.config.pub_certs.clone().unwrap(),
-                self.config.priv_key.clone().unwrap(),
-            )
-            .await?;
-            self.listen_impl(Arc::new(listener), handle).await
-        } else {
-            bail!("pub_certs and priv_key should be set")
+    /// Refuse to start when the configuration expects TLS this server cannot serve.
+    ///
+    /// A certificate in the config used to mean "serve `wss://` here". It means
+    /// nothing now, and the failure mode of ignoring it is the bad one: an
+    /// operator who configured a key gets plaintext on the wire and no
+    /// indication of it. So it is a startup error, which is loud, rather than a
+    /// warning in a log nobody reads. Removing the fields outright would be the
+    /// end state; they are deprecated instead so a consumer gets a compiler
+    /// warning naming the fix before their build breaks.
+    #[allow(deprecated)]
+    fn refuse_tls_config(&self) -> Result<()> {
+        if self.config.pub_certs.is_some() || self.config.priv_key.is_some() {
+            bail!(
+                "pub_certs/priv_key are set, but this server no longer serves TLS. \
+                 Terminate TLS at the edge (fly.io `[http_service]` with \
+                 force_https = true, plain to internal_port) and remove both fields."
+            );
         }
-    }
-
-    #[cfg(not(feature = "ws"))]
-    async fn listen_tls(self, _listener: TcpListener, _handle: &Handle) -> Result<()> {
-        bail!("TLS requires the `ws` feature, which provides the TLS-capable backend")
+        Ok(())
     }
 
     /// Accept, handshake and serve, all on the reactor `handle` names.
@@ -764,10 +728,28 @@ pub struct WsServerConfig {
     #[serde(default)]
     pub name: String,
     pub address: String,
+    /// Certificate chain for the TLS this server no longer serves.
+    ///
+    /// Kept only so a consumer's config struct still compiles; setting it is a
+    /// startup error, see [`WebsocketServer::listen`]. Deserialising is
+    /// unaffected either way — serde ignores fields it does not know — so a
+    /// deployment's config file can carry the key until someone removes it.
+    #[deprecated(note = "TLS is terminated at the edge; this server serves plain ws:// only")]
     #[serde(default)]
     pub pub_certs: Option<Vec<PathBuf>>,
+    /// Private key for the TLS this server no longer serves. See [`Self::pub_certs`].
+    #[deprecated(note = "TLS is terminated at the edge; this server serves plain ws:// only")]
     #[serde(default)]
     pub priv_key: Option<PathBuf>,
+    /// Formerly "bind without TLS". Ignored: there is no other mode to select.
+    ///
+    /// It is neither read nor warned about now. A `false` here used to mean
+    /// "serve `wss://`", and honouring that would mean refusing to start every
+    /// server whose config predates this change — including every one that never
+    /// set the field, since `false` is its default.
+    #[deprecated(
+        note = "ignored; this server serves plain ws:// only and TLS terminates at the edge"
+    )]
     #[serde(default)]
     pub insecure: bool,
     #[serde(default)]
@@ -791,6 +773,9 @@ pub struct WsServerConfig {
 }
 
 impl Default for WsServerConfig {
+    // The three TLS fields are deprecated and still have to be initialised here;
+    // the allow is about naming them, not about using them for anything.
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             name: Default::default(),
@@ -821,7 +806,7 @@ impl WsServerConfig {
 fn default_upgrader() -> Option<Arc<dyn WsUpgrader>> {
     #[cfg(feature = "ws")]
     {
-        Some(Arc::new(HyperTungsteniteUpgrader))
+        Some(Arc::new(NagoWssUpgrader))
     }
     #[cfg(not(feature = "ws"))]
     {
