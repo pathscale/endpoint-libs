@@ -360,7 +360,7 @@ Narrowing options on `ws`. `ws-http1` adds HTTP/1.1 upgrade support alongside HT
 ### `full`
 
 `types` + `ws` + `signal` + `scheduler` + `log_reader` +
-`error_aggregation` + `log_throttling` + `ws-http1` + `ws-tls12`. Convenience only, and it
+`error_aggregation` + `log_throttling` + `otel` + `ws-http1` + `ws-tls12`. Convenience only, and it
 does **not** include `ws-client` or the `framed-transport` features — prefer naming what you use.
 
 ### `signal`
@@ -387,6 +387,34 @@ A `tracing` layer that captures recent error-level log events into an in-memory 
 > **Do not use.** This feature is currently non-functional and is excluded from CI. It is present for future development only.
 
 Rate-limiting layer for `tracing` events to suppress repeated log spam.
+
+### `otel`
+
+OTLP export of traces and logs out of `setup_logging`. Off by default. Turning it on
+adds `OtelGuards` and the `setup.otel_guards` field, and makes `OtelConfig` actually do
+something. See [OpenTelemetry (OTel) Integration](#opentelemetry-otel-integration).
+
+**What it costs.** The OTLP exporter stack is `opentelemetry`, `opentelemetry_sdk`
+(`rt-tokio`), `opentelemetry-otlp`, `opentelemetry-semantic-conventions`,
+`tracing-opentelemetry` and `opentelemetry-appender-tracing`. Through
+`opentelemetry-otlp`'s default features that also brings `tonic`, `reqwest` and
+`hyper-rustls`, and every one of those depends on `tokio` unconditionally. Enabling
+`otel` therefore puts a tokio runtime in your graph no matter which transport you use.
+
+This is why it is a feature rather than part of `types`. While the exporters lived in
+`types`, the default feature set, every consumer compiled tokio, `tonic`, `reqwest` and
+`hyper-rustls`, including one that took only `framed-transport` plus `nagoya-transport`
+and touched no HTTP at all.
+
+Moving them out is necessary but not sufficient for a tokio-free graph: `ws-core` names
+`dep:tokio` on its own account, because its session, connection and toolbox code is built
+on `tokio::sync::mpsc`, `tokio::select!` and `tokio::task_local!`, and `TransportStream`
+is defined over `tokio::io`. A consumer that wants no tokio has to leave `ws-core` out
+too.
+
+`OtelConfig` itself stays in `types` and compiles without this feature, so a
+`LoggingConfig` literal does not have to be `cfg`-ed. Setting `enabled: true` without
+the feature forwards nothing and logs a warning at setup.
 
 ## Transports (2.0)
 
@@ -476,24 +504,31 @@ The logging framework supports forwarding all `tracing` spans and log events to 
 
 ### Enabling OTel
 
-To enable OTLP forwarding, configure `OtelConfig` in your `LoggingConfig`:
+Build with the `otel` feature. It is **off by default**; see
+[`otel`](#otel) for what it pulls in:
+
+```toml
+endpoint-libs = { version = "3", features = ["otel"] }
+```
+
+Then configure `OtelConfig` in your `LoggingConfig`:
 
 ```rust
 use std::collections::HashMap;
-use endpoint_libs::libs::log::{LoggingConfig, OtelConfig, OtelProtocol};
+use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig};
 
 let mut headers = HashMap::new();
 headers.insert("x-api-key".to_string(), "your-token".to_string());
 
 let config = LoggingConfig {
+    level: LogLevel::Info,
+    file_config: None,
     otel_config: OtelConfig {
         enabled: true,
         service_name: Some("my-service".into()),
         endpoint: Some("http://localhost:4317".into()), // OTLP collector endpoint
-        protocol: OtelProtocol::Grpc,
         headers,
     },
-    ..Default::default()
 };
 
 let setup = setup_logging(config)?;

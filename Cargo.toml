@@ -22,6 +22,7 @@ full = [
     "log_reader",
     "error_aggregation",
     "log_throttling",
+    "otel",
     "ws-http1",
     "ws-tls12",
 ]
@@ -40,14 +41,24 @@ types = [
     "dep:tracing-appender",
     "dep:serde_path_to_error",
     "dep:alloy-primitives",
-    "dep:hyper-rustls",
+]
+otel = [
+    # OTLP export of traces and logs out of the `setup_logging` subscriber.
+    # Off by default: the exporter stack is `opentelemetry-otlp` plus `tonic`,
+    # `reqwest` and `hyper-rustls`, every one of which depends on tokio
+    # unconditionally. Leaving it in `types` meant that every consumer of the
+    # default feature set compiled a tokio runtime it never asked for, which is
+    # what `ws-core` -> `types` was dragging into an otherwise tokio-free graph.
+    #
+    # `OtelConfig` stays in `types` so a config struct literal keeps compiling
+    # without this feature; `OtelGuards` and the exporters do not.
+    "types",
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry-semantic-conventions",
     "dep:tracing-opentelemetry",
     "dep:opentelemetry-appender-tracing",
-    "dep:tonic",
     "dep:tokio",
 ]
 wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
@@ -108,6 +119,12 @@ ws = [
     "dep:hyper-util",
     "dep:http-body-util",
     "dep:webpki-roots",
+    # Pins hyper-rustls to bundled CA roots. It is not named by any code in this
+    # crate: it enters the graph through `reqwest`, and through `instant-acme`
+    # when a consumer runs cert-provider next to this crate. Feature unification
+    # is what makes the pin bite, so it belongs on the feature that pulls the TLS
+    # stack rather than on `types`, which has no TLS in it at all.
+    "dep:hyper-rustls",
     # "dep:",
 ]
 signal = [
@@ -147,7 +164,13 @@ error_aggregation = [
     "dep:lazy_static",
     # "dep:",
 ]
-log_throttling = ["dep:tracing-throttle"]
+log_throttling = [
+    "dep:tracing-throttle",
+    # The metrics reporter in `log.rs` is a `tokio::spawn` loop. `types` used to
+    # supply tokio for the OTel SDK, so this was never missed; it does not any
+    # more.
+    "dep:tokio",
+]
 ws-http1 = ["ws", "hyper/http1"]
 ws-tls12 = ["ws", "rustls/tls12", "tokio-rustls/tls12"]
 
@@ -210,17 +233,25 @@ http-body-util = { version = "0.1", optional = true }
 httpdate = { version = "1.0", optional = true }
 tracing-throttle = { version = "0.4", features = ["async"], optional = true }
 webpki-roots = { version = "1.0.7", optional = true }
-# Force bundled CA roots for hyper-rustls (used by instant-acme inside cert-provider)
+# Force bundled CA roots for hyper-rustls (used by instant-acme inside
+# cert-provider, and by reqwest). Enabled by `ws`, not by `types`.
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["webpki-tokio"], optional = true }
-# OpenTelemetry dependencies (default feature)
+# OpenTelemetry dependencies (behind the non-default `otel` feature)
 opentelemetry = { version = "0.31", features = ["logs"], optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "logs"], optional = true }
+# Default features are still on, so `grpc-tonic` comes along and drags `tonic`,
+# `reqwest` and `hyper-rustls` in even though only `.with_http()` is ever called.
+# That is why this whole block sits behind `otel`. Turning default features off
+# needs an explicit HTTP client feature chosen and compiled, which is its own
+# change.
 opentelemetry-otlp = { version = "0.31", features = ["trace", "logs", "http-proto"], optional = true }
 opentelemetry-semantic-conventions = { version = "0.31", optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 opentelemetry-appender-tracing = { version = "0.31", optional = true }
-# Direct deps for header configuration
-tonic = { version = "0.14", optional = true }
+# `tonic` used to be listed here for gRPC header configuration. The gRPC path and
+# `OtelProtocol` were removed in 2.1.0 ("only using http"), the dependency was
+# not, and it kept a tokio-bearing crate in the default graph. No module in this
+# crate imports it.
 
 [dev-dependencies]
 tempfile = "3.19"
