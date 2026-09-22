@@ -406,11 +406,38 @@ This is why it is a feature rather than part of `types`. While the exporters liv
 `hyper-rustls`, including one that took only `framed-transport` plus `nagoya-transport`
 and touched no HTTP at all.
 
-Moving them out is necessary but not sufficient for a tokio-free graph: `ws-core` names
-`dep:tokio` on its own account, because its session, connection and toolbox code is built
-on `tokio::sync::mpsc`, `tokio::select!` and `tokio::task_local!`, and `TransportStream`
-is defined over `tokio::io`. A consumer that wants no tokio has to leave `ws-core` out
-too.
+Moving them out is necessary but not sufficient for a tokio-free graph. With `otel` off,
+`cargo tree -e normal --no-default-features --features types -i tokio` prints nothing, but
+`--features ws-core,framed-transport,nagoya-transport -i tokio` still prints tokio, pulled
+by `endpoint-libs` itself. `ws-core` names `dep:tokio` on its own account, for four
+reasons, ranked by how hard each is to remove:
+
+1. **The TCP server path.** `ConnectionListener`/`TcpListener` are `tokio::net` and
+   `tokio::io`; `listen_impl`/`run_shard` build a current-thread `tokio::runtime` per
+   shard plus a `LocalSet`, a `tokio::spawn`ed date-cache task and `tokio::time::sleep`.
+   The `futures` crate owns no reactor, so there is no futures-only substitute. This
+   would become a second server over a `nagoya::reactor::TcpListener`.
+2. **Signals.** `ws-core` requires the `signal` feature, which is `tokio::signal::unix`
+   plus a `tokio_util` `CancellationToken`, and `listen_impl` selects on it to shut down.
+   `futures` has no signal support and nagoya 0.1.9 has no signal module.
+3. **`tokio::task_local!`** for `TOOLBOX`. `futures` has no task-local, and `scoped-tls`
+   is not a substitute because its scope does not survive an `.await`.
+4. **Channels and `select!`** in `session.rs`, `conn.rs`, `toolbox.rs` and the server's
+   `message_receiver`. This is the only mechanical part: it maps onto
+   `futures::channel::mpsc` and `futures::future::select`, at the cost of a breaking
+   change to `WsStreamState::message_queue`, `WebsocketStates::insert` and
+   `Toolbox::send_ws_msg`/`send_serialized_ws_msg`, and a behaviour change to
+   `drop_conn_on_buffer_full` (a `futures` bounded channel reserves a slot per sender).
+
+`TransportStream` over `tokio::io` is deliberate and not on that list: its only consumers
+are the hyper upgrader, tokio-tungstenite and tokio-rustls, which are gated on
+`ws`/`ws-client` and tokio-bound anyway.
+
+Doing 3 and 4 alone breaks the public API and does not change `cargo tree` at all, because
+1 and 2 still name tokio. The useful order is a feature split first, putting the TCP/TLS
+upgrade cluster and `signal` behind their own feature so `ws-core` is left offering
+`serve_connection` and `serve_with` over a `SessionListener`. Until that lands, a consumer
+that wants no tokio has to leave `ws-core` out.
 
 `OtelConfig` itself stays in `types` and compiles without this feature, so a
 `LoggingConfig` literal does not have to be `cfg`-ed. Setting `enabled: true` without
