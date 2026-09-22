@@ -151,67 +151,55 @@ ws = [
     # "dep:",
 ]
 signal = [
-    # Feature dependencies
-    # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`.
-    # Delivery is still `tokio::signal::unix`. nagoya 0.1.9 has
-    # `Notify::notify_waiters` and no signal module. The dependency line
-    # below enables nagoya's `reactor` feature, so this feature pulls the
-    # reactor along with `sync`.
+    # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`, and
+    # delivery is `nagoya::reactor::Signal`. The dependency line enables
+    # nagoya's `reactor` feature, so this feature pulls the reactor along with
+    # `sync`, which is what `Signal` registers on. A `Signal` is bound to one
+    # reactor and only fires while that reactor is polled, so `init_signals`
+    # takes the `Handle`.
     "dep:nagoya",
-    # `signal.rs` waits with `futures::future::select`, so this feature does
-    # not name `tokio/macros` or `tokio-util`.
-    "dep:tokio",
-    "tokio/signal",
+    # `signal.rs` waits with `futures::future::select`, so this feature names
+    # no select macro.
     # `signal.rs` logs the signal it caught. `types` happens to pull tracing in,
     # so this was never missed until somebody enabled `signal` on its own.
     "dep:tracing",
-    # "dep:",
 ]
 scheduler = [
-    # Feature dependencies
-    "dep:tokio-cron-scheduler",
-    # `scheduler.rs` calls `tokio::spawn`/`tokio::task::spawn` and
-    # `tokio::time::sleep`.
-    "dep:tokio",
-    "tokio/rt",
-    "tokio/time",
-    # "dep:",
+    # `tokio-cron-scheduler` is gone with the runtime: it was an entire
+    # tokio-native crate and a 500ms tick wheel behind an interface this crate
+    # drives itself. The ticks are `nagoya::sleep` and
+    # `nagoya::runtime::background().spawn`.
+    "dep:nagoya",
 ]
 log_reader = [
-    # Feature dependencies
     "dep:tempfile",
     "dep:regex",
     "dep:rev_lines",
-    # `log_reader.rs` reads the file on `tokio::task::spawn_blocking`.
-    "dep:tokio",
-    "tokio/rt",
+    # The read is blocking and nagoya has no `spawn_blocking`, so it goes to a
+    # `std::thread` and comes back over a `futures` oneshot. nagoya is named
+    # for `block_on` in the tests.
+    "dep:nagoya",
     "dep:lazy_static",
     # `log_reader.rs` parses a tracing level and an RFC 3339 timestamp out of
     # each line, so it names both crates directly. Same reason as `signal`:
     # `types` supplied them in every set anyone built.
     "dep:tracing",
     "dep:chrono",
-    # "dep:",
 ]
 error_aggregation = [
-    # Feature dependencies
-    # `error_aggregation.rs` holds a `tokio::sync::RwLock` and an mpsc pair, and
-    # keeps the `tokio::spawn`ed aggregation task's `JoinHandle`.
-    "dep:tokio",
-    "tokio/rt",
-    "tokio/sync",
+    # `nagoya::sync::RwLock` for the storage, a `futures` unbounded channel for
+    # the entries, and `nagoya::runtime::background()` for the aggregation
+    # task. The channel is `futures` rather than `ws::outbound` because this
+    # one is unbounded and that one is a bounded single-consumer queue.
+    "dep:nagoya",
     "dep:regex",
     "dep:lazy_static",
-    # "dep:",
 ]
 log_throttling = [
     "dep:tracing-throttle",
-    # The metrics reporter in `log.rs` is a `tokio::spawn` loop. `types` used to
-    # supply tokio for the OTel SDK, so this was never missed; it does not any
-    # more. The loop is `tokio::spawn` plus `tokio::time::sleep`.
-    "dep:tokio",
-    "tokio/rt",
-    "tokio/time",
+    # The metrics reporter in `log.rs` is a spawned loop:
+    # `nagoya::runtime::background().spawn` plus `nagoya::sleep`.
+    "dep:nagoya",
 ]
 ws-http1 = ["ws", "hyper/http1"]
 ws-tls12 = ["ws", "rustls/tls12", "tokio-rustls/tls12"]
@@ -265,10 +253,15 @@ tokio = { version = "1.39", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 # The I/O driver is behind Nagoya's own non-default `reactor` feature; without it
 # `nagoya::reactor` does not exist and the error reads like a missing module.
-# 0.1.9 is the published release that already speaks AF_UNIX and carries `TaskSet`,
-# so this resolves from the registry with no path dependency and no sibling checkout.
-nagoya = { version = "0.1.9", default-features = false, features = ["reactor"], optional = true }
-tokio-cron-scheduler = { version = "0.11", optional = true }
+#
+# PATH, NOT A VERSION, AND THIS MUST NOT REACH master. Publishing rejects a path
+# dependency, and a push to master that changes this file runs `cargo publish`,
+# so merging this as it stands breaks the release rather than failing somewhere
+# harmless. It is here because the tokio removal needs `reactor::Signal`,
+# `reactor::resolve` and `reactor::connect_any`, and crates.io 0.1.9 has none of
+# the three: they are on the sibling at 0.1.10. The pin goes back to a version
+# once that is published, and the port cannot merge until it is.
+nagoya = { path = "../nagoya", default-features = false, features = ["reactor"], optional = true }
 # House fork of parking_lot's Mutex and RwLock (`~/code/parking_lot_lite_hack`,
 # published as `parking_lot_lite_hack`). `package` keeps `use parking_lot::...`.
 # Registry, not a sibling path: this branch is the one that would carry a
@@ -291,7 +284,13 @@ async-trait = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["http2", "server", "client"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"], optional = true }
 http-body-util = { version = "0.1", optional = true }
-tracing-throttle = { version = "0.4", features = ["async"], optional = true }
+# `async` is a default feature and it is the crate's only tokio edge
+# (`async = ["tokio"]`). The one thing named here is `TracingRateLimitLayer`,
+# which the synchronous half provides, so the default set is off and
+# `human-readable` is asked for by name.
+tracing-throttle = { version = "0.4", default-features = false, features = [
+    "human-readable",
+], optional = true }
 webpki-roots = { version = "1.0.7", optional = true }
 # Force bundled CA roots for hyper-rustls (used by instant-acme inside
 # cert-provider, and by reqwest). Enabled by `ws`, not by `types`.

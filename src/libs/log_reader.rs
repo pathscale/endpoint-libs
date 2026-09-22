@@ -63,8 +63,16 @@ pub async fn get_log_entries(
     // Specify the path to your log file
     let file = std::fs::File::open(path.as_ref())?;
     let lines = RevLines::new(file);
-    // get all entries first
-    let mut entries = tokio::task::spawn_blocking(move || {
+    // `RevLines` seeks and reads synchronously, so this walk must not happen on
+    // an async worker. nagoya has no `spawn_blocking`, so the work goes to a
+    // dedicated `std::thread` and the result comes back over a oneshot the
+    // caller awaits. That keeps `get_log_entries` an `async fn` returning the
+    // same type, which the alternative - making it synchronous - would not.
+    // The cost against `spawn_blocking` is a thread per call instead of a
+    // pooled one; this is a UI-facing "show me the last N log lines" query, not
+    // a hot path, so the thread is cheaper than the API break.
+    let (result_tx, result_rx) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
         let mut entries = vec![];
         for line in lines {
             if entries.len() >= limit {
@@ -98,9 +106,13 @@ pub async fn get_log_entries(
                 }),
             }
         }
-        entries
-    })
-    .await?;
+        // The receiver is gone only if the caller dropped the future; nothing to
+        // report in that case.
+        let _ = result_tx.send(entries);
+    });
+    let mut entries = result_rx
+        .await
+        .map_err(|_| eyre::eyre!("log reader thread died before sending its result"))?;
     if entries.is_empty() {
         entries.push(LogEntry {
             datetime: 0,
@@ -140,8 +152,11 @@ mod tests {
         assert_eq!(entry.message, "terminated diff 0_table_limit_1 initially");
     }
 
-    #[tokio::test]
-    async fn test_get_log_entries() {
+    /// `get_log_entries` is still an `async fn`, so this still needs something to
+    /// drive it. `nagoya::block_on` drives one future on this thread and starts
+    /// no pool, which is all the test wants.
+    #[test]
+    fn test_get_log_entries() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -157,7 +172,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = get_log_entries(temp_file.path(), 10).await.unwrap();
+        let entries = nagoya::block_on(get_log_entries(temp_file.path(), 10)).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].level, "ERROR");
         assert_eq!(entries[1].level, "INFO");

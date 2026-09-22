@@ -1,8 +1,8 @@
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use nagoya::reactor::{Handle, Signal, SignalKind};
 use nagoya::sync::Notify;
-use tokio::signal::unix::{Signal, SignalKind, signal};
 
 /// A flag every waiter observes, including one that arrives after the cancel.
 ///
@@ -70,38 +70,68 @@ impl Shutdown {
     }
 }
 
-/// Process-wide shutdown flag. Delivery of the unix signals is still tokio;
-/// this is only the flag those waits set.
+/// Process-wide shutdown flag. Delivery of the unix signals is
+/// [`nagoya::reactor::Signal`]; this is only the flag those waits set.
 pub static CANCELLATION_TOKEN: Shutdown = Shutdown::new();
 
-/// initialize and return the signals (sigterm, sigint)
-pub fn init_signals() -> eyre::Result<(Signal, Signal)> {
-    let sigterm = signal(SignalKind::terminate())?;
-    let sigint = signal(SignalKind::interrupt())?;
+/// Initialize and return the signals (sigterm, sigint), bound to `handle`.
+///
+/// **Breaking change.** This used to take nothing and return
+/// `tokio::signal::unix::Signal`. tokio's `signal()` reached a process-wide
+/// driver that the runtime was already turning, so the caller had nothing to
+/// say; a nagoya [`Signal`] is registered on one reactor and its
+/// [`recv`](Signal::recv) completes only while *that* reactor is being polled.
+/// The reactor is therefore a parameter rather than an assumption, and the
+/// caller has to guarantee two things for the wait to ever finish: that
+/// `handle` names the reactor the returned values are awaited on, and that
+/// something keeps polling it. A signal delivered while nobody polls that
+/// reactor is not lost, because it stays readable on the descriptor, but
+/// nothing observes it until the polling resumes.
+///
+/// There is one waiter per signal number for the whole process. A second call
+/// made before the first pair is dropped fails with `EBUSY`, which is also why
+/// [`signal_received_silent`] and this cannot both be live at once.
+pub fn init_signals(handle: &Handle) -> eyre::Result<(Signal, Signal)> {
+    let sigterm = Signal::new(SignalKind::terminate(), handle)?;
+    let sigint = Signal::new(SignalKind::interrupt(), handle)?;
     Ok((sigterm, sigint))
 }
 
-// async function to wait for the signals
+/// Wait for either signal and log the one that arrived.
+///
+/// The signature is unchanged apart from [`Signal`] now being nagoya's, so the
+/// reactor requirement rides along with the values [`init_signals`] handed
+/// back rather than being restated here.
 pub async fn wait_for_signals(sigterm: &mut Signal, sigint: &mut Signal) {
     // SIGTERM is polled first. Both arms set the same flag; the name in the log
     // is the only difference, and a pending SIGTERM is the one we report.
     let term = sigterm.recv();
     let int = sigint.recv();
     futures::pin_mut!(term, int);
+    // `recv` now resolves to a `Result`, and the error is discarded on purpose:
+    // a descriptor that has failed will not deliver a signal either, so the
+    // only honest answer left is to shut down, which is what both arms do.
     match futures::future::select(term, int).await {
         futures::future::Either::Left(_) => inform_terminate("SIGTERM"),
         futures::future::Either::Right(_) => inform_terminate("SIGINT"),
     }
 }
 
-// async function to wait for the signals
-pub async fn signal_received_silent() {
-    let mut sigterm = signal(SignalKind::terminate()).expect("");
-    let mut sigint = signal(SignalKind::interrupt()).expect("");
+/// Wait for either signal without logging or setting the flag.
+///
+/// **Breaking change**, for the two reasons [`init_signals`] gives: it needs a
+/// `handle` for the same reactor it is awaited on, and creating the waiters can
+/// now fail, so the failure is returned instead of being swallowed by an
+/// `expect("")`. `EBUSY` here is not hypothetical: it is what this returns
+/// whenever [`init_signals`] already holds SIGTERM and SIGINT, which in this
+/// crate is the ordinary case.
+pub async fn signal_received_silent(handle: &Handle) -> eyre::Result<()> {
+    let (mut sigterm, mut sigint) = init_signals(handle)?;
     let term = sigterm.recv();
     let int = sigint.recv();
     futures::pin_mut!(term, int);
     let _ = futures::future::select(term, int).await;
+    Ok(())
 }
 
 /// print external signal

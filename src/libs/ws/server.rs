@@ -1,8 +1,9 @@
 use super::WsMessage as Message;
 #[cfg(feature = "ws")]
 use eyre::eyre;
-use eyre::{ContextCompat, Result, bail};
+use eyre::{ContextCompat, Result, WrapErr, bail};
 use itertools::Itertools;
+use nagoya::reactor::{Handle, Reactor, block_on_with, resolve};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -10,8 +11,6 @@ use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::task::LocalSet;
 use tracing::*;
 
 // Used by serve_connection, which is transport-agnostic (ws-core), so these must
@@ -169,9 +168,11 @@ impl WebsocketServer {
         use futures::future::FutureExt;
         use futures::stream::FuturesUnordered;
 
-        // Poll sessions in place, the same one-thread model `serve_with` uses.
-        // The hyper upgrader still `spawn_local`s (TokioExecutor); that is why
-        // `run_shard` keeps a LocalSet. nago-wss is the replacement, not this loop.
+        // Poll sessions in place, the same one-thread model `serve_with` and
+        // `listen_impl` use. The hyper upgrader still `spawn_local`s onto
+        // TokioExecutor, which no longer has a LocalSet under it here; that call
+        // is the last tokio-shaped thing on this path and porting it is what
+        // makes the `ws` feature usable again.
         let mut sessions = FuturesUnordered::new();
         loop {
             let event = if sessions.is_empty() {
@@ -375,15 +376,15 @@ impl WebsocketServer {
 
     /// Accept connections from any [`SessionListener`] and serve each one.
     ///
-    /// The transport-agnostic counterpart to [`Self::listen`]. Unlike `listen`, this
-    /// runs on a single runtime — the shard-per-core model is a property of the TCP
-    /// path and buys nothing for a 1:1 sidecar channel.
+    /// The transport-agnostic counterpart to [`Self::listen`]. Both are one thread
+    /// now, but for different reasons: a 1:1 sidecar channel has nothing to spread,
+    /// and `listen` is one thread because a nagoya reactor owns the sockets it
+    /// accepted (see [`Self::listen`]).
     ///
-    /// Connections are polled in place with `FuturesUnordered`. That is the
-    /// same one-thread model `spawn_local` had, without tying the method to a
-    /// tokio `LocalSet`, so a nagoya reactor can drive it. TCP `listen` now
-    /// polls its connections the same way; it still needs a `LocalSet` for the
-    /// hyper upgrader.
+    /// Connections are polled in place with `FuturesUnordered`. That is the same
+    /// one-thread model `spawn_local` had, without tying the method to a runtime, so
+    /// a nagoya reactor can drive it. This one stays `async`: it takes an already
+    /// built listener and no reactor of its own, so the caller decides what polls it.
     pub async fn serve_with<L>(self, listener: L) -> Result<()>
     where
         L: SessionListener + 'static,
@@ -435,26 +436,68 @@ impl WebsocketServer {
         }
     }
 
-    pub async fn listen(self) -> Result<()> {
+    /// Bind the configured address and serve until SIGTERM or SIGINT.
+    ///
+    /// **Breaking change: this is no longer `async`.** It owns the calling thread
+    /// for the life of the server, because it now owns the reactor that drives it.
+    /// A caller that used to `server.listen().await` inside a runtime calls
+    /// `server.listen()` and gets its thread back when the server stops.
+    ///
+    /// Two things forced that, and both are properties of nagoya rather than of
+    /// style. The name has to be resolved before any reactor is driven —
+    /// [`resolve`] is `getaddrinfo`, a blocking `fn`, and nagoya has no
+    /// `spawn_blocking`, so calling it from inside a running reactor would stall
+    /// every socket on that reactor for the length of a DNS timeout. And a reactor
+    /// has to exist before the listener can be bound, because a descriptor is
+    /// registered with one specific reactor at birth. So the order is: resolve,
+    /// create the reactor, bind, and only then start polling.
+    ///
+    /// # One thread, for now
+    ///
+    /// The shard-per-core fan-out is gone, and this is the honest state of the port
+    /// rather than a simplification. A socket accepted by a nagoya listener is
+    /// registered with that listener's reactor, and only that reactor will ever
+    /// report its readiness, so the connection must be driven on the thread polling
+    /// it. Handing accepted sockets to other threads would put every connection's
+    /// readiness through one poller and add a cross-thread wake per message —
+    /// exactly the cost `Reactor::sharded` exists to avoid. The shape that does work
+    /// is a listening socket per reactor, and nagoya cannot yet produce one: its
+    /// `TcpListener` has no `try_clone` and no `SO_REUSEPORT` bind, and a bound
+    /// listener cannot be adopted by a second reactor. See `docs/` for the tracking
+    /// note. [`shard_count`] still reads the operator's intent, and says so when it
+    /// cannot honour it.
+    pub fn listen(self) -> Result<()> {
         self.validate_protocol_mode()?;
         debug!(ws_server = true, "Listening on {}", self.config.address);
 
-        // Resolve the address and get the socket address
-        let addr = tokio::net::lookup_host(&self.config.address)
-            .await?
-            .next()
-            .with_context(|| format!("Failed to lookup host to bind: {}", self.config.address))?;
+        // Resolved here, while this is still an ordinary blocking function and no
+        // reactor exists to stall. `resolve` returns every address the name has,
+        // not the first; `bind_any` decides what to do with them.
+        let (host, port) = split_host_port(&self.config.address)?;
+        let addrs = resolve(host, port)
+            .wrap_err_with(|| format!("Failed to lookup host to bind: {}", self.config.address))?;
 
-        let listener = TcpListener::bind(addr).await?;
-        if self.config.insecure {
-            self.listen_impl(Arc::new(listener)).await
-        } else {
-            self.listen_tls(listener).await
-        }
+        // No thread of its own: `block_on_with` below waits for readiness and polls
+        // the futures on this thread, so the accept loop, the signal waiters and
+        // every connection share one reactor. The signal waiters in particular only
+        // fire while their reactor is polled, which is why they are created inside
+        // this reactor's future rather than anywhere else.
+        let reactor = Reactor::local()?;
+        let handle = reactor.handle();
+        let listener = TcpListener::bind_any(&addrs, &handle)?;
+
+        let insecure = self.config.insecure;
+        block_on_with(&reactor, async move {
+            if insecure {
+                self.listen_impl(Arc::new(listener), &handle).await
+            } else {
+                self.listen_tls(listener, &handle).await
+            }
+        })
     }
 
     #[cfg(feature = "ws")]
-    async fn listen_tls(self, listener: TcpListener) -> Result<()> {
+    async fn listen_tls(self, listener: TcpListener, handle: &Handle) -> Result<()> {
         if self.config.pub_certs.is_some() && self.config.priv_key.is_some() {
             let listener = TlsListener::bind(
                 listener,
@@ -462,14 +505,14 @@ impl WebsocketServer {
                 self.config.priv_key.clone().unwrap(),
             )
             .await?;
-            self.listen_impl(Arc::new(listener)).await
+            self.listen_impl(Arc::new(listener), handle).await
         } else {
             bail!("pub_certs and priv_key should be set")
         }
     }
 
     #[cfg(not(feature = "ws"))]
-    async fn listen_tls(self, _listener: TcpListener) -> Result<()> {
+    async fn listen_tls(self, _listener: TcpListener, _handle: &Handle) -> Result<()> {
         bail!("TLS requires the `ws` feature, which provides the TLS-capable backend")
     }
 
