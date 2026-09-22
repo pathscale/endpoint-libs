@@ -48,11 +48,11 @@ pub trait ConnectionListener: Send + Sync + Unpin {
 /// reactor. That is what makes the accept loop, the connections and the shutdown
 /// signal one thread's work in [`WebsocketServer::listen`](super::WebsocketServer).
 pub struct TcpListener {
-    listener: nagoya::reactor::TcpListener,
+    listener: nagoya::net::TcpListener,
 }
 impl TcpListener {
     pub fn bind(addr: Addr, handle: &Handle) -> Result<Self> {
-        let listener = nagoya::reactor::TcpListener::bind(addr, handle)?;
+        let listener = nagoya::net::TcpListener::bind(addr, handle)?;
         Ok(Self { listener })
     }
 
@@ -72,7 +72,7 @@ impl TcpListener {
     /// one did it pick" is otherwise unanswerable from outside.
     ///
     /// The error reported is the last failure, with the whole candidate list
-    /// attached: unlike [`nagoya::reactor::connect_any`], every error here is about
+    /// attached: unlike [`nagoya::resolve::connect_any`], every error here is about
     /// this machine, so there is no remote-versus-local distinction to preserve.
     pub fn bind_any(addrs: &[Addr], handle: &Handle) -> Result<Self> {
         let mut last = None;

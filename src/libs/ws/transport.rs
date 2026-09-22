@@ -55,7 +55,7 @@
 //!    `LocalSet`. The date-cache `tokio::spawn` was removed with the `Date`
 //!    header. The `futures` crate owns no reactor, so there is no futures-only
 //!    substitute for any of it. Replacing it means a second server built on a
-//!    `nagoya::reactor::TcpListener`, which is a parallel implementation rather
+//!    `nagoya::net::TcpListener`, which is a parallel implementation rather
 //!    than a primitive swap.
 //! 2. **Signal delivery.** `ws-core` requires the `signal` feature. The flag
 //!    is a `nagoya::sync::Notify` plus an `AtomicBool` (`Shutdown`); the

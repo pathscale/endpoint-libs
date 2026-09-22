@@ -1,7 +1,8 @@
 use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use nagoya::reactor::{Handle, Signal, SignalKind};
+use nagoya::reactor::Handle;
+use nagoya::signal::{Signal, SignalKind};
 use nagoya::sync::Notify;
 
 /// A flag every waiter observes, including one that arrives after the cancel.
@@ -71,7 +72,7 @@ impl Shutdown {
 }
 
 /// Process-wide shutdown flag. Delivery of the unix signals is
-/// [`nagoya::reactor::Signal`]; this is only the flag those waits set.
+/// [`nagoya::signal::Signal`]; this is only the flag those waits set.
 pub static CANCELLATION_TOKEN: Shutdown = Shutdown::new();
 
 /// Initialize and return the signals (sigterm, sigint), bound to `handle`.
