@@ -56,6 +56,13 @@ impl TcpListener {
         Ok(Self { listener })
     }
 
+    /// [`Self::bind`] with `SO_REUSEPORT`, so each shard's reactor can hold its own
+    /// listener on the same port. Every listener on the port has to use this.
+    pub fn bind_shared(addr: Addr, handle: &Handle) -> Result<Self> {
+        let listener = nagoya::net::TcpListener::bind_shared(addr, handle)?;
+        Ok(Self { listener })
+    }
+
     /// Bind the first address in `addrs` that the kernel accepts.
     ///
     /// [`nagoya::reactor::resolve`] returns *every* address a name has, and a host
@@ -75,9 +82,22 @@ impl TcpListener {
     /// attached: unlike [`nagoya::resolve::connect_any`], every error here is about
     /// this machine, so there is no remote-versus-local distinction to preserve.
     pub fn bind_any(addrs: &[Addr], handle: &Handle) -> Result<Self> {
+        Self::bind_any_with(addrs, handle, Self::bind)
+    }
+
+    /// [`Self::bind_any`], binding each candidate with [`Self::bind_shared`].
+    pub fn bind_any_shared(addrs: &[Addr], handle: &Handle) -> Result<Self> {
+        Self::bind_any_with(addrs, handle, Self::bind_shared)
+    }
+
+    fn bind_any_with(
+        addrs: &[Addr],
+        handle: &Handle,
+        bind: fn(Addr, &Handle) -> Result<Self>,
+    ) -> Result<Self> {
         let mut last = None;
         for addr in addrs {
-            match Self::bind(*addr, handle) {
+            match bind(*addr, handle) {
                 Ok(listener) => {
                     tracing::debug!(
                         ws_server = true,

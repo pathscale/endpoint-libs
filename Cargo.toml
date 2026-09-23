@@ -1,6 +1,6 @@
 [package]
 name = "endpoint-libs"
-version = "3.3.0"
+version = "3.3.1"
 edition = "2024"
 authors = ["Veon <dveonloch@protonmail.com>"]
 description = "Launch MCP services fast: describe endpoints once in RON, and endpoint-gen generates the Rust models, docs and MCP tool schemas that this crate serves over WebSocket RPC, with roles and typed errors built in."
@@ -203,7 +203,7 @@ alloy-primitives = { version = "1.3.0", features = [
 # 0.1.11 is the release that carries `signal::Signal`, `resolve` and
 # `connect_any`, which is what the tokio removal needed and what 0.1.9 did not
 # have. A caret so the family moves on its own: 0.1.11 is the floor, not a pin.
-nagoya = { version = "^0.1.11", default-features = false, features = ["reactor"], optional = true }
+nagoya = { version = "^0.1.13", default-features = false, features = ["reactor"], optional = true }
 # The WebSocket protocol itself: the RFC 6455 handshake and framing over a
 # nagoya socket, replacing hyper on the serving side and tokio-tungstenite on
 # the connecting side. `default-features = false` is load bearing: the default
