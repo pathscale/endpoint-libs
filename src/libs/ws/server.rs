@@ -18,6 +18,7 @@ use tracing::*;
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::peer::{Extensions, PeerIdentity};
+use crate::libs::signal::Shutdown;
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
 use crate::libs::utils::{get_conn_id, get_log_id};
 #[cfg(feature = "ws")]
@@ -416,19 +417,18 @@ impl WebsocketServer {
     /// registered with one specific reactor at birth. So the order is: resolve,
     /// create the reactor, bind, and only then start polling.
     ///
-    /// # One thread, for now
+    /// # Shards
     ///
-    /// The shard-per-core fan-out is gone, and this is the honest state of the port
-    /// rather than a simplification. A socket accepted by a nagoya listener is
-    /// registered with that listener's reactor, and only that reactor will ever
-    /// report its readiness, so the connection must be driven on the thread polling
-    /// it. Handing accepted sockets to other threads would put every connection's
-    /// readiness through one poller and add a cross-thread wake per message —
-    /// exactly the cost `Reactor::sharded` exists to avoid. The shape that does work
-    /// is a listening socket per reactor, and nagoya cannot yet produce one: its
-    /// `TcpListener` has no `try_clone` and no `SO_REUSEPORT` bind, and a bound
-    /// listener cannot be adopted by a second reactor. `shard_count` still reads the
-    /// operator's intent, and the server says so when it cannot honour it.
+    /// A socket accepted by a nagoya listener is registered with that listener's
+    /// reactor, and only that reactor will ever report its readiness, so the
+    /// connection must be driven on the thread polling it. Handing accepted sockets
+    /// to other threads would put every connection's readiness through one poller
+    /// and add a cross-thread wake per message. So each shard is a thread with its
+    /// own reactor and its own listening socket, all bound to one port with
+    /// `SO_REUSEPORT`, and the kernel picks the shard per connection. This thread
+    /// is the first shard. [`shard_count`] reads `WS_SHARDS`, then the cgroup CPU
+    /// quota, then the CPU count. Linux balances across the sockets; macOS accepts
+    /// the binds without balancing.
     ///
     /// # Signals
     ///
@@ -470,21 +470,81 @@ impl WebsocketServer {
         let addrs = resolve(host, port)
             .wrap_err_with(|| format!("Failed to lookup host to bind: {}", self.config.address))?;
 
-        // No thread of its own: `block_on_with` below waits for readiness and polls
-        // the futures on this thread, so the accept loop, the signal waiters and
-        // every connection share one reactor. The signal waiters in particular only
-        // fire while their reactor is polled, which is why they are created inside
-        // this reactor's future rather than anywhere else.
+        // This thread is the first shard: `block_on_with` below waits for readiness
+        // and polls the futures on this thread, so its accept loop, the signal
+        // waiters and its connections share one reactor. The signal waiters in
+        // particular only fire while their reactor is polled, which is why they are
+        // created inside this reactor's future rather than anywhere else.
         let reactor = Reactor::local()?;
         let handle = reactor.handle();
-        let listener = TcpListener::bind_any(&addrs, &handle)?;
+        let shards = shard_count();
+        if shards <= 1 {
+            let listener = TcpListener::bind_any(&addrs, &handle)?;
+            return block_on_with(&reactor, async move {
+                self.listen_impl(Arc::new(listener), &handle, stop).await
+            });
+        }
 
-        // One path. `listen_tls`, the `TlsListener` it built and the
-        // `config.insecure` branch that chose between them are gone: this server
-        // serves plain `ws://` and nothing else, with TLS terminated at the edge.
-        block_on_with(&reactor, async move {
-            self.listen_impl(Arc::new(listener), &handle, stop).await
-        })
+        // One listening socket per shard, each on its own reactor and thread, all
+        // bound to one port with SO_REUSEPORT. The kernel gives each connection to
+        // one socket, so a connection is accepted, registered and served by the same
+        // reactor and never crosses a thread. The first bind picks the address; the
+        // others take it exactly, which matters when the port asked for was zero.
+        let listener = TcpListener::bind_any_shared(&addrs, &handle)?;
+        let addr = listener.local_addr()?;
+        let (this, states) = self.prepare();
+        let shutdown = Arc::new(Shutdown::default());
+        let mut threads = Vec::with_capacity(shards - 1);
+        for shard in 1..shards {
+            let this = Arc::clone(&this);
+            let states = Arc::clone(&states);
+            let stop = Arc::clone(&shutdown);
+            let spawned = std::thread::Builder::new()
+                .name(format!("ws-shard-{shard}"))
+                .spawn(move || {
+                    let served = (|| {
+                        let reactor = Reactor::local()?;
+                        let handle = reactor.handle();
+                        let listener = TcpListener::bind_shared(addr, &handle)?;
+                        let stop = async move { stop.cancelled().await };
+                        block_on_with(
+                            &reactor,
+                            Self::serve_shard(this, states, Arc::new(listener), &handle, Some(stop)),
+                        )
+                    })();
+                    if let Err(err) = &served {
+                        error!(ws_server = true, shard, error = %err, "shard stopped with an error");
+                    }
+                    served
+                });
+            match spawned {
+                Ok(thread) => threads.push(thread),
+                Err(err) => {
+                    shutdown.cancel();
+                    for thread in threads {
+                        let _ = thread.join();
+                    }
+                    return Err(eyre::eyre!("failed to start shard {shard}: {err}"));
+                }
+            }
+        }
+        info!(
+            ws_server = true,
+            shards, "serving on {shards} reactor threads"
+        );
+
+        let served = block_on_with(&reactor, async {
+            let served = Self::serve_shard(this, states, Arc::new(listener), &handle, stop).await;
+            // Whatever stopped this shard, a signal or an error, stops them all.
+            shutdown.cancel();
+            served
+        });
+        for thread in threads {
+            if thread.join().is_err() {
+                error!(ws_server = true, "a shard thread panicked");
+            }
+        }
+        served
     }
 
     /// Refuse to start when the configuration expects TLS this server cannot serve.
@@ -510,9 +570,9 @@ impl WebsocketServer {
 
     /// Accept, handshake and serve, all on the reactor `handle` names.
     ///
-    /// One loop, three things to wait on, and no channel between them: the accept
-    /// fan-out and its per-shard `mpsc` are gone with the shard threads, because
-    /// there is nowhere to hand a connection to. See [`Self::listen`] for why.
+    /// One loop, three things to wait on, and no channel between them: a shard
+    /// serves what its own listener accepts, so nothing is handed between threads.
+    /// See [`Self::listen`] for how shards share a port.
     ///
     /// Connections are held in a `FuturesUnordered` and polled in place, the same
     /// model `serve_with` uses. nagoya's `TaskSet` is the purpose-built runner for
@@ -532,10 +592,15 @@ impl WebsocketServer {
         T: ConnectionListener + 'static,
         F: std::future::Future<Output = ()> + 'static,
     {
-        use futures::StreamExt;
-        use futures::future::{Either, FutureExt, select};
-        use futures::stream::FuturesUnordered;
+        let (this, states) = self.prepare();
+        Self::serve_shard(this, states, listener, handle, stop).await
+    }
 
+    /// Share the server and one connection table across every shard.
+    ///
+    /// Once per server, not per shard: the toolbox reaches a connection through
+    /// these states whichever reactor it lives on.
+    fn prepare(self) -> (Arc<Self>, Arc<WebsocketStates>) {
         let states = Arc::new(WebsocketStates::new());
         let this = Arc::new(self);
         this.toolbox.set_ws_states(
@@ -543,16 +608,24 @@ impl WebsocketServer {
             this.config.header_only,
             this.config.drop_conn_on_buffer_full,
         );
+        (this, states)
+    }
 
-        let num_shards = shard_count();
-        if num_shards > 1 {
-            warn!(
-                ws_server = true,
-                "{} shards were asked for; serving on one thread because a nagoya \
-                 listener cannot be shared between reactors yet",
-                num_shards
-            );
-        }
+    /// The accept loop of one shard, on the reactor `handle` names.
+    async fn serve_shard<T, F>(
+        this: Arc<Self>,
+        states: Arc<WebsocketStates>,
+        listener: Arc<T>,
+        handle: &Handle,
+        stop: Option<F>,
+    ) -> Result<()>
+    where
+        T: ConnectionListener + 'static,
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        use futures::StreamExt;
+        use futures::future::{Either, FutureExt, select};
+        use futures::stream::FuturesUnordered;
 
         // The caller's stop, or the process signals when it gave none. Signals are
         // registered on this reactor, and awaited on it below: a `Signal` only
