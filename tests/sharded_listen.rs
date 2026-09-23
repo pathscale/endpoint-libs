@@ -5,7 +5,7 @@
 //! must complete a handshake and a request whichever shard the kernel picks,
 //! and one stop must bring every shard down so `listen_until` returns.
 
-#![cfg(feature = "ws-client")]
+#![cfg(all(feature = "ws", feature = "ws-client"))]
 
 use std::sync::Arc;
 use std::time::Duration;
