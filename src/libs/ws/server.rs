@@ -429,7 +429,36 @@ impl WebsocketServer {
     /// `TcpListener` has no `try_clone` and no `SO_REUSEPORT` bind, and a bound
     /// listener cannot be adopted by a second reactor. `shard_count` still reads the
     /// operator's intent, and the server says so when it cannot honour it.
+    ///
+    /// # Signals
+    ///
+    /// This stops on SIGTERM or SIGINT, and claims both for the process while it
+    /// runs: nagoya allows one waiter per signal number, so a second server in the
+    /// same process fails with `EBUSY`. A process that owns its signals, or runs
+    /// more than one server, calls [`Self::listen_until`] instead.
     pub fn listen(self) -> Result<()> {
+        self.listen_on(None::<std::future::Pending<()>>)
+    }
+
+    /// [`Self::listen`], stopping when `stop` resolves instead of on a signal.
+    ///
+    /// No signal is registered. Signals belong to a process, not to a library
+    /// server inside it, and taking them here is what made a second server in one
+    /// process fail: an application that serves twice, and every test harness
+    /// that starts a server per test. `stop` is polled on this server's own
+    /// thread, so it has to be a future that needs no particular runtime, such as
+    /// a oneshot receiver or [`crate::libs::signal::Shutdown::cancelled`].
+    pub fn listen_until<F>(self, stop: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()> + 'static,
+    {
+        self.listen_on(Some(stop))
+    }
+
+    fn listen_on<F>(self, stop: Option<F>) -> Result<()>
+    where
+        F: std::future::Future<Output = ()> + 'static,
+    {
         self.validate_protocol_mode()?;
         self.refuse_tls_config()?;
         debug!(ws_server = true, "Listening on {}", self.config.address);
@@ -454,7 +483,7 @@ impl WebsocketServer {
         // `config.insecure` branch that chose between them are gone: this server
         // serves plain `ws://` and nothing else, with TLS terminated at the edge.
         block_on_with(&reactor, async move {
-            self.listen_impl(Arc::new(listener), &handle).await
+            self.listen_impl(Arc::new(listener), &handle, stop).await
         })
     }
 
@@ -493,11 +522,16 @@ impl WebsocketServer {
     /// grows one entry per connection ever accepted and panics past four billion.
     /// It fits a fixed population of tasks, which a server's connections are not.
     /// `FuturesUnordered` drops what finishes and wakes in O(woken) just the same.
-    async fn listen_impl<T: ConnectionListener + 'static>(
+    async fn listen_impl<T, F>(
         self,
         listener: Arc<T>,
         handle: &Handle,
-    ) -> Result<()> {
+        stop: Option<F>,
+    ) -> Result<()>
+    where
+        T: ConnectionListener + 'static,
+        F: std::future::Future<Output = ()> + 'static,
+    {
         use futures::StreamExt;
         use futures::future::{Either, FutureExt, select};
         use futures::stream::FuturesUnordered;
@@ -520,17 +554,27 @@ impl WebsocketServer {
             );
         }
 
-        // Registered on this reactor, and awaited on it below. A `Signal` only
-        // fires while its own reactor is polled, so creating it anywhere else
+        // The caller's stop, or the process signals when it gave none. Signals are
+        // registered on this reactor, and awaited on it below: a `Signal` only
+        // fires while its own reactor is polled, so creating one anywhere else
         // would be creating a wait that never ends.
-        let (mut sigterm, mut sigint) = crate::libs::signal::init_signals(handle)?;
+        let mut stop: futures::future::LocalBoxFuture<'static, ()> = match stop {
+            Some(stop) => stop.boxed_local(),
+            None => {
+                let (mut sigterm, mut sigint) = crate::libs::signal::init_signals(handle)?;
+                async move { crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint).await }
+                    .boxed_local()
+            }
+        };
         let mut connections = FuturesUnordered::new();
         loop {
-            // Shutdown is the outermost left arm, so a pending signal is not stuck
-            // behind an accept or a live connection that is also ready.
-            let shutdown = crate::libs::signal::wait_for_signals(&mut sigterm, &mut sigint);
+            // Shutdown is the outermost left arm, so a pending stop is not stuck
+            // behind an accept or a live connection that is also ready. The one
+            // stop future is polled across iterations rather than rebuilt, so a
+            // caller's future is never dropped half-way.
+            let shutdown = stop.as_mut();
             let accepted = listener.accept();
-            futures::pin_mut!(shutdown, accepted);
+            futures::pin_mut!(accepted);
             let accepted = if connections.is_empty() {
                 match select(shutdown, accepted).await {
                     Either::Left(_) => break,
