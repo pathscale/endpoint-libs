@@ -66,7 +66,10 @@ impl RequestHandler for MethodEcho {
 }
 
 fn thread_name() -> String {
-    std::thread::current().name().unwrap_or("unnamed").to_string()
+    std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_string()
 }
 
 struct AllowAll;
