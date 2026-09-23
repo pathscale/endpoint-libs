@@ -336,6 +336,18 @@ server.enable_mcp(
 server.listen()
 ```
 
+`listen()` blocks the calling thread and stops on SIGTERM or SIGINT, claiming
+both for the process while it runs, so a second server in the same process
+fails with `EBUSY`. A process that owns its own signals, or runs more than one
+server (a test per server, say), stops it with a future instead:
+
+```rust
+let (stop, stopped) = futures::channel::oneshot::channel::<()>();
+std::thread::spawn(move || server.listen_until(async move { let _ = stopped.await; }));
+// ... later
+let _ = stop.send(());
+```
+
 Behavior notes:
 
 - **Frame detection** — a frame is treated as JSON-RPC iff it carries a
