@@ -4,8 +4,44 @@ pub fn get_log_id() -> u64 {
     chrono::Utc::now().timestamp_micros() as _
 }
 
+/// A connection id unique within this process.
+///
+/// It was the clock in microseconds, cut to 32 bits, which gives two
+/// connections accepted in the same microsecond the same id. With one accept
+/// loop that took two accepts inside a microsecond; with a shard per core it
+/// is two shards accepting at once, and the second insert into the shared
+/// connection table replaced the first. A counter cannot repeat until it wraps.
+/// It starts from the clock so ids still differ across restarts in logs.
 pub fn get_conn_id() -> u32 {
-    chrono::Utc::now().timestamp_micros() as _
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
+    NEXT.get_or_init(|| AtomicU32::new(chrono::Utc::now().timestamp_micros() as u32))
+        .fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod conn_id_tests {
+    #[test]
+    fn ids_from_many_threads_never_repeat() {
+        let ids: Vec<u32> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..10_000)
+                            .map(|_| super::get_conn_id())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect()
+        });
+        let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+    }
 }
 
 pub fn get_time_milliseconds() -> i64 {
