@@ -661,3 +661,10 @@ To verify the package locally without publishing:
 ```sh
 cargo publish --dry-run
 ```
+# Explicit WSS trust policy
+
+With `ws-client-tls`, `WsClientBuilder::tls_config(Arc<ClientConfig>)` uses the
+caller's complete TLS policy without adding default roots. Hostname and chain
+verification use the URL host. Combining an explicit policy with
+`danger_accept_invalid_certs()` is rejected before connecting. Builders without
+an explicit policy retain the existing default for other consumers.

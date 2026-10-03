@@ -512,6 +512,8 @@ impl WsTarget {
 
 #[cfg(feature = "ws-client")]
 pub struct WsClientBuilder {
+    #[cfg(feature = "ws-client-tls")]
+    tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
     protocol_header: String,
     headers: Vec<(&'static str, &'static str)>,
     /// Only the TLS path reads this, and the TLS path is optional. Without the
@@ -526,6 +528,8 @@ impl WsClientBuilder {
     pub fn new() -> Self {
         Self {
             protocol_header: String::new(),
+            #[cfg(feature = "ws-client-tls")]
+            tls_config: None,
             headers: Vec::new(),
             danger_accept_invalid_certs: false,
         }
@@ -567,6 +571,17 @@ impl WsClientBuilder {
     /// Accept any server certificate. `wss://` only, and a development tool.
     pub fn danger_accept_invalid_certs(mut self) -> Self {
         self.danger_accept_invalid_certs = true;
+        self
+    }
+
+    /// Use the caller's TLS policy for WSS. Combining this with
+    /// `danger_accept_invalid_certs` is rejected.
+    #[cfg(feature = "ws-client-tls")]
+    pub fn tls_config(
+        mut self,
+        config: std::sync::Arc<nago_wss::tls::rustls::ClientConfig>,
+    ) -> Self {
+        self.tls_config = Some(config);
         self
     }
 
@@ -625,6 +640,7 @@ impl WsClientBuilder {
                     &protocols,
                     &headers,
                     self.danger_accept_invalid_certs,
+                    self.tls_config,
                 )
                 .await;
             }
@@ -740,6 +756,7 @@ async fn connect_secure(
     protocols: &[&str],
     headers: &[(&str, &str)],
     danger_accept_invalid_certs: bool,
+    tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
 ) -> Result<(WsClient, WsConnectResponse)> {
     // Through nago-wss's re-export, so this crate never names a rustls version
     // of its own and cannot end up linking a second, incompatible one.
@@ -747,11 +764,16 @@ async fn connect_secure(
     use nago_wss::tls::{TlsStream, rustls};
     use std::sync::Arc;
 
+    if danger_accept_invalid_certs && tls_config.is_some() {
+        bail!("explicit TLS policy cannot accept invalid certificates");
+    }
     let stream = connect_any(&target.addrs, handle)
         .await
         .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
 
-    let config: Arc<rustls::ClientConfig> = if danger_accept_invalid_certs {
+    let config: Arc<rustls::ClientConfig> = if let Some(config) = tls_config {
+        config
+    } else if danger_accept_invalid_certs {
         Arc::new(make_dangerous_tls_config())
     } else {
         nago_wss::tls::default_client_config()

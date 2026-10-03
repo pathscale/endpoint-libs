@@ -245,6 +245,7 @@ tracing-throttle = { version = "0.4", default-features = false, features = [
 # crate imports it.
 
 [dev-dependencies]
+rcgen = "0.14"
 tempfile = "3.19"
 # `async` is this crate's only tokio edge (`async = ["tokio"]`), so the dev
 # build asks for the same synchronous half the normal one does, plus the
