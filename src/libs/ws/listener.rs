@@ -1,5 +1,5 @@
 use crate::libs::peer::PeerIdentity;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
 use eyre::{Result, bail};
 use futures::FutureExt;
@@ -157,6 +157,12 @@ pub fn socket_addr(addr: Addr) -> Result<SocketAddr> {
     match addr {
         Addr::V4(octets, port) => Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(octets)), port)),
         Addr::V6(octets, port) => Ok(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(octets)), port)),
+        Addr::V6Scoped(octets, port, scope_id) => Ok(SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(octets),
+            port,
+            0,
+            scope_id,
+        ))),
         Addr::Path(_) => {
             bail!("a Unix-domain peer has no SocketAddr; serve it through SessionListener")
         }
