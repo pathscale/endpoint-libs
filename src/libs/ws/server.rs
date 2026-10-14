@@ -11,6 +11,8 @@ use std::fs::File;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tracing::*;
 
 // Used by serve_connection, which is transport-agnostic (ws-core), so these must
@@ -46,6 +48,74 @@ pub struct WebsocketServer {
     /// Interception hooks. Empty by default — an empty `Hooks` adds one branch per
     /// request and nothing else.
     pub hooks: Hooks,
+    limits: Arc<ServerLimitState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitKind { Connections, MessageBytes, InflightRequests, RequestTime }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitDisposition { Warning, Refusal }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitEvent {
+    pub limit: LimitKind,
+    pub current: usize,
+    pub threshold: usize,
+    pub disposition: LimitDisposition,
+}
+
+struct ServerLimitState {
+    connections: AtomicUsize,
+    inflight: AtomicUsize,
+    warned_connections: AtomicUsize,
+    warned_inflight: AtomicUsize,
+}
+
+struct LimitSlot(Arc<ServerLimitState>, LimitKind);
+
+impl Drop for LimitSlot {
+    fn drop(&mut self) {
+        let counter = match self.1 {
+            LimitKind::Connections => &self.0.connections,
+            LimitKind::InflightRequests => &self.0.inflight,
+            _ => return,
+        };
+        counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Default for ServerLimitState {
+    fn default() -> Self {
+        Self { connections: AtomicUsize::new(0), inflight: AtomicUsize::new(0), warned_connections: AtomicUsize::new(0), warned_inflight: AtomicUsize::new(0) }
+    }
+}
+
+impl ServerLimitState {
+    fn event(&self, config: &WsServerConfig, limit: LimitKind, current: usize, threshold: usize, disposition: LimitDisposition) {
+        if let Some(callback) = &config.on_limit {
+            callback(LimitEvent { limit, current, threshold, disposition });
+        }
+    }
+
+    fn acquire(&self, config: &WsServerConfig, limit: LimitKind) -> bool {
+        let (counter, cap, warning, warned) = match limit {
+            LimitKind::Connections => (&self.connections, config.max_connections, config.warn_connections, &self.warned_connections),
+            LimitKind::InflightRequests => (&self.inflight, config.max_inflight_requests, config.warn_inflight_requests, &self.warned_inflight),
+            _ => return true,
+        };
+        let current = counter.fetch_add(1, Ordering::AcqRel) + 1;
+        if let Some(threshold) = warning.filter(|threshold| current >= *threshold) {
+            if warned.swap(1, Ordering::AcqRel) == 0 {
+                self.event(config, limit, current, threshold, LimitDisposition::Warning);
+            }
+        }
+        if let Some(threshold) = cap.filter(|threshold| current > *threshold) {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            self.event(config, limit, current, threshold, LimitDisposition::Refusal);
+            false
+        } else { true }
+    }
 }
 
 impl WebsocketServer {
@@ -62,6 +132,7 @@ impl WebsocketServer {
             upgrader: default_upgrader(),
             mcp: None,
             hooks: Hooks::default(),
+            limits: Arc::new(ServerLimitState::default()),
         }
     }
 
@@ -152,6 +223,11 @@ impl WebsocketServer {
         states: Arc<WebsocketStates>,
         stream: BoxedStream,
     ) -> Result<()> {
+        let Some(_slot) = self.limits.acquire(&self.config, LimitKind::Connections).then(|| LimitSlot(Arc::clone(&self.limits), LimitKind::Connections)) else {
+            let mut stream = stream;
+            let _ = nagoya::io::Stream::write_all(&mut stream, b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;
+            return Ok(());
+        };
         let upgrader = self.upgrader.as_ref().ok_or_else(|| {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
         })?;
@@ -840,7 +916,7 @@ pub fn check_handler<T: RequestHandler + 'static>(schema: &EndpointSchema) -> Re
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WsServerConfig {
     #[serde(default)]
     pub name: String,
@@ -887,6 +963,35 @@ pub struct WsServerConfig {
     /// Reject every non-JSON-RPC frame. Requires [`WebsocketServer::enable_mcp`].
     #[serde(default)]
     pub mcp_only: bool,
+    /// Maximum simultaneous accepted connections. Disabled by default.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    /// Maximum WebSocket message size in bytes. Disabled by default.
+    #[serde(default)]
+    pub max_message_bytes: Option<usize>,
+    /// Maximum concurrent request handlers. Disabled by default.
+    #[serde(default)]
+    pub max_inflight_requests: Option<usize>,
+    /// Maximum time a request handler may run. Disabled by default.
+    #[serde(default)]
+    pub request_timeout: Option<Duration>,
+    #[serde(default)]
+    pub warn_connections: Option<usize>,
+    #[serde(default)]
+    pub warn_message_bytes: Option<usize>,
+    #[serde(default)]
+    pub warn_inflight_requests: Option<usize>,
+    #[serde(skip)]
+    pub warn_request_time: Option<Duration>,
+    /// Called for limit refusals and first warning threshold crossings.
+    #[serde(skip)]
+    pub on_limit: Option<Arc<dyn Fn(LimitEvent) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for WsServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsServerConfig").finish_non_exhaustive()
+    }
 }
 
 impl Default for WsServerConfig {
@@ -907,6 +1012,15 @@ impl Default for WsServerConfig {
             allow_cors_urls: Arc::new(None),
             server_name: Self::default_server_name(),
             mcp_only: false,
+            max_connections: None,
+            max_message_bytes: None,
+            max_inflight_requests: None,
+            request_timeout: None,
+            warn_connections: None,
+            warn_message_bytes: None,
+            warn_inflight_requests: None,
+            warn_request_time: None,
+            on_limit: None,
         }
     }
 }

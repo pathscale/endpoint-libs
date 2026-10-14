@@ -1,6 +1,12 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [3.4.0] - 2026-10-14
+
+### Features
+
+- Add optional WebSocket server admission limits, all disabled by default
+
 ## [2.1.3] - 2026-07-26
 
 ### Documentation

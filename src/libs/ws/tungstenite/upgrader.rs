@@ -204,7 +204,11 @@ impl WsUpgrader for NagoWssUpgrader {
         // frame in the same segment as its request is ordinary, and those bytes
         // are already out of the socket, so dropping them would lose the first
         // message of every fast client.
-        let connection = Connection::with_buffered(stream, Role::Server, Limits::default(), rest);
+        let limits = config.max_message_bytes.map_or_else(Limits::default, |max| Limits {
+            max_frame: max as u64,
+            max_message: max,
+        });
+        let connection = Connection::with_buffered(stream, Role::Server, limits, rest);
 
         Ok(Some(UpgradeEvent {
             stream: Box::new(NagoWsStream { inner: connection }),

@@ -300,6 +300,28 @@ impl SubAuthController for MethodSignup {
 }
 ```
 
+### Server limits
+
+Server admission limits are opt-in. Every limit defaults to `None`, so the
+application chooses its own policy and values. Configure limits before calling
+`listen()` or `serve_with()`:
+
+```rust
+use std::time::Duration;
+
+let config = WsServerConfig {
+    max_connections: Some(500),
+    max_message_bytes: Some(1024 * 1024),
+    max_inflight_requests: Some(64),
+    request_timeout: Some(Duration::from_secs(15)),
+    ..WsServerConfig::default()
+};
+```
+
+`max_connections` refuses excess WebSocket upgrades with HTTP 503.
+`max_message_bytes` bounds frame and reassembled-message sizes. The request
+limits are per server and apply to handlers after request parsing.
+
 ### MCP (Model Context Protocol) support
 
 The WebSocket server can optionally expose every registered endpoint as an
