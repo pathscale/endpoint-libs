@@ -324,7 +324,9 @@ let config = WsServerConfig {
 ```
 
 `max_connections` refuses excess WebSocket upgrades with HTTP 503.
-`max_message_bytes` bounds frame and reassembled-message sizes. Request limits
+`max_message_bytes` bounds frame and reassembled-message sizes; the transport
+closes a connection that sends a larger message before it is decoded, and no
+callback fires for that refusal. Request limits
 apply per server after parsing. Excess in-flight requests receive a `server
 busy` error without entering the handler. A timed out handler is cancelled and
 receives a timeout error; its in-flight slot is released. Each `warn_*` value

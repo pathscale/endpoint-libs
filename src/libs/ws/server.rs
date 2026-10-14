@@ -52,7 +52,10 @@ pub struct WebsocketServer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LimitKind { Warn, Refuse }
+pub enum LimitKind {
+    Warn,
+    Refuse,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LimitEvent {
@@ -62,7 +65,7 @@ pub struct LimitEvent {
     pub kind: LimitKind,
 }
 
-struct ServerLimitState {
+pub(crate) struct ServerLimitState {
     connections: AtomicUsize,
     inflight: AtomicUsize,
     warned_connections: AtomicUsize,
@@ -71,7 +74,7 @@ struct ServerLimitState {
     warned_request_time: AtomicUsize,
 }
 
-struct LimitSlot(Arc<ServerLimitState>, &'static str);
+pub(crate) struct LimitSlot(Arc<ServerLimitState>, &'static str);
 
 impl Drop for LimitSlot {
     fn drop(&mut self) {
@@ -86,34 +89,107 @@ impl Drop for LimitSlot {
 
 impl Default for ServerLimitState {
     fn default() -> Self {
-        Self { connections: AtomicUsize::new(0), inflight: AtomicUsize::new(0), warned_connections: AtomicUsize::new(0), warned_inflight: AtomicUsize::new(0), warned_message_bytes: AtomicUsize::new(0), warned_request_time: AtomicUsize::new(0) }
+        Self {
+            connections: AtomicUsize::new(0),
+            inflight: AtomicUsize::new(0),
+            warned_connections: AtomicUsize::new(0),
+            warned_inflight: AtomicUsize::new(0),
+            warned_message_bytes: AtomicUsize::new(0),
+            warned_request_time: AtomicUsize::new(0),
+        }
     }
 }
 
 impl ServerLimitState {
-    fn event(&self, config: &WsServerConfig, limit: &'static str, current: u64, threshold: u64, kind: LimitKind) {
+    pub(crate) fn event(
+        &self,
+        config: &WsServerConfig,
+        limit: &'static str,
+        current: u64,
+        threshold: u64,
+        kind: LimitKind,
+    ) {
         if let Some(callback) = &config.on_limit {
-            callback(LimitEvent { limit, current, threshold, kind });
+            callback(LimitEvent {
+                limit,
+                current,
+                threshold,
+                kind,
+            });
         }
     }
 
     fn acquire(&self, config: &WsServerConfig, limit: &'static str) -> bool {
         let (counter, cap, warning, warned) = match limit {
-            "connections" => (&self.connections, config.max_connections, config.warn_connections, &self.warned_connections),
-            "inflight_requests" => (&self.inflight, config.max_inflight_requests, config.warn_inflight_requests, &self.warned_inflight),
+            "connections" => (
+                &self.connections,
+                config.max_connections,
+                config.warn_connections,
+                &self.warned_connections,
+            ),
+            "inflight_requests" => (
+                &self.inflight,
+                config.max_inflight_requests,
+                config.warn_inflight_requests,
+                &self.warned_inflight,
+            ),
             _ => return true,
         };
         let current = counter.fetch_add(1, Ordering::AcqRel) + 1;
-        if let Some(threshold) = warning.filter(|threshold| current >= *threshold) {
-            if warned.swap(1, Ordering::AcqRel) == 0 {
-                self.event(config, limit, current as u64, threshold as u64, LimitKind::Warn);
-            }
+        if let Some(threshold) = warning.filter(|threshold| current >= *threshold)
+            && warned.swap(1, Ordering::AcqRel) == 0
+        {
+            self.event(
+                config,
+                limit,
+                current as u64,
+                threshold as u64,
+                LimitKind::Warn,
+            );
         }
         if let Some(threshold) = cap.filter(|threshold| current > *threshold) {
             counter.fetch_sub(1, Ordering::AcqRel);
-            self.event(config, limit, current as u64, threshold as u64, LimitKind::Refuse);
+            self.event(
+                config,
+                limit,
+                current as u64,
+                threshold as u64,
+                LimitKind::Refuse,
+            );
             false
-        } else { true }
+        } else {
+            true
+        }
+    }
+
+    /// Warns once the first time a message reaches `warn_message_bytes`.
+    pub(crate) fn observe_message(&self, config: &WsServerConfig, bytes: usize) {
+        if let Some(threshold) = config.warn_message_bytes.filter(|t| bytes >= *t)
+            && self.warned_message_bytes.swap(1, Ordering::AcqRel) == 0
+        {
+            self.event(
+                config,
+                "message_bytes",
+                bytes as u64,
+                threshold as u64,
+                LimitKind::Warn,
+            );
+        }
+    }
+
+    /// Warns once the first time a request runs for `warn_request_time`.
+    pub(crate) fn observe_request_time(&self, config: &WsServerConfig, elapsed: Duration) {
+        if let Some(threshold) = config.warn_request_time.filter(|t| elapsed >= *t)
+            && self.warned_request_time.swap(1, Ordering::AcqRel) == 0
+        {
+            self.event(
+                config,
+                "request_time",
+                elapsed.as_millis() as u64,
+                threshold.as_millis() as u64,
+                LimitKind::Warn,
+            );
+        }
     }
 
     pub(crate) fn acquire_request(self: &Arc<Self>, config: &WsServerConfig) -> Option<LimitSlot> {
@@ -227,7 +303,11 @@ impl WebsocketServer {
         states: Arc<WebsocketStates>,
         stream: BoxedStream,
     ) -> Result<()> {
-        let Some(_slot) = self.limits.acquire(&self.config, "connections").then(|| LimitSlot(Arc::clone(&self.limits), "connections")) else {
+        let Some(_slot) = self
+            .limits
+            .acquire(&self.config, "connections")
+            .then(|| LimitSlot(Arc::clone(&self.limits), "connections"))
+        else {
             let mut stream = stream;
             let _ = nagoya::io::Stream::write_all(&mut stream, b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;
             return Ok(());
@@ -274,13 +354,18 @@ impl WebsocketServer {
     }
 
     pub(crate) fn refuse_request(&self, context: &RequestContext, message: &str) {
-        self.toolbox.send(context.connection_id, WsResponseValue::Error(WsResponseError {
-            method: context.method,
-            code: ErrorCode::TOO_MANY_REQUESTS.to_u32(),
-            seq: context.seq,
-            log_id: context.log_id.to_string(),
-            params: serde_json::json!({"kind": "server_error", "message": message}),
-        }));
+        self.toolbox.send(
+            context.connection_id,
+            crate::libs::ws::basics::WsResponseValue::Error(
+                crate::libs::ws::basics::WsResponseError {
+                    method: context.method,
+                    code: ErrorCode::TOO_MANY_REQUESTS.to_u32(),
+                    seq: context.seq,
+                    log_id: context.log_id.to_string(),
+                    params: serde_json::json!({"kind": "server_error", "message": message}),
+                },
+            ),
+        );
     }
 
     #[cfg(not(feature = "ws"))]
@@ -1083,5 +1168,89 @@ mod protocol_mode_tests {
         server
             .validate_protocol_mode()
             .expect("MCP-only server should validate after enable_mcp");
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn recording() -> (WsServerConfig, Arc<Mutex<Vec<LimitEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&events);
+        let config = WsServerConfig {
+            max_connections: Some(2),
+            warn_connections: Some(2),
+            max_inflight_requests: Some(1),
+            warn_message_bytes: Some(10),
+            warn_request_time: Some(Duration::from_millis(5)),
+            on_limit: Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+            ..WsServerConfig::default()
+        };
+        (config, events)
+    }
+
+    #[test]
+    fn connections_warn_then_refuse() {
+        let (config, events) = recording();
+        let state = ServerLimitState::default();
+        assert!(state.acquire(&config, "connections"));
+        assert!(state.acquire(&config, "connections"));
+        assert!(!state.acquire(&config, "connections"));
+        let kinds: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.limit, e.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("connections", LimitKind::Warn),
+                ("connections", LimitKind::Refuse)
+            ]
+        );
+        assert_eq!(state.connections.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn inflight_slot_is_released_on_drop() {
+        let (config, _) = recording();
+        let state = Arc::new(ServerLimitState::default());
+        let slot = state
+            .acquire_request(&config)
+            .expect("first request admitted");
+        assert!(
+            state.acquire_request(&config).is_none(),
+            "second request is busy"
+        );
+        drop(slot);
+        assert!(
+            state.acquire_request(&config).is_some(),
+            "slot freed after drop"
+        );
+    }
+
+    #[test]
+    fn message_and_request_time_warn_once() {
+        let (config, events) = recording();
+        let state = ServerLimitState::default();
+        state.observe_message(&config, 4);
+        state.observe_message(&config, 12);
+        state.observe_message(&config, 20);
+        state.observe_request_time(&config, Duration::from_millis(9));
+        state.observe_request_time(&config, Duration::from_millis(9));
+        let limits: Vec<_> = events.lock().unwrap().iter().map(|e| e.limit).collect();
+        assert_eq!(limits, ["message_bytes", "request_time"]);
+    }
+
+    #[test]
+    fn no_limits_means_no_refusals() {
+        let config = WsServerConfig::default();
+        let state = ServerLimitState::default();
+        for _ in 0..1000 {
+            assert!(state.acquire(&config, "connections"));
+        }
     }
 }

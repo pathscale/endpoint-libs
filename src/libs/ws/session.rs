@@ -86,6 +86,14 @@ impl WsClientSession {
     }
 
     fn handle_message(&mut self, msg: Message) -> Result<Dispatch> {
+        let bytes = match &msg {
+            Message::Text(t) => t.len(),
+            Message::Binary(b) => b.len(),
+            _ => 0,
+        };
+        self.server
+            .limits
+            .observe_message(&self.server.config, bytes);
         let addr = self.conn_info.peer.display();
         let mut context = RequestContext::from_conn(&self.conn_info);
 
@@ -236,6 +244,7 @@ impl WsClientSession {
         let hooks = self.server.hooks.clone();
         let schema = endpoint.schema.clone();
         let request_timeout = self.server.config.request_timeout;
+        let server = Arc::clone(&self.server);
         Ok(Dispatch::Task(
             async move {
                 let _slot = slot;
@@ -265,8 +274,16 @@ impl WsClientSession {
                     toolbox.clone(),
                     handler.handle(&toolbox, context.clone(), req.params),
                 );
+                let started = std::time::Instant::now();
                 if let Some(timeout) = request_timeout {
                     if nagoya::timeout(timeout, handler).await.is_err() {
+                        server.limits.event(
+                            &server.config,
+                            "request_time",
+                            started.elapsed().as_millis() as u64,
+                            timeout.as_millis() as u64,
+                            crate::libs::ws::server::LimitKind::Refuse,
+                        );
                         toolbox.send(context.connection_id, WsResponseValue::Error(WsResponseError {
                             method: context.method,
                             code: ErrorCode::REQUEST_TIMEOUT.to_u32(),
@@ -279,6 +296,7 @@ impl WsClientSession {
                 } else {
                     handler.await;
                 }
+                server.limits.observe_request_time(&server.config, started.elapsed());
 
                 // The erased handler reports its own outcome through the toolbox, so
                 // AfterRequest observes completion rather than the specific result here.
