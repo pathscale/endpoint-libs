@@ -226,12 +226,19 @@ impl WsClientSession {
             return Ok(Dispatch::Keep);
         }
 
+        let Some(slot) = self.server.limits.acquire_request(&self.server.config) else {
+            self.server.refuse_request(&context, "server busy");
+            return Ok(Dispatch::Keep);
+        };
+
         let handler = endpoint.handler.clone();
         let toolbox = self.server.toolbox.clone();
         let hooks = self.server.hooks.clone();
         let schema = endpoint.schema.clone();
+        let request_timeout = self.server.config.request_timeout;
         Ok(Dispatch::Task(
             async move {
+                let _slot = slot;
                 let mut context = context;
                 // Polled alongside the session read loop so a slow hook cannot
                 // stall it, and after check_roles so they only see calls that
@@ -254,12 +261,24 @@ impl WsClientSession {
                     return;
                 }
 
-                TOOLBOX
-                    .scope(
-                        toolbox.clone(),
-                        handler.handle(&toolbox, context.clone(), req.params),
-                    )
-                    .await;
+                let handler = TOOLBOX.scope(
+                    toolbox.clone(),
+                    handler.handle(&toolbox, context.clone(), req.params),
+                );
+                if let Some(timeout) = request_timeout {
+                    if nagoya::timeout(timeout, handler).await.is_err() {
+                        toolbox.send(context.connection_id, WsResponseValue::Error(WsResponseError {
+                            method: context.method,
+                            code: ErrorCode::REQUEST_TIMEOUT.to_u32(),
+                            seq: context.seq,
+                            log_id: context.log_id.to_string(),
+                            params: serde_json::json!({"kind": "timeout", "message": "request timed out"}),
+                        }));
+                        return;
+                    }
+                } else {
+                    handler.await;
+                }
 
                 // The erased handler reports its own outcome through the toolbox, so
                 // AfterRequest observes completion rather than the specific result here.

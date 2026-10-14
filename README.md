@@ -314,13 +314,24 @@ let config = WsServerConfig {
     max_message_bytes: Some(1024 * 1024),
     max_inflight_requests: Some(64),
     request_timeout: Some(Duration::from_secs(15)),
+    warn_connections: Some(400),
+    warn_message_bytes: Some(768 * 1024),
+    warn_inflight_requests: Some(48),
+    warn_request_time: Some(Duration::from_secs(10)),
+    on_limit: Some(Arc::new(|event| eprintln!("{} {:?}: {} / {}", event.limit, event.kind, event.current, event.threshold))),
     ..WsServerConfig::default()
 };
 ```
 
 `max_connections` refuses excess WebSocket upgrades with HTTP 503.
-`max_message_bytes` bounds frame and reassembled-message sizes. The request
-limits are per server and apply to handlers after request parsing.
+`max_message_bytes` bounds frame and reassembled-message sizes. Request limits
+apply per server after parsing. Excess in-flight requests receive a `server
+busy` error without entering the handler. A timed out handler is cancelled and
+receives a timeout error; its in-flight slot is released. Each `warn_*` value
+fires one `LimitKind::Warn` callback per server when observed usage first
+reaches its threshold. Refusals fire `LimitKind::Refuse`. Callback events name
+the limit and report current and threshold values. The library has no defaults
+for limits and emits no limit logs itself.
 
 ### MCP (Model Context Protocol) support
 

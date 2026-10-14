@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
-- Add optional WebSocket server admission limits, all disabled by default
+- Add optional WebSocket connection, message-size, in-flight request and request-time limits, with warn thresholds and callbacks; all limits disabled by default
 
 ## [2.1.3] - 2026-07-26
 
