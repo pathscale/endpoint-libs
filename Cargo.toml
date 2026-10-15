@@ -245,6 +245,8 @@ tracing-throttle = { version = "0.4", default-features = false, features = [
 # crate imports it.
 
 [dev-dependencies]
+# TLS policy fixtures choose ring explicitly; nago-rustls leaves the provider to its host.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rcgen = "0.14"
 tempfile = "3.19"
 # `async` is this crate's only tokio edge (`async = ["tokio"]`), so the dev
