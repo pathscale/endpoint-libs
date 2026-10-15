@@ -43,6 +43,7 @@ pub struct WsClientSession {
     /// A session built with [`WsClientSession::new`] and never [`WsClientSession::bind_end`]
     /// holds a flag nobody else can set.
     end: Arc<Shutdown>,
+    last_received: std::rc::Rc<std::cell::Cell<std::time::Instant>>,
 }
 
 impl WsClientSession {
@@ -58,6 +59,7 @@ impl WsClientSession {
             rx,
             server,
             end: Arc::new(Shutdown::new()),
+            last_received: std::rc::Rc::new(std::cell::Cell::new(std::time::Instant::now())),
         }
     }
 
@@ -74,7 +76,27 @@ impl WsClientSession {
     pub async fn run(mut self) {
         let addr = self.conn_info.peer.display();
         let conn_id = self.conn_info.connection_id;
-        if let Err(err) = self.run_loop().await {
+        let last_received = self.last_received.clone();
+        let idle_timeout = self.server.config.idle_timeout;
+        let idle = async move {
+            let Some(timeout) = idle_timeout else {
+                return futures::future::pending::<()>().await;
+            };
+            loop {
+                let remaining = timeout.saturating_sub(last_received.get().elapsed());
+                if remaining.is_zero() {
+                    return;
+                }
+                nagoya::sleep(remaining).await;
+            }
+        };
+        let run = self.run_loop();
+        futures::pin_mut!(idle, run);
+        let result = match futures::future::select(idle, run).await {
+            futures::future::Either::Left(_) => Ok(()),
+            futures::future::Either::Right((result, _)) => result,
+        };
+        if let Err(err) = result {
             error!(
                 ws_server = true,
                 ?err,
@@ -248,61 +270,61 @@ impl WsClientSession {
         Ok(Dispatch::Task(
             async move {
                 let _slot = slot;
-                let mut context = context;
-                // Polled alongside the session read loop so a slow hook cannot
-                // stall it, and after check_roles so they only see calls that
-                // were already allowed to reach this endpoint.
-                if let Err(custom) = hooks.run_before(&mut context, &schema, &req.params).await {
-                    let code = custom.code.to_u32();
-                    toolbox.send(
-                        context.connection_id,
-                        WsResponseValue::Error(WsResponseError {
-                            method: context.method,
-                            code,
-                            seq: context.seq,
-                            log_id: context.log_id.to_string(),
-                            params: custom.params.clone(),
-                        }),
-                    );
-                    hooks
-                        .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
-                        .await;
-                    return;
-                }
-
-                let handler = TOOLBOX.scope(
-                    toolbox.clone(),
-                    handler.handle(&toolbox, context.clone(), req.params),
-                );
                 let started = std::time::Instant::now();
-                if let Some(timeout) = request_timeout {
-                    if nagoya::timeout(timeout, handler).await.is_err() {
-                        server.limits.event(
-                            &server.config,
-                            "request_time",
-                            started.elapsed().as_millis() as u64,
-                            timeout.as_millis() as u64,
-                            crate::libs::ws::server::LimitKind::Refuse,
+                let timeout_context = context.clone();
+                let responded = std::cell::Cell::new(false);
+                let work = async {
+                    let mut context = context;
+                    // Polled alongside the session read loop so a slow hook cannot
+                    // stall it, and after check_roles so they only see calls that
+                    // were already allowed to reach this endpoint.
+                    if let Err(custom) = hooks.run_before(&mut context, &schema, &req.params).await {
+                        responded.set(true);
+                        let code = custom.code.to_u32();
+                        toolbox.send(
+                            context.connection_id,
+                            WsResponseValue::Error(WsResponseError {
+                                method: context.method,
+                                code,
+                                seq: context.seq,
+                                log_id: context.log_id.to_string(),
+                                params: custom.params.clone(),
+                            }),
                         );
-                        toolbox.send(context.connection_id, WsResponseValue::Error(WsResponseError {
-                            method: context.method,
-                            code: ErrorCode::REQUEST_TIMEOUT.to_u32(),
-                            seq: context.seq,
-                            log_id: context.log_id.to_string(),
-                            params: serde_json::json!({"kind": "timeout", "message": "request timed out"}),
-                        }));
+                        hooks
+                            .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
+                            .await;
                         return;
                     }
-                } else {
-                    handler.await;
-                }
-                server.limits.observe_request_time(&server.config, started.elapsed());
 
-                // The erased handler reports its own outcome through the toolbox, so
-                // AfterRequest observes completion rather than the specific result here.
-                hooks
-                    .run_after(&context, &schema, &RequestOutcome::Ok)
-                    .await;
+                    let handler = TOOLBOX.scope(
+                        toolbox.clone(),
+                        handler.handle(&toolbox, context.clone(), req.params),
+                    );
+                    handler.await;
+                    responded.set(true);
+                    // The erased handler reports its own outcome through the toolbox, so
+                    // AfterRequest observes completion rather than the specific result here.
+                    hooks
+                        .run_after(&context, &schema, &RequestOutcome::Ok)
+                        .await;
+
+                };
+                let expired = match request_timeout {
+                    Some(timeout) => nagoya::timeout(timeout, work).await.is_err(),
+                    None => { work.await; false }
+                };
+                server.limits.observe_request_time(&server.config, started.elapsed());
+                if expired && !responded.get() {
+                    let context = timeout_context;
+                    toolbox.send(context.connection_id, WsResponseValue::Error(WsResponseError {
+                        method: context.method,
+                        code: ErrorCode::REQUEST_TIMEOUT.to_u32(),
+                        seq: context.seq,
+                        log_id: context.log_id.to_string(),
+                        params: serde_json::json!({"kind": "timeout", "message": "request timed out"}),
+                    }));
+                }
             }
             .boxed_local(),
         ))
@@ -330,6 +352,9 @@ impl WsClientSession {
             }
         };
 
+        if req.is_notification() {
+            return None;
+        }
         context.user_id = self.conn_info.get_user_id();
         context.roles = self.conn_info.get_roles();
 
@@ -365,45 +390,88 @@ impl WsClientSession {
                     return None;
                 };
 
+                let Some(slot) = self.server.limits.acquire_request(&self.server.config) else {
+                    if id.is_some() {
+                        self.server.toolbox.send_raw(
+                            conn_id,
+                            jsonrpc_error(&id, JsonRpcError::new(-32000, "server busy"))
+                                .to_string(),
+                        );
+                    }
+                    return None;
+                };
+                let request_timeout = self.server.config.request_timeout;
+                let server = Arc::clone(&self.server);
                 let handler = endpoint.handler.clone();
                 let toolbox = self.server.toolbox.clone();
                 let hooks = self.server.hooks.clone();
                 let schema = endpoint.schema.clone();
                 Some(
                     async move {
-                        let mut context = context;
-                        // Same placement as the legacy path, but the rejection has to go
-                        // back in the MCP envelope — a tool error, not a WsResponseError.
-                        if let Err(custom) =
-                            hooks.run_before(&mut context, &schema, &arguments).await
-                        {
-                            let code = custom.code.to_u32();
+                        let _slot = slot;
+                        let started = std::time::Instant::now();
+                        let responded = std::cell::Cell::new(false);
+                        let work = async {
+                            let mut context = context;
+                            // Same placement as the legacy path, but the rejection has to go
+                            // back in the MCP envelope as a tool error.
+                            if let Err(custom) =
+                                hooks.run_before(&mut context, &schema, &arguments).await
+                            {
+                                responded.set(true);
+                                let code = custom.code.to_u32();
+                                toolbox.send_raw(
+                                    conn_id,
+                                    jsonrpc_result(
+                                        &id,
+                                        encode_tool_error(custom.code, &custom.params),
+                                    )
+                                    .to_string(),
+                                );
+                                hooks
+                                    .run_after(
+                                        &context,
+                                        &schema,
+                                        &RequestOutcome::PublicErr { code },
+                                    )
+                                    .await;
+                                return;
+                            }
+
+                            TOOLBOX
+                                .scope(
+                                    toolbox.clone(),
+                                    handler.handle_mcp(
+                                        &toolbox,
+                                        context.clone(),
+                                        McpCallCtx { id: id.clone() },
+                                        arguments,
+                                    ),
+                                )
+                                .await;
+
+                            responded.set(true);
+                            hooks
+                                .run_after(&context, &schema, &RequestOutcome::Ok)
+                                .await;
+                        };
+                        let expired = match request_timeout {
+                            Some(timeout) => nagoya::timeout(timeout, work).await.is_err(),
+                            None => {
+                                work.await;
+                                false
+                            }
+                        };
+                        server
+                            .limits
+                            .observe_request_time(&server.config, started.elapsed());
+                        if expired && !responded.get() && id.is_some() {
                             toolbox.send_raw(
                                 conn_id,
-                                jsonrpc_result(&id, encode_tool_error(custom.code, &custom.params))
+                                jsonrpc_error(&id, JsonRpcError::new(-32001, "request timed out"))
                                     .to_string(),
                             );
-                            hooks
-                                .run_after(&context, &schema, &RequestOutcome::PublicErr { code })
-                                .await;
-                            return;
                         }
-
-                        TOOLBOX
-                            .scope(
-                                toolbox.clone(),
-                                handler.handle_mcp(
-                                    &toolbox,
-                                    context.clone(),
-                                    McpCallCtx { id },
-                                    arguments,
-                                ),
-                            )
-                            .await;
-
-                        hooks
-                            .run_after(&context, &schema, &RequestOutcome::Ok)
-                            .await;
                     }
                     .boxed_local(),
                 )
@@ -423,7 +491,13 @@ impl WsClientSession {
             End,
         }
         loop {
+            if self.idle_expired() {
+                return Ok(());
+            }
             while let Ok(msg) = self.rx.try_recv() {
+                if self.idle_expired() {
+                    return Ok(());
+                }
                 if !self.send_message(msg).await {
                     return Ok(());
                 }
@@ -516,6 +590,7 @@ impl WsClientSession {
                             break;
                         }
                     };
+                    self.last_received.set(std::time::Instant::now());
                     match self.handle_message(msg)? {
                         Dispatch::Close => break,
                         Dispatch::Keep => {}
@@ -531,6 +606,13 @@ impl WsClientSession {
         }
 
         Ok(())
+    }
+
+    fn idle_expired(&self) -> bool {
+        self.server
+            .config
+            .idle_timeout
+            .is_some_and(|timeout| self.last_received.get().elapsed() >= timeout)
     }
 
     async fn send_message(&mut self, msg: Message) -> bool {

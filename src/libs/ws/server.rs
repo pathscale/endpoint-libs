@@ -87,6 +87,54 @@ impl Drop for LimitSlot {
     }
 }
 
+// State ownership is synchronous; hook work has an independent task lifetime.
+struct ConnectionCleanup {
+    states: Arc<WebsocketStates>,
+    job: Option<(Hooks, Arc<WsConnection>)>,
+}
+impl ConnectionCleanup {
+    fn dispatch(&mut self) -> Option<nagoya::JoinHandle<()>> {
+        let (hooks, conn) = self.job.take()?;
+        self.states.remove(conn.connection_id);
+        if hooks.on_disconnect.is_empty() {
+            return None;
+        }
+        Some(nagoya::spawn(async move {
+            // Construct the non-Send hook future on the worker that drives it.
+            // No connection future owns this task, including during shutdown.
+            match Reactor::local() {
+                Ok(reactor) => block_on_with(
+                    &reactor,
+                    hooks.run_on_disconnect(conn.connection_id, &conn.peer),
+                ),
+                Err(err) => {
+                    error!(ws_server = true, error = %err, "disconnect cleanup reactor failed")
+                }
+            }
+        }))
+    }
+    async fn finish(mut self) {
+        drop(self.dispatch());
+    }
+}
+impl Drop for ConnectionCleanup {
+    fn drop(&mut self) {
+        drop(self.dispatch());
+    }
+}
+
+async fn with_deadline<F: std::future::Future>(
+    timeout: Option<Duration>,
+    future: F,
+) -> Result<F::Output> {
+    match timeout {
+        Some(timeout) => nagoya::timeout(timeout, future)
+            .await
+            .map_err(|_| eyre::eyre!("connection deadline exceeded")),
+        None => Ok(future.await),
+    }
+}
+
 impl Default for ServerLimitState {
     fn default() -> Self {
         Self {
@@ -302,16 +350,8 @@ impl WebsocketServer {
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
         stream: BoxedStream,
+        deadline: Option<std::time::Instant>,
     ) -> Result<()> {
-        let Some(_slot) = self
-            .limits
-            .acquire(&self.config, "connections")
-            .then(|| LimitSlot(Arc::clone(&self.limits), "connections"))
-        else {
-            let mut stream = stream;
-            let _ = nagoya::io::Stream::write_all(&mut stream, b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n").await;
-            return Ok(());
-        };
         let upgrader = self.upgrader.as_ref().ok_or_else(|| {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
         })?;
@@ -323,7 +363,14 @@ impl WebsocketServer {
         // no h2, and HTTP/1.1 upgrades exactly once and then the socket is
         // WebSocket frames to the end. So the upgrader hands back the connection
         // directly and this is a straight line.
-        let Some(event) = upgrader.upgrade_stream(stream, addr, &self.config).await? else {
+        let remaining =
+            deadline.map(|end| end.saturating_duration_since(std::time::Instant::now()));
+        let Some(event) = with_deadline(
+            remaining,
+            upgrader.upgrade_stream(stream, addr, &self.config),
+        )
+        .await??
+        else {
             // The request was answered in HTTP — a preflight, a HEAD, a health
             // check, or a refusal. Not an error and not a session: the response
             // is already on the wire and the socket is finished.
@@ -369,6 +416,7 @@ impl WebsocketServer {
         _addr: SocketAddr,
         _states: Arc<WebsocketStates>,
         _stream: BoxedStream,
+        _deadline: Option<std::time::Instant>,
     ) -> Result<()> {
         bail!(
             "WebSocket upgrades require a backend that can create WS streams (enable the `ws` feature)"
@@ -427,14 +475,22 @@ impl WebsocketServer {
 
         let (tx, rx) = outbound::channel(self.config.message_buffer_size);
         states.insert(conn.connection_id, tx, conn.clone());
+        let cleanup = ConnectionCleanup {
+            states: Arc::clone(&states),
+            job: Some((self.hooks.clone(), Arc::clone(&conn))),
+        };
 
-        let auth_result = Arc::clone(&self.auth_controller)
-            .auth(
+        let auth_controller = Arc::clone(&self.auth_controller);
+        let auth_result = with_deadline(
+            self.config.handshake_timeout,
+            auth_controller.auth(
                 &self.toolbox,
                 auth_protocol.unwrap_or_default(),
                 Arc::clone(&conn),
-            )
-            .await;
+            ),
+        )
+        .await
+        .and_then(|result| result);
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
             self.toolbox
@@ -449,11 +505,18 @@ impl WebsocketServer {
                 error=%err,
                 "Error while handling connection"
             );
+            // Drain the queued auth error, but never wait indefinitely for a peer.
+            if let Some(state) = states.get_state(conn.connection_id) {
+                state.end.cancel();
+            }
+            let flush = Arc::clone(&self).run_session_connection(conn, states, stream, rx);
+            let _ = nagoya::timeout(Duration::from_secs(1), flush).await;
+            cleanup.finish().await;
             return;
         }
 
-        self.handle_session_connection(conn, states, stream, rx)
-            .await;
+        self.run_session_connection(conn, states, stream, rx).await;
+        cleanup.finish().await;
     }
 
     /// The WebSocket-specific wrapper: everything TCP and upgrade-shaped stops here,
@@ -477,10 +540,24 @@ impl WebsocketServer {
         stream: Box<dyn MessageStream>,
         rx: outbound::Receiver<Message>,
     ) {
+        let cleanup = ConnectionCleanup {
+            states: Arc::clone(&states),
+            job: Some((self.hooks.clone(), Arc::clone(&conn))),
+        };
+        self.run_session_connection(conn, states, stream, rx).await;
+        cleanup.finish().await;
+    }
+
+    async fn run_session_connection(
+        self: Arc<Self>,
+        conn: Arc<WsConnection>,
+        states: Arc<WebsocketStates>,
+        stream: Box<dyn MessageStream>,
+        rx: outbound::Receiver<Message>,
+    ) {
         let addr = conn.peer.display();
         let context = RequestContext::from_conn(&conn);
         let conn_id = context.connection_id;
-        let disconnect_hooks = self.hooks.clone();
 
         debug!(
             ws_server = true,
@@ -497,16 +574,7 @@ impl WebsocketServer {
         }
         session.run().await;
 
-        states.remove(context.connection_id);
-        disconnect_hooks
-            .run_on_disconnect(context.connection_id, &context.peer)
-            .await;
-        info!(
-            ws_server = true,
-            ?addr,
-            ?conn_id,
-            "Connection closed and removed from states (check logs above for any errors)"
-        );
+        info!(ws_server = true, ?addr, ?conn_id, "Websocket session ended");
     }
 
     /// Accept connections from any [`SessionListener`] and serve each one.
@@ -538,12 +606,20 @@ impl WebsocketServer {
         );
 
         let mut connections = FuturesUnordered::new();
+        let mut backoff = Duration::from_millis(10);
+        let mut retry_at: Option<std::time::Instant> = None;
         loop {
-            let accepted = if connections.is_empty() {
+            let retry = retry_at;
+            let accept = async {
+                if let Some(at) = retry {
+                    nagoya::sleep(at.saturating_duration_since(std::time::Instant::now())).await;
+                }
                 listener.accept().await
+            };
+            futures::pin_mut!(accept);
+            let accepted = if connections.is_empty() {
+                accept.await
             } else {
-                let accept = listener.accept();
-                futures::pin_mut!(accept);
                 match futures::future::select(accept, connections.next()).await {
                     futures::future::Either::Left((accepted, _)) => accepted,
                     futures::future::Either::Right(_) => continue,
@@ -552,9 +628,20 @@ impl WebsocketServer {
             let (stream, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(err) => {
-                    error!(ws_server = true, error = %err, "listener accept failed; stopping");
-                    return Err(err);
+                    error!(ws_server = true, error = %err, "listener accept failed");
+                    retry_at = Some(std::time::Instant::now() + backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(1));
+                    continue;
                 }
+            };
+            retry_at = None;
+            backoff = Duration::from_millis(10);
+            let Some(slot) = this
+                .limits
+                .acquire(&this.config, "connections")
+                .then(|| LimitSlot(Arc::clone(&this.limits), "connections"))
+            else {
+                continue;
             };
             debug!(ws_server = true, peer = %peer, "accepted connection");
 
@@ -562,6 +649,7 @@ impl WebsocketServer {
             let states = Arc::clone(&states);
             connections.push(
                 async move {
+                    let _slot = slot;
                     // Local transports carry credentials out of band (an inherited fd is
                     // already a capability), so there is no subprotocol string to pass.
                     this.serve_connection(peer, states, stream, None).await;
@@ -810,13 +898,21 @@ impl WebsocketServer {
             }
         };
         let mut connections = FuturesUnordered::new();
+        let mut backoff = Duration::from_millis(10);
+        let mut retry_at: Option<std::time::Instant> = None;
         loop {
             // Shutdown is the outermost left arm, so a pending stop is not stuck
             // behind an accept or a live connection that is also ready. The one
             // stop future is polled across iterations rather than rebuilt, so a
             // caller's future is never dropped half-way.
             let shutdown = stop.as_mut();
-            let accepted = listener.accept();
+            let retry = retry_at;
+            let accepted = async {
+                if let Some(at) = retry {
+                    nagoya::sleep(at.saturating_duration_since(std::time::Instant::now())).await;
+                }
+                listener.accept().await
+            };
             futures::pin_mut!(accepted);
             let accepted = if connections.is_empty() {
                 match select(shutdown, accepted).await {
@@ -838,6 +934,8 @@ impl WebsocketServer {
                 Ok(x) => x,
                 Err(err) => {
                     error!(ws_server = true, "Error while accepting stream: {:?}", err);
+                    retry_at = Some(std::time::Instant::now() + backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(1));
                     continue;
                 }
             };
@@ -845,9 +943,28 @@ impl WebsocketServer {
             let this = Arc::clone(&this);
             let states = Arc::clone(&states);
             let listener = Arc::clone(&listener);
+            retry_at = None;
+            backoff = Duration::from_millis(10);
+            let Some(slot) = this
+                .limits
+                .acquire(&this.config, "connections")
+                .then(|| LimitSlot(Arc::clone(&this.limits), "connections"))
+            else {
+                continue;
+            };
+            let deadline = this
+                .config
+                .handshake_timeout
+                .map(|timeout| std::time::Instant::now() + timeout);
             connections.push(
                 async move {
-                    let stream = match listener.handshake(stream).await {
+                    let _slot = slot;
+                    let remaining = deadline
+                        .map(|end| end.saturating_duration_since(std::time::Instant::now()));
+                    let stream = match with_deadline(remaining, listener.handshake(stream))
+                        .await
+                        .and_then(|result| result)
+                    {
                         Ok(channel) => {
                             debug!(ws_server = true, "Accepted stream from {}", addr);
                             channel
@@ -863,7 +980,12 @@ impl WebsocketServer {
                     if let Err(err) = TOOLBOX
                         .scope(
                             this.toolbox.clone(),
-                            this.handle_ws_handshake_and_connection(addr, states, Box::new(stream)),
+                            this.handle_ws_handshake_and_connection(
+                                addr,
+                                states,
+                                Box::new(stream),
+                                deadline,
+                            ),
                         )
                         .await
                     {
@@ -1067,10 +1189,16 @@ pub struct WsServerConfig {
     /// `None` opts out.
     #[serde(default = "WsServerConfig::default_max_inflight_requests")]
     pub max_inflight_requests: Option<usize>,
-    /// Maximum time for a legacy request handler, excluding hooks. Default: 30 seconds.
+    /// Maximum time for request hooks and handler work. Default: 30 seconds.
     /// `None` opts out.
     #[serde(default = "WsServerConfig::default_request_timeout")]
     pub request_timeout: Option<Duration>,
+    /// Shared TLS and HTTP upgrade budget. Default: 10 seconds.
+    #[serde(default = "WsServerConfig::default_handshake_timeout")]
+    pub handshake_timeout: Option<Duration>,
+    /// Time since the last received frame. Default: 120 seconds.
+    #[serde(default = "WsServerConfig::default_idle_timeout")]
+    pub idle_timeout: Option<Duration>,
     #[serde(default)]
     pub warn_connections: Option<usize>,
     #[serde(default)]
@@ -1112,6 +1240,8 @@ impl Default for WsServerConfig {
             max_message_bytes: Self::default_max_message_bytes(),
             max_inflight_requests: Self::default_max_inflight_requests(),
             request_timeout: Self::default_request_timeout(),
+            handshake_timeout: Self::default_handshake_timeout(),
+            idle_timeout: Self::default_idle_timeout(),
             warn_connections: None,
             warn_message_bytes: None,
             warn_inflight_requests: None,
@@ -1133,6 +1263,12 @@ impl WsServerConfig {
     }
     fn default_request_timeout() -> Option<Duration> {
         Some(Duration::from_secs(30))
+    }
+    fn default_handshake_timeout() -> Option<Duration> {
+        Some(Duration::from_secs(10))
+    }
+    fn default_idle_timeout() -> Option<Duration> {
+        Some(Duration::from_secs(120))
     }
     fn default_message_buffer_size() -> usize {
         256
@@ -1284,5 +1420,97 @@ mod admission_default_tests {
         assert_eq!(config.max_message_bytes, Some(1_048_576));
         assert_eq!(config.max_inflight_requests, Some(32));
         assert_eq!(config.request_timeout, Some(Duration::from_secs(30)));
+    }
+}
+
+#[cfg(all(test, feature = "ws"))]
+mod transport_deadline_tests {
+    use super::*;
+    use futures::FutureExt;
+    use futures::future::BoxFuture;
+    use nagoya::reactor::{Addr, TcpStream};
+
+    struct SlowTls {
+        listener: nagoya::reactor::TcpListener,
+        handshakes: Arc<AtomicUsize>,
+    }
+    impl ConnectionListener for SlowTls {
+        type Channel1 = TcpStream;
+        type Channel2 = TcpStream;
+        fn accept(&self) -> BoxFuture<'_, Result<(TcpStream, SocketAddr)>> {
+            async {
+                let (stream, addr) = self.listener.accept().await?;
+                Ok((stream, format!("127.0.0.1:{}", addr.port()).parse()?))
+            }
+            .boxed()
+        }
+        fn handshake(&self, stream: TcpStream) -> BoxFuture<'_, Result<TcpStream>> {
+            self.handshakes.fetch_add(1, Ordering::SeqCst);
+            async move {
+                futures::future::pending::<()>().await;
+                Ok(stream)
+            }
+            .boxed()
+        }
+    }
+
+    #[test]
+    fn admission_precedes_slow_tls_and_expiry_releases_the_slot() {
+        let reactor = Reactor::local().unwrap();
+        let handle = reactor.handle();
+        let listener = nagoya::reactor::TcpListener::bind(Addr::localhost(0), &handle).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let listener = Arc::new(SlowTls {
+            listener,
+            handshakes: handshakes.clone(),
+        });
+        let server = WebsocketServer::new(WsServerConfig {
+            max_connections: Some(1),
+            handshake_timeout: Some(Duration::from_millis(30)),
+            ..Default::default()
+        });
+        let (this, states) = server.prepare();
+        let (stop_tx, stop_rx) = futures::channel::oneshot::channel();
+        block_on_with(&reactor, async {
+            let serve = WebsocketServer::serve_shard(
+                this.clone(),
+                states,
+                listener,
+                &handle,
+                Some(async move {
+                    let _ = stop_rx.await;
+                }),
+            );
+            let clients = async {
+                let _first = TcpStream::connect(addr, &handle).await.unwrap();
+                nagoya::sleep(Duration::from_millis(5)).await;
+                let _second = TcpStream::connect(addr, &handle).await.unwrap();
+                nagoya::sleep(Duration::from_millis(5)).await;
+                assert_eq!(
+                    handshakes.load(Ordering::SeqCst),
+                    1,
+                    "over-cap peer reached TLS"
+                );
+                nagoya::sleep(Duration::from_millis(40)).await;
+                assert_eq!(
+                    this.limits.connections.load(Ordering::SeqCst),
+                    0,
+                    "TLS timeout leaked admission"
+                );
+                let _third = TcpStream::connect(addr, &handle).await.unwrap();
+                nagoya::sleep(Duration::from_millis(5)).await;
+                assert_eq!(handshakes.load(Ordering::SeqCst), 2);
+                stop_tx.send(()).unwrap();
+            };
+            let (served, ()) = nagoya::timeout(
+                Duration::from_secs(2),
+                futures::future::join(serve, clients),
+            )
+            .await
+            .unwrap();
+            served.unwrap();
+            assert_eq!(this.limits.connections.load(Ordering::SeqCst), 0);
+        });
     }
 }

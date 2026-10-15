@@ -104,6 +104,23 @@ pub type HyperTungsteniteUpgrader = NagoWssUpgrader;
 impl WsUpgrader for NagoWssUpgrader {
     async fn upgrade_stream(
         &self,
+        stream: BoxedStream,
+        addr: SocketAddr,
+        config: &WsServerConfig,
+    ) -> Result<Option<UpgradeEvent>> {
+        let upgrade = self.upgrade_inner(stream, addr, config);
+        match config.handshake_timeout {
+            Some(timeout) => nagoya::timeout(timeout, upgrade)
+                .await
+                .map_err(|_| eyre!("HTTP upgrade deadline exceeded"))?,
+            None => upgrade.await,
+        }
+    }
+}
+
+impl NagoWssUpgrader {
+    async fn upgrade_inner(
+        &self,
         mut stream: BoxedStream,
         addr: SocketAddr,
         config: &WsServerConfig,

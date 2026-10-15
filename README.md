@@ -1,7 +1,7 @@
 # endpoint-libs
 
-Version 3.4.2 enables bounded defaults for existing WebSocket admission controls;
-see [server limits and remaining gaps](docs/server-limits.md). Blockchain scalar
+Version 3.4.3 adds cancellation cleanup, MCP admission and transport deadlines;
+see [server limits](docs/server-limits.md). Blockchain scalar
 decoding now rejects malformed hexadecimal input, auth protocol parsing ignores
 invalid discriminators, and configuration loading no longer prints loaded values.
 See [scalar decoding](docs/blockchain-scalar-decoding.md),
@@ -310,8 +310,10 @@ impl SubAuthController for MethodSignup {
 
 ### Server limits
 
-Server admission limits are opt-in. Every limit defaults to `None`, so the
-application chooses its own policy and values. Configure limits before calling
+Server admission defaults to 1024 connections, 1 MiB messages and 32 concurrent
+requests across all shards. Requests have a 30-second budget including hooks;
+handshakes have 10 seconds and idle sessions have 120 seconds. Individual `None`
+values opt out. Configure limits before calling
 `listen()` or `serve_with()`:
 
 ```rust
@@ -331,7 +333,7 @@ let config = WsServerConfig {
 };
 ```
 
-`max_connections` refuses excess WebSocket upgrades with HTTP 503.
+`max_connections` closes excess accepted transports before TLS or HTTP upgrades.
 `max_message_bytes` bounds frame and reassembled-message sizes; the transport
 closes a connection that sends a larger message before it is decoded, and no
 callback fires for that refusal. Request limits
@@ -340,8 +342,8 @@ busy` error without entering the handler. A timed out handler is cancelled and
 receives a timeout error; its in-flight slot is released. Each `warn_*` value
 fires one `LimitKind::Warn` callback per server when observed usage first
 reaches its threshold. Refusals fire `LimitKind::Refuse`. Callback events name
-the limit and report current and threshold values. The library has no defaults
-for limits and emits no limit logs itself.
+the limit and report current and threshold values. See [server limits](docs/server-limits.md)
+for cancellation cleanup and deadline details.
 
 ### MCP (Model Context Protocol) support
 
