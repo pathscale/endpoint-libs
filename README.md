@@ -1,5 +1,13 @@
 # endpoint-libs
 
+Version 3.4.2 enables bounded defaults for existing WebSocket admission controls;
+see [server limits and remaining gaps](docs/server-limits.md). Blockchain scalar
+decoding now rejects malformed hexadecimal input, auth protocol parsing ignores
+invalid discriminators, and configuration loading no longer prints loaded values.
+See [scalar decoding](docs/blockchain-scalar-decoding.md),
+[auth protocols](docs/auth-protocol-validation.md), and
+[config logging](docs/config-log-policy.md).
+
 [![Crates.io](https://img.shields.io/crates/v/endpoint-libs)](https://crates.io/crates/endpoint-libs)
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)

@@ -335,12 +335,7 @@ impl WebsocketServer {
             return Ok(());
         };
 
-        debug!(
-            ws_server = true,
-            ?addr,
-            protocol = %event.protocol,
-            "WsServer: upgrade succeeded, protocol received"
-        );
+        debug!(ws_server = true, ?addr, "WsServer: upgrade succeeded");
 
         self.post_upgrade_connection(addr, states, event.stream, event.protocol)
             .await;
@@ -1062,17 +1057,19 @@ pub struct WsServerConfig {
     /// Reject every non-JSON-RPC frame. Requires [`WebsocketServer::enable_mcp`].
     #[serde(default)]
     pub mcp_only: bool,
-    /// Maximum simultaneous accepted connections. Disabled by default.
-    #[serde(default)]
+    /// Maximum simultaneous accepted connections. Default: 1024. `None` opts out.
+    #[serde(default = "WsServerConfig::default_max_connections")]
     pub max_connections: Option<usize>,
-    /// Maximum WebSocket message size in bytes. Disabled by default.
-    #[serde(default)]
+    /// Maximum WebSocket message size in bytes. Default: 1 MiB. `None` opts out.
+    #[serde(default = "WsServerConfig::default_max_message_bytes")]
     pub max_message_bytes: Option<usize>,
-    /// Maximum concurrent request handlers. Disabled by default.
-    #[serde(default)]
+    /// Maximum concurrent request handlers across the server. Default: 32.
+    /// `None` opts out.
+    #[serde(default = "WsServerConfig::default_max_inflight_requests")]
     pub max_inflight_requests: Option<usize>,
-    /// Maximum time a request handler may run. Disabled by default.
-    #[serde(default)]
+    /// Maximum time for a legacy request handler, excluding hooks. Default: 30 seconds.
+    /// `None` opts out.
+    #[serde(default = "WsServerConfig::default_request_timeout")]
     pub request_timeout: Option<Duration>,
     #[serde(default)]
     pub warn_connections: Option<usize>,
@@ -1111,10 +1108,10 @@ impl Default for WsServerConfig {
             allow_cors_urls: Arc::new(None),
             server_name: Self::default_server_name(),
             mcp_only: false,
-            max_connections: None,
-            max_message_bytes: None,
-            max_inflight_requests: None,
-            request_timeout: None,
+            max_connections: Self::default_max_connections(),
+            max_message_bytes: Self::default_max_message_bytes(),
+            max_inflight_requests: Self::default_max_inflight_requests(),
+            request_timeout: Self::default_request_timeout(),
             warn_connections: None,
             warn_message_bytes: None,
             warn_inflight_requests: None,
@@ -1125,6 +1122,18 @@ impl Default for WsServerConfig {
 }
 
 impl WsServerConfig {
+    fn default_max_connections() -> Option<usize> {
+        Some(1024)
+    }
+    fn default_max_message_bytes() -> Option<usize> {
+        Some(1_048_576)
+    }
+    fn default_max_inflight_requests() -> Option<usize> {
+        Some(32)
+    }
+    fn default_request_timeout() -> Option<Duration> {
+        Some(Duration::from_secs(30))
+    }
     fn default_message_buffer_size() -> usize {
         256
     }
@@ -1252,5 +1261,28 @@ mod limit_tests {
         for _ in 0..1000 {
             assert!(state.acquire(&config, "connections"));
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_default_tests {
+    use super::*;
+    use serde::de::value::{Error, MapDeserializer};
+
+    #[test]
+    fn omitted_limits_match_default_limits() {
+        let config = WsServerConfig::deserialize(MapDeserializer::<_, Error>::new(
+            [("address", "127.0.0.1:0")].into_iter(),
+        ))
+        .unwrap();
+        let default = WsServerConfig::default();
+        assert_eq!(config.max_connections, default.max_connections);
+        assert_eq!(config.max_message_bytes, default.max_message_bytes);
+        assert_eq!(config.max_inflight_requests, default.max_inflight_requests);
+        assert_eq!(config.request_timeout, default.request_timeout);
+        assert_eq!(config.max_connections, Some(1024));
+        assert_eq!(config.max_message_bytes, Some(1_048_576));
+        assert_eq!(config.max_inflight_requests, Some(32));
+        assert_eq!(config.request_timeout, Some(Duration::from_secs(30)));
     }
 }

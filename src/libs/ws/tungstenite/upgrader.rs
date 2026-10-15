@@ -196,7 +196,6 @@ impl WsUpgrader for NagoWssUpgrader {
             ws_server = true,
             ?addr,
             path = %request.path,
-            protocol = ?selected,
             "upgrade accepted, 101 sent"
         );
 

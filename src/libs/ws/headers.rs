@@ -182,7 +182,8 @@ fn parse_protocol_header(header: &str) -> HashMap<&str, &str> {
         .split(',')
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
-        .map(|x| (&x[..1], &x[1..]))
+        .filter(|x| x.as_bytes().first().is_some_and(u8::is_ascii_digit))
+        .map(|x| x.split_at(1))
         .collect()
 }
 
@@ -316,7 +317,18 @@ mod tests {
         let map = parse_protocol_header("0method,1val,ue");
         assert_eq!(map.get("0"), Some(&"method"));
         assert_eq!(map.get("1"), Some(&"val"));
-        assert_eq!(map.get("u"), Some(&"e"));
-        assert_eq!(map.len(), 3);
+        assert!(!map.contains_key("u"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn malformed_unicode_and_non_digit_discriminators_are_ignored() {
+        for header in ["éx", "🦀", " , , ", "xvalue", "０method"] {
+            assert!(parse_protocol_header(header).is_empty());
+        }
+        let map = parse_protocol_header("éx,0first,1héllo world,0last");
+        assert_eq!(map.get("0"), Some(&"last"));
+        assert_eq!(map.get("1"), Some(&"héllo world"));
+        assert_eq!(map.len(), 2);
     }
 }
