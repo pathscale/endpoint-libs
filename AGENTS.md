@@ -11,10 +11,9 @@ natively, and Claude Code loads it through the `@AGENTS.md` import in
 
 - **No Python.** Not a script, not `python3 -c`, not a heredoc. Reaching for it is the
   tell that a step is being solved by parsing when the tool that owns the answer could
-  just be asked. Do not swap it for another parser either, and do not assume `jq` is
-  present: it does not ship with macOS. A fixed-shape field is one `sed -nE` line;
-  anything needing real parsing belongs in this repo's own language, where it can be
-  tested. If a task seems to need Python, the approach is wrong.
+  just be asked. A fixed-shape field is one `sed -nE` line; use Bun to parse JSON in
+  workflow and hook scripts, and this repo's Rust code for application data. If a task
+  seems to need Python, the approach is wrong.
 
 - **Verify the whole chain, not just this repo.** endpoint-gen, honey_id-types,
   endpoint-validator and the six backends all break silently when this crate moves.

@@ -39,8 +39,9 @@ jobs:
       - id: version
         run: |
           set -eu
-          name=$(cargo read-manifest | jq -er '.name')
-          version=$(cargo read-manifest | jq -er '.version')
+          manifest=$(cargo read-manifest)
+          name=$(printf '%s' "$manifest" | bun -e 'const manifest = await Bun.stdin.json(); console.log(manifest.name)')
+          version=$(printf '%s' "$manifest" | bun -e 'const manifest = await Bun.stdin.json(); console.log(manifest.version)')
           if cargo info --registry crates-io "$name@$version" >/dev/null 2>&1; then
             echo "$name $version is already on crates.io, nothing to publish"
             echo "changed=false" >> "$GITHUB_OUTPUT"

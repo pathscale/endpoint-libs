@@ -25,12 +25,8 @@ set -u
 RISKY_WORDS="aws|gcloud|az|kubectl|helm|terraform|terragrunt|flyctl|fly"
 # -----------------------------------------------------------------------------------
 
-# Pull the command out of the hook's stdin JSON (jq if available, else python3).
-if command -v jq >/dev/null 2>&1; then
-  cmd="$(jq -r '.tool_input.command // ""' 2>/dev/null)"
-else
-  cmd="$(python3 -c 'import sys, json; print(json.load(sys.stdin).get("tool_input", {}).get("command", ""))' 2>/dev/null)"
-fi
+# Pull the command out of the hook's stdin JSON with Bun.
+cmd="$(bun -e 'const input = await Bun.stdin.json(); console.log(input.tool_input?.command ?? "")' 2>/dev/null)"
 
 # Couldn't read the command → stay neutral, let normal permission rules decide.
 [ -z "$cmd" ] && exit 0
