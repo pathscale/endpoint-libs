@@ -18,7 +18,6 @@
       "Bash(bun publish:*)",
       "Bash(docker push:*)",
       "Bash(gh pr merge:*)",
-      "Bash(gh release:*)",
       "Bash(aws:*)",
       "Bash(gcloud:*)",
       "Bash(az:*)",
