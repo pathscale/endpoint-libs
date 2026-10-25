@@ -1,7 +1,7 @@
 # Publish workflow origin gate
 
-The `publish` job runs only for a push to `master` or a `workflow_dispatch`
-whose ref is `master`. Its `crates-io` environment must be configured to allow
+The `publish` job runs only for a `workflow_dispatch` whose ref is `master`.
+Its `crates-io` environment must be configured to allow
 deployments from `master` only and must hold `CARGO_REGISTRY_TOKEN` before
 publishing is activated.
 

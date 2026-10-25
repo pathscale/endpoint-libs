@@ -1,14 +1,9 @@
 name: Rust
 
-# No pull request trigger: the gate is the one an author runs locally before
-# asking for review, and a tick that arrives unasked is a tick people stop
-# reading. Master is different. The publish job below is gated on
-# `github.event_name == 'push'` and reads `github.event.before` to diff
-# Cargo.toml, so a push to master is the release mechanism and removing it
-# silently stops releases rather than making anything manual.
+# This workflow has no automatic triggers. Maintainers dispatch it when they
+# want to run the CI gate. Releases are a separate manual dispatch of
+# `.github/workflows/publish.yml`.
 on:
-  push:
-    branches: [ "master" ]
   workflow_dispatch:
 
 env:

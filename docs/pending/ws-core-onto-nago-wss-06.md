@@ -50,9 +50,9 @@ On 2026-09-22 `fix/ws-core-lane1` was fast-forwarded onto
 `fix/restore-release-trigger` at `ea676b3`; `27e75e7` was an ancestor, so
 nothing was discarded. What that changes for whoever reads this next:
 
-- **Merging #52 publishes.** `.github/workflows/rust.yml` runs `cargo publish`
-  on a push to master whenever `Cargo.toml` differs from the previous commit.
-  There is no version check in that job. This branch changes `Cargo.toml`.
+- **Merging #52 does not publish automatically.** Releases use a manual
+  dispatch of `.github/workflows/publish.yml` on master, which asks crates.io
+  whether the manifest version is already published.
 - **The version is still `3.2.0`, and the branch carries fourteen breaking
   changes to reachable public API.** Removed `pub` fields
   (`WebsocketServer::message_receiver`, `::cached_date`), a public trait

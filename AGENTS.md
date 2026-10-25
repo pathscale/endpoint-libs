@@ -59,7 +59,7 @@ Why it's off: CI here does not reliably attach checks to pull requests, so
 `statusCheckRollup` comes back empty and "wait for green" would teach an agent to wait on
 nothing. Verify per repo before switching this on.
 
-To enable: ensure the workflow runs on `pull_request:`, confirm checks attach to a PR, then
+To enable: establish a pull request check workflow, confirm checks attach to a PR, then
 uncomment the rule below.
 
     After any push or PR, **check CI and don't call it done until it's green**:
