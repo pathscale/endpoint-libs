@@ -1,0 +1,38 @@
+{
+  "fixture_scope": "synthetic public-shape vectors; no customer payloads",
+  "source_shape_examples": [
+    "Pays PaymentJobReceipt: string amountBaseUnits and transaction metadata",
+    "Merchant MerchantSummary: string identifiers plus signed appCount and keyCount",
+    "Karen AdminAuditAction: integer-valued public enum"
+  ],
+  "schema_expectations": {
+    "/properties/receipt": {"$ref": "#/$defs/PaymentJobReceipt"},
+    "/properties/merchant": {"$ref": "#/$defs/MerchantSummary"},
+    "/properties/actions/items": {"$ref": "#/$defs/AdminAuditAction"},
+    "/properties/samples": {"type": "array", "items": {"$ref": "#/$defs/HealthSample"}},
+    "/properties/amount": {"type": "string", "description": "Decimal number as string"},
+    "/properties/unsignedCount": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "/properties/signedDelta": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647},
+    "/properties/optionalCursor": {"type": "integer"},
+    "/required": ["receipt", "merchant", "actions", "samples", "amount", "unsignedCount", "signedDelta"],
+    "/$defs/PaymentJobReceipt/properties/amountBaseUnits/type": "string",
+    "/$defs/MerchantSummary/properties/appCount/minimum": -2147483648,
+    "/$defs/HealthSample/required": ["sampledAtUnixMs"]
+  },
+  "stream_schema": {"root": {"$ref": "#/$defs/HealthSample"}},
+  "vectors": [
+    {"id": "nested-good", "json": {"receipt": {"amountBaseUnits": "1250000", "outcome": "settled", "asset": "USD", "recipient": "acct_example", "transactionSignature": "sig_example", "recordedAtUnix": 1720000000}}, "schema_expected": "valid", "runner_current": "accepted by top-level StructRef bypass; nested fields are not checked"},
+    {"id": "nested-wrong-field-type", "json": {"receipt": {"amountBaseUnits": 1250000}}, "schema_expected": "invalid", "runner_current": "accepted: unresolved StructRef passes shape_matches"},
+    {"id": "nested-missing-required", "json": {"receipt": {}}, "schema_expected": "invalid", "runner_current": "accepted: nested required fields are not checked"},
+    {"id": "vector-wrong-item", "json": {"actions": ["unknown"]}, "schema_expected": "invalid", "runner_current": "accepted: Vec checks only array-ness"},
+    {"id": "table-wrong-row", "json": {"samples": [null]}, "schema_expected": "invalid", "runner_current": "accepted: StructTable checks only array-ness"},
+    {"id": "unsigned-negative", "json": {"unsignedCount": -1}, "schema_expected": "invalid", "runner_current": "accepted: integer signedness and bounds are not enforced"},
+    {"id": "signed-overflow", "json": {"signedDelta": 2147483648}, "schema_expected": "invalid", "runner_current": "accepted: Int32 range is not enforced"},
+    {"id": "string-amount", "json": {"amount": "1.250000"}, "schema_expected": "valid as string; decimal grammar is unconstrained", "runner_current": "accepted as string"},
+    {"id": "missing-required-top-level", "json": {}, "schema_expected": "invalid", "runner_current": "rejected by EndpointRunner missing-field check"},
+    {"id": "optional-omitted", "json": {}, "schema_expected": "valid when the optional field is omitted", "runner_current": "accepted when omitted"},
+    {"id": "optional-null", "json": {"optionalCursor": null}, "schema_expected": "invalid for object field schema: Optional is unwrapped and only removes requiredness", "runner_current": "accepted as null"},
+    {"id": "stream-good-frame", "frame": {"type": "Update", "params": {"sampledAtUnixMs": 1720000000}}, "schema_expected": "valid HealthSample", "runner_current": "stream payload not validated by check"},
+    {"id": "stream-bad-frame", "frame": {"type": "Update", "params": {"sampledAtUnixMs": "wrong"}}, "schema_expected": "invalid HealthSample", "runner_current": "stream payload not validated by check"}
+  ]
+}

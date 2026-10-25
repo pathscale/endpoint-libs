@@ -1006,6 +1006,8 @@ impl WebsocketServer {
         Ok(())
     }
 
+    // This explicit opt-in writes public endpoint names for local documentation.
+    #[allow(clippy::disallowed_methods)]
     pub fn dump_schemas(&self) -> Result<()> {
         let _ = std::fs::create_dir_all("docs");
         let file = format!("docs/{}_alive_endpoints.json", self.config.name);

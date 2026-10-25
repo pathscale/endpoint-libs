@@ -15,6 +15,8 @@ impl std::fmt::Debug for Config {
 
 // This regression fixture deliberately exercises the deprecated configuration loader.
 #[allow(deprecated)]
+// This executable writes only a synthetic configuration fixture for its child.
+#[allow(clippy::disallowed_methods)]
 fn main() {
     if std::env::var_os("ENDPOINT_CONFIG_LOG_CHILD").is_some() {
         let config: Config = endpoint_libs::libs::config::load_config("unused".to_owned()).unwrap();

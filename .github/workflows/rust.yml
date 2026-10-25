@@ -68,13 +68,13 @@ jobs:
           components: clippy
       - name: Lint supported feature boundaries
         run: |
-          cargo clippy --all-targets --no-default-features -- -D warnings
-          cargo clippy --all-targets -- -D warnings
-          cargo clippy --all-targets --no-default-features --features agent-control -- -D warnings
-          cargo clippy --all-targets --no-default-features --features ws-client -- -D warnings
-          cargo clippy --all-targets --no-default-features --features ws -- -D warnings
-          cargo clippy --all-targets --no-default-features --features full -- -D warnings
-          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets --no-default-features --features agent-control -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets --no-default-features --features ws-client -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets --no-default-features --features ws -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets --no-default-features --features full -- -D warnings -D clippy::disallowed_methods
+          cargo clippy --all-targets --all-features -- -D warnings -D clippy::disallowed_methods
 
   format_check:
 

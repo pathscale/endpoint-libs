@@ -1,0 +1,9 @@
+# Guard direct filesystem APIs commonly used to persist caller-controlled data.
+# CI denies clippy::disallowed_methods for every supported feature boundary.
+# This does not cover alternate APIs, Write trait calls, FFI, subprocesses, or
+# writes performed by consumers; those require separate semantic review.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "Route persistent output through a reviewed, secret-aware owner." },
+    { path = "std::fs::File::create", reason = "Route persistent output through a reviewed, secret-aware owner." },
+    { path = "std::fs::create_dir_all", reason = "Directory creation must be an explicit reviewed persistence boundary." },
+]

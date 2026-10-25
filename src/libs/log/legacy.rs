@@ -35,6 +35,9 @@ impl DynLogger {
 }
 
 /// actually test writing, there is no direct way to check if the application has the ownership or the write access
+// Deprecated compatibility helper: this creates and removes an empty probe file
+// to report directory writability. It never writes configuration or credentials.
+#[allow(clippy::disallowed_methods)]
 pub fn can_create_file_in_directory(directory: &str) -> bool {
     let test_file_path: String = format!("{directory}/test_file.txt");
     match std::fs::File::create(&test_file_path) {
