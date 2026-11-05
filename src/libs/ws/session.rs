@@ -193,7 +193,7 @@ impl WsClientSession {
         };
         let req = match obj {
             Ok(req) => req,
-            Err(err) => {
+            Err(_err) => {
                 self.server.toolbox.send(
                     context.connection_id,
                     WsResponseValue::Error(WsResponseError {
@@ -203,7 +203,7 @@ impl WsClientSession {
                         log_id: context.log_id.to_string(),
                         params: serde_json::json!({
                             "kind": ErrorCode::BAD_REQUEST.kind(),
-                            "message": err.to_string(),
+                            "message": "invalid request",
                         }),
                     }),
                 );
