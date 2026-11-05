@@ -1,6 +1,9 @@
 # endpoint-libs
 
-Version 3.4.3 adds cancellation cleanup, MCP admission and transport deadlines;
+Version 3.4.4 makes unauthenticated WebSocket errors generic, rejects control
+bytes and malformed custom header names in client request heads, and parses log
+delimiters without slicing inside UTF-8. Version 3.4.3 adds cancellation cleanup,
+MCP admission and transport deadlines;
 see [server limits](docs/server-limits.md). Blockchain scalar
 decoding now rejects malformed hexadecimal input, auth protocol parsing ignores
 invalid discriminators, and configuration loading no longer prints loaded values.
