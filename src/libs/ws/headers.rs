@@ -78,16 +78,7 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
             let buf = serde_json::to_string(&param).unwrap();
             let data: T::Request = match serde_json::from_value(param) {
                 Ok(data) => data,
-                Err(err) => {
-                    let jd = &mut serde_json::Deserializer::from_str(&buf);
-                    let data: std::result::Result<T::Request, _> =
-                        serde_path_to_error::deserialize(jd);
-                    let path = data.err().map(|err| err.path().to_string());
-                    let message = if let Some(path) = path {
-                        format!("{path}: {err}")
-                    } else {
-                        format!("{err}")
-                    };
+                Err(_err) => {
                     toolbox.send(
                         ctx.connection_id,
                         WsResponseValue::Error(WsResponseError {
@@ -97,7 +88,7 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
                             log_id: ctx.log_id.to_string(),
                             params: serde_json::json!({
                                 "kind": ErrorCode::BAD_REQUEST.kind(),
-                                "message": message,
+                                "message": "authentication failed",
                             }),
                         }),
                     );
@@ -330,5 +321,151 @@ mod tests {
         assert_eq!(map.get("0"), Some(&"last"));
         assert_eq!(map.get("1"), Some(&"héllo world"));
         assert_eq!(map.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod preauth_sanitization_regression {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use futures::FutureExt;
+    use parking_lot::RwLock;
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+
+    use super::*;
+    use crate::libs::peer::{Extensions, PeerIdentity};
+    use crate::libs::ws::WsResponse;
+
+    #[derive(Clone, Deserialize, Serialize)]
+    struct TypedAuthRequest {
+        credential: u64,
+    }
+
+    #[derive(Clone, Deserialize, Serialize)]
+    struct TypedAuthReply {
+        accepted: bool,
+    }
+
+    impl WsRequest for TypedAuthRequest {
+        type Response = TypedAuthReply;
+        const METHOD_ID: u32 = 71;
+        const SCHEMA: &'static str = "{}";
+        const ROLES: &'static [u32] = &[];
+    }
+
+    impl WsResponse for TypedAuthReply {
+        type Request = TypedAuthRequest;
+    }
+
+    struct TypedAuthHandler {
+        calls: Arc<AtomicUsize>,
+        accepted_credential: Arc<AtomicUsize>,
+    }
+
+    impl SubAuthController for TypedAuthHandler {
+        type Request = TypedAuthRequest;
+        type Error = CustomError;
+
+        fn auth(
+            self: Arc<Self>,
+            _toolbox: &ArcToolbox,
+            req: Self::Request,
+            _ctx: RequestContext,
+            _conn: Arc<WsConnection>,
+        ) -> LocalBoxFuture<'static, AuthResponse<Self::Request, Self::Error>> {
+            async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.accepted_credential
+                    .store(req.credential as usize, Ordering::SeqCst);
+                Ok(TypedAuthReply {
+                    accepted: req.credential == 42,
+                })
+            }
+            .boxed_local()
+        }
+    }
+
+    fn test_connection() -> Arc<WsConnection> {
+        Arc::new(WsConnection {
+            connection_id: 9,
+            user_id: std::sync::atomic::AtomicU64::new(0),
+            roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            peer: PeerIdentity::Unknown,
+            extensions: Extensions::new(),
+            log_id: 123,
+        })
+    }
+
+    #[test]
+    fn erased_auth_sanitizes_malformed_typed_input_and_dispatches_valid_input() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_by_toolbox = Arc::clone(&sent);
+        let toolbox = Toolbox::new();
+        assert!(
+            toolbox
+                .send_msg
+                .set(Arc::new(move |connection_id, response| {
+                    assert_eq!(connection_id, 9);
+                    sent_by_toolbox.lock().unwrap().push(response);
+                    true
+                }))
+                .is_ok()
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let accepted_credential = Arc::new(AtomicUsize::new(0));
+        let controller: Arc<dyn SubAuthControllerErased> = Arc::new(TypedAuthHandler {
+            calls: Arc::clone(&calls),
+            accepted_credential: Arc::clone(&accepted_credential),
+        });
+        let conn = test_connection();
+        let mut ctx = RequestContext::empty();
+        ctx.connection_id = 9;
+        ctx.method = 71;
+        ctx.seq = 4;
+        ctx.log_id = 123;
+
+        futures::executor::block_on(controller.clone().auth(
+            &toolbox,
+            json!({"credential": "secret-input-must-not-leak"}),
+            ctx.clone(),
+            Arc::clone(&conn),
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            let WsResponseValue::Error(error) = &sent[0] else {
+                panic!("malformed authentication input should return an error");
+            };
+            assert_eq!(error.code, ErrorCode::BAD_REQUEST.to_u32());
+            assert_eq!(
+                error.params,
+                json!({
+                    "kind": ErrorCode::BAD_REQUEST.kind(),
+                    "message": "authentication failed",
+                })
+            );
+            let wire_params = serde_json::to_string(&error.params).unwrap();
+            assert!(!wire_params.contains("secret-input-must-not-leak"));
+            assert!(!wire_params.contains("invalid type"));
+            assert!(!wire_params.contains("expected u64"));
+        }
+
+        futures::executor::block_on(controller.auth(
+            &toolbox,
+            json!({"credential": 42}),
+            ctx,
+            conn,
+        ));
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(accepted_credential.load(Ordering::SeqCst), 42);
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(matches!(sent[1], WsResponseValue::Immediate(_)));
     }
 }
