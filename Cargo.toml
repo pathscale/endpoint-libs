@@ -11,6 +11,7 @@ categories = ["web-programming::websocket", "network-programming", "development-
 repository = "https://github.com/pathscale/endpoint-libs"
 readme = "README.md"
 license = "MIT"
+publish = ["crates-io"]
 
 [features]
 default = ["types"]
