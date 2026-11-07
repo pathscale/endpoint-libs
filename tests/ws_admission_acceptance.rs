@@ -5,8 +5,9 @@ use endpoint_libs::libs::handler::{RequestHandler, Response};
 use endpoint_libs::libs::peer::PeerIdentity;
 use endpoint_libs::libs::toolbox::{ArcToolbox, CustomError, RequestContext};
 use endpoint_libs::libs::ws::{
-    AuthController, MessageStream, NagoWssUpgrader, OnDisconnect, StreamError, WebsocketServer,
-    WebsocketStates, WsConnection, WsMessage, WsRequest, WsResponse, WsServerConfig, WsUpgrader,
+    AuthController, AuthReply, MessageStream, NagoWssUpgrader, OnDisconnect, StreamError,
+    WebsocketServer, WebsocketStates, WsConnection, WsMessage, WsRequest, WsResponse,
+    WsResponseValue, WsServerConfig, WsSuccessResponse, WsUpgrader,
 };
 use endpoint_libs::model::{EndpointSchema, TypeRegistry};
 use eyre::Result;
@@ -44,6 +45,42 @@ impl AuthController for Auth {
         .boxed_local()
     }
 }
+
+struct QueueFillingAuth;
+impl AuthController for QueueFillingAuth {
+    fn auth(
+        self: Arc<Self>,
+        _: &ArcToolbox,
+        _: String,
+        _: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<()>> {
+        async { Ok(()) }.boxed_local()
+    }
+
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        _: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
+        let toolbox = Arc::clone(toolbox);
+        async move {
+            // The waiting request must be eligible for dispatch if admission succeeds.
+            conn.set_roles(Arc::new(vec![1]));
+            assert!(toolbox.send(
+                conn.connection_id,
+                WsResponseValue::Error(Default::default()),
+            ));
+            Ok(AuthReply::Accepted(Some(WsSuccessResponse {
+                method: 1,
+                seq: 0,
+                params: serde_json::value::to_raw_value(&()).unwrap(),
+            })))
+        }
+        .boxed_local()
+    }
+}
+
 struct Disconnect(Arc<AtomicUsize>);
 #[async_trait(?Send)]
 impl OnDisconnect for Disconnect {
@@ -160,6 +197,73 @@ impl RequestHandler for MethodWait {
         }
         Ok(WaitResponse { done: true })
     }
+}
+
+struct MethodWaitCountDispatch(Arc<AtomicUsize>);
+#[async_trait(?Send)]
+impl RequestHandler for MethodWaitCountDispatch {
+    type Request = WaitRequest;
+    type Error = CustomError;
+
+    async fn handle(&self, _: RequestContext, _: WaitRequest) -> Response<WaitRequest> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(WaitResponse { done: true })
+    }
+}
+
+#[test]
+fn full_auth_queue_rejects_even_when_custom_toolbox_hook_returns_true() {
+    let reactor = Reactor::local().unwrap();
+    block_on_with(&reactor, async {
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let mut server = WebsocketServer::new(WsServerConfig {
+            message_buffer_size: 1,
+            ..Default::default()
+        });
+        server.set_auth_controller(QueueFillingAuth);
+        server.add_handler(MethodWaitCountDispatch(dispatched.clone()));
+
+        let states = Arc::new(WebsocketStates::new());
+        let hook_states = states.clone_states();
+        let hook_calls = AtomicUsize::new(0);
+        assert!(
+            server
+                .toolbox
+                .send_msg
+                .set(Arc::new(move |connection_id, _| {
+                    // Fill the queue on the first call and report success on every call.
+                    if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        hook_states
+                            .get(&connection_id)
+                            .unwrap()
+                            .message_queue
+                            .try_send(WsMessage::Text("occupied".into()))
+                            .unwrap();
+                    }
+                    true
+                }))
+                .is_ok()
+        );
+
+        let (stream, tx, mut rx) = stream();
+        tx.unbounded_send(WsMessage::Text(
+            r#"{"method":1,"seq":9,"params":{"pending":false}}"#.into(),
+        ))
+        .unwrap();
+        tx.unbounded_send(WsMessage::Close(None)).unwrap();
+
+        Arc::new(server)
+            .serve_connection(peer(), states, stream, None)
+            .await;
+
+        assert_eq!(
+            dispatched.load(Ordering::SeqCst),
+            0,
+            "a request ran even though the auth reply could not be queued"
+        );
+        assert_eq!(text(rx.next().await.unwrap()), "occupied");
+        assert!(rx.next().await.is_none());
+    });
 }
 
 #[test]

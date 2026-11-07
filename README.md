@@ -577,6 +577,10 @@ The server core is transport-agnostic. Alongside the WebSocket path (`listen()`)
 entry points let the same handlers, roles, typed errors and MCP surface run over a Unix
 socket, a Windows named pipe, or macOS XPC.
 
+Connection IDs start at 1 on each process start and are never reused within a process.
+Once all nonzero `u32` IDs have been issued, the server refuses new sessions until
+the process restarts. Existing sessions continue to run.
+
 ```rust
 // Server: one already-established connection, any transport.
 server.serve_connection(peer, states, stream, /* auth token */ None).await;

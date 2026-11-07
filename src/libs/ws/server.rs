@@ -22,7 +22,7 @@ use crate::libs::handler::{RequestHandler, RequestHandlerErased};
 use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::signal::Shutdown;
 use crate::libs::toolbox::{ArcToolbox, RequestContext, TOOLBOX, Toolbox};
-use crate::libs::utils::{get_conn_id, get_log_id};
+use crate::libs::utils::{get_log_id, try_get_conn_id};
 #[cfg(feature = "ws")]
 use crate::libs::ws::NagoWssUpgrader;
 use crate::libs::ws::mcp::{McpServerInfo, McpState};
@@ -437,6 +437,9 @@ impl WebsocketServer {
     /// time — the WebSocket subprotocol string today, a handed-over token for local
     /// transports. It is passed to [`AuthController::auth`] unchanged.
     ///
+    /// If the process has exhausted its connection IDs, this returns before
+    /// authentication or registration.
+    ///
     /// [`MessageStream`]'s futures are not `Send`, so this must be polled on
     /// the thread that owns the stream. [`Self::serve_with`] does that by
     /// driving connections with `FuturesUnordered` rather than `spawn_local`.
@@ -460,8 +463,17 @@ impl WebsocketServer {
             return;
         }
 
+        let Some(connection_id) = try_get_conn_id() else {
+            error!(
+                ws_server = true,
+                peer = %peer,
+                "connection id space exhausted; refusing connection"
+            );
+            return;
+        };
+
         let conn = Arc::new(WsConnection {
-            connection_id: get_conn_id(),
+            connection_id,
             user_id: Default::default(),
             roles: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             peer,

@@ -1,27 +1,41 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use eyre::Result;
 
 pub fn get_log_id() -> u64 {
     chrono::Utc::now().timestamp_micros() as _
 }
 
-/// A connection id unique within this process.
+/// Allocates a connection ID unique within this process.
 ///
-/// It was the clock in microseconds, cut to 32 bits, which gives two
-/// connections accepted in the same microsecond the same id. With one accept
-/// loop that took two accepts inside a microsecond; with a shard per core it
-/// is two shards accepting at once, and the second insert into the shared
-/// connection table replaced the first. A counter cannot repeat until it wraps.
-/// It starts from the clock so ids still differ across restarts in logs.
+/// IDs start at 1 on each process start.
+///
+/// # Panics
+///
+/// Panics once all nonzero `u32` IDs have been issued in this process.
 pub fn get_conn_id() -> u32 {
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static NEXT: OnceLock<AtomicU32> = OnceLock::new();
-    NEXT.get_or_init(|| AtomicU32::new(chrono::Utc::now().timestamp_micros() as u32))
-        .fetch_add(1, Ordering::Relaxed)
+    try_get_conn_id().expect("connection ID space exhausted")
+}
+
+/// Returns `None` once all nonzero `u32` connection IDs have been issued.
+pub(crate) fn try_get_conn_id() -> Option<u32> {
+    static LAST: AtomicU32 = AtomicU32::new(0);
+    next_conn_id(&LAST)
+}
+
+fn next_conn_id(last: &AtomicU32) -> Option<u32> {
+    last.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        current.checked_add(1)
+    })
+    .ok()
+    .and_then(|previous| previous.checked_add(1))
 }
 
 #[cfg(test)]
 mod conn_id_tests {
+    use std::sync::Barrier;
+    use std::sync::atomic::AtomicU32;
+
     #[test]
     fn ids_from_many_threads_never_repeat() {
         let ids: Vec<u32> = std::thread::scope(|scope| {
@@ -41,6 +55,37 @@ mod conn_id_tests {
         });
         let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
         assert_eq!(unique.len(), ids.len());
+    }
+
+    #[test]
+    fn concurrent_allocation_exhausts_without_wrapping() {
+        let last = AtomicU32::new(u32::MAX - 1);
+        let barrier = Barrier::new(3);
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = &barrier;
+                    let last = &last;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        super::next_conn_id(last)
+                    })
+                })
+                .collect();
+            barrier.wait();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(
+            results.iter().filter(|id| **id == Some(u32::MAX)).count(),
+            1
+        );
+        assert_eq!(results.iter().filter(|id| id.is_none()).count(), 1);
+        assert_eq!(super::next_conn_id(&last), None);
+        assert_eq!(super::next_conn_id(&last), None);
     }
 }
 
