@@ -204,6 +204,11 @@ matches what `listen()` does on the other side of the wire.
 This feature speaks plain `ws://` only. A `wss://` URL is refused with a message naming
 `ws-client-tls`.
 
+Use `WsClientBuilder::pre_upgrade_verifier` to check the connected socket's
+local and peer addresses before the HTTP upgrade for `ws://` or the TLS
+handshake for `wss://`. The builder awaits the verifier once on the connected
+socket and closes it if verification fails.
+
 ### `ws-client-tls`
 
 Client-side TLS for dialling an external `wss://`, off by default and deliberately not

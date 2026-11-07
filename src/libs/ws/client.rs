@@ -1,8 +1,10 @@
 use eyre::{Context, Result, bail, eyre};
+#[cfg(feature = "ws-client")]
+use futures::{FutureExt, future::BoxFuture};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 #[cfg(feature = "ws-client")]
-use std::borrow::Cow;
+use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tracing::*;
 
 // --- nago-wss/nagoya: only for the TCP(/TLS) constructors -------------------
@@ -28,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::libs::log::LogLevel;
 use crate::libs::ws::WireMessage as Message;
 #[cfg(feature = "ws-client")]
-use crate::libs::ws::{CloseFrame, Utf8Bytes};
+use crate::libs::ws::{CloseFrame, Utf8Bytes, socket_addr};
 use crate::libs::ws::{WsLogResponse, WsRequest, WsRequestGeneric, WsResponseGeneric};
 
 // ---------------------------------------------------------------------------
@@ -513,6 +515,10 @@ impl WsTarget {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ws-client")]
+type PreUpgradeVerifier =
+    Box<dyn FnOnce(SocketAddr, SocketAddr) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
+#[cfg(feature = "ws-client")]
 pub struct WsClientBuilder {
     #[cfg(feature = "ws-client-tls")]
     tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
@@ -523,6 +529,7 @@ pub struct WsClientBuilder {
     /// caller does not have to feature-gate its own code — and never read.
     #[cfg_attr(not(feature = "ws-client-tls"), allow(dead_code))]
     danger_accept_invalid_certs: bool,
+    pre_upgrade_verifier: Option<PreUpgradeVerifier>,
 }
 
 #[cfg(feature = "ws-client")]
@@ -534,6 +541,7 @@ impl WsClientBuilder {
             tls_config: None,
             headers: Vec::new(),
             danger_accept_invalid_certs: false,
+            pre_upgrade_verifier: None,
         }
     }
 
@@ -594,6 +602,21 @@ impl WsClientBuilder {
         config: std::sync::Arc<nago_wss::tls::rustls::ClientConfig>,
     ) -> Self {
         self.tls_config = Some(config);
+        self
+    }
+
+    /// Verify the connected TCP socket before sending TLS or HTTP upgrade bytes.
+    ///
+    /// The verifier runs once, with the socket's actual local and peer addresses
+    /// in that order. An error closes the connection and is returned to the caller.
+    pub fn pre_upgrade_verifier<F, Fut>(mut self, verifier: F) -> Self
+    where
+        F: FnOnce(SocketAddr, SocketAddr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.pre_upgrade_verifier = Some(Box::new(move |local, peer| {
+            verifier(local, peer).boxed()
+        }));
         self
     }
 
@@ -674,6 +697,7 @@ impl WsClientBuilder {
                     &headers,
                     self.danger_accept_invalid_certs,
                     self.tls_config,
+                    self.pre_upgrade_verifier,
                 )
                 .await;
             }
@@ -687,9 +711,7 @@ impl WsClientBuilder {
             }
         }
 
-        let stream = connect_any(&target.addrs, handle)
-            .await
-            .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
+        let stream = connect_tcp(target, handle, self.pre_upgrade_verifier).await?;
 
         let (connection, protocol) = nago_wss::upgrade::connect(
             stream,
@@ -711,6 +733,31 @@ impl WsClientBuilder {
             connect_response(protocol),
         ))
     }
+}
+
+#[cfg(feature = "ws-client")]
+async fn connect_tcp(
+    target: &WsTarget,
+    handle: &Handle,
+    verifier: Option<PreUpgradeVerifier>,
+) -> Result<TcpStream> {
+    let stream = connect_any(&target.addrs, handle)
+        .await
+        .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
+
+    if let Some(verifier) = verifier {
+        let local = stream
+            .local_addr()
+            .map_err(|err| eyre!("reading connected socket local address: {err}"))?;
+        let peer = stream
+            .peer_addr()
+            .map_err(|err| eyre!("reading connected socket peer address: {err}"))?;
+        verifier(socket_addr(local)?, socket_addr(peer)?)
+            .await
+            .wrap_err("pre-upgrade verification rejected connection")?;
+    }
+
+    Ok(stream)
 }
 
 /// Return whether `name` is a valid HTTP field-name token.
@@ -851,6 +898,7 @@ async fn connect_secure(
     headers: &[(&str, &str)],
     danger_accept_invalid_certs: bool,
     tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
+    pre_upgrade_verifier: Option<PreUpgradeVerifier>,
 ) -> Result<(WsClient, WsConnectResponse)> {
     // Through nago-wss's re-export, so this crate never names a rustls version
     // of its own and cannot end up linking a second, incompatible one.
@@ -861,9 +909,7 @@ async fn connect_secure(
     if danger_accept_invalid_certs && tls_config.is_some() {
         bail!("explicit TLS policy cannot accept invalid certificates");
     }
-    let stream = connect_any(&target.addrs, handle)
-        .await
-        .map_err(|err| eyre!("TCP connect failed for {:?}: {err}", target.addrs))?;
+    let stream = connect_tcp(target, handle, pre_upgrade_verifier).await?;
 
     let config: Arc<rustls::ClientConfig> = if let Some(config) = tls_config {
         config
