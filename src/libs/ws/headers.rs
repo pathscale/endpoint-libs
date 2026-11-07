@@ -75,7 +75,6 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
         let toolbox = toolbox.clone();
 
         async move {
-            let buf = serde_json::to_string(&param).unwrap();
             let data: T::Request = match serde_json::from_value(param) {
                 Ok(data) => data,
                 Err(_err) => {
