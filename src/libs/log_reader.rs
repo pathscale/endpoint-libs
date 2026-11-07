@@ -37,12 +37,13 @@ impl FromStr for LogEntry {
         let thread = split.next().context("no thread")?;
         let path = split
             .next()
-            .map(|x| x[..x.len() - 1].to_string())
+            .and_then(|x| x.strip_suffix(':'))
+            .map(str::to_string)
             .context("no path")?;
 
         let line_number = split
             .next()
-            .and_then(|x| x[..x.len() - 1].parse().ok())
+            .and_then(|x| x.strip_suffix(':').and_then(|line| line.parse().ok()))
             .unwrap_or(0);
         let message = split.collect::<Vec<&str>>().join(" ");
         Ok(LogEntry {
@@ -163,18 +164,22 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
             temp_file,
-            "2025-03-19T12:34:56Z INFO thread-1 src/main.rs:42 Application started"
+            "2025-03-19T12:34:56Z INFO thread-1 src/main.rs: 42: Application started"
         )
         .unwrap();
         writeln!(
             temp_file,
-            "2025-03-19T12:35:01Z ERROR thread-2 src/lib.rs:128 Failed to connect"
+            "2025-03-19T12:35:01Z ERROR thread-2 src/lib.rs: 128: Failed to connect"
         )
         .unwrap();
 
         let entries = nagoya::block_on(get_log_entries(temp_file.path(), 10)).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].level, "ERROR");
+        assert_eq!(entries[0].path, "src/lib.rs");
+        assert_eq!(entries[0].line_number, 128);
         assert_eq!(entries[1].level, "INFO");
+        assert_eq!(entries[1].path, "src/main.rs");
+        assert_eq!(entries[1].line_number, 42);
     }
 }

@@ -493,8 +493,11 @@ impl WebsocketServer {
         .and_then(|result| result);
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
-            self.toolbox
-                .send_request_error(&raw_ctx, ErrorCode::BAD_REQUEST, err.to_string());
+            self.toolbox.send_request_error(
+                &raw_ctx,
+                ErrorCode::BAD_REQUEST,
+                "authentication failed",
+            );
             error!(
                 ws_server=true,
                 error_code=?ErrorCode::BAD_REQUEST,

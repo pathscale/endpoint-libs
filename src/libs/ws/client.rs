@@ -611,6 +611,19 @@ impl WsClientBuilder {
         target: &WsTarget,
         handle: &Handle,
     ) -> Result<(WsClient, WsConnectResponse)> {
+        let has_control = |value: &str| value.bytes().any(|byte| byte.is_ascii_control());
+        if has_control(&self.protocol_header)
+            || has_control(&target.path)
+            || has_control(&target.host)
+            || has_control(&target.host_header)
+            || self
+                .headers
+                .iter()
+                .any(|(name, value)| !is_valid_header_name(name) || has_control(value))
+        {
+            bail!("invalid WebSocket request head");
+        }
+
         // The subprotocol goes out as one header value, exactly as it was
         // written. It is not a list this crate composes: the fleet's auth
         // scheme puts `0<method>, 1<key>` in that field, and splitting it on
@@ -677,6 +690,50 @@ impl WsClientBuilder {
             },
             connect_response(protocol),
         ))
+    }
+}
+
+/// Return whether `name` is a valid HTTP field-name token.
+///
+/// nago-wss serializes caller-provided headers directly, so reject empty names,
+/// separators, whitespace, and non-ASCII bytes before constructing the request.
+#[cfg(feature = "ws-client")]
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+#[cfg(all(test, feature = "ws-client"))]
+mod request_head_tests {
+    use super::is_valid_header_name;
+
+    #[test]
+    fn header_names_must_be_nonempty_http_tokens() {
+        assert!(is_valid_header_name("X-Request_Id.2"));
+        assert!(is_valid_header_name("!#$%&'*+-.^_`|~"));
+        assert!(!is_valid_header_name(""));
+        assert!(!is_valid_header_name("Bad Name"));
+        assert!(!is_valid_header_name("Bad:Name"));
+        assert!(!is_valid_header_name("é"));
     }
 }
 

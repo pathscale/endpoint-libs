@@ -1,6 +1,17 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [3.4.4] - Unreleased
+
+### Security
+
+- Return generic authentication and request-decoding errors to WebSocket clients.
+- Reject ASCII control bytes in WebSocket request-head fields and invalid custom header names.
+
+### Bug Fixes
+
+- Parse trailing log delimiters without slicing inside UTF-8 characters.
+
 ## [3.4.1] - 2026-10-14
 
 - Require nagoya 0.1.16: 3.4.0 matches its scoped IPv6 address variant, which older nagoya releases do not have.

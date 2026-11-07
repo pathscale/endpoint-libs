@@ -1,6 +1,9 @@
 # endpoint-libs
 
-Version 3.4.3 adds cancellation cleanup, MCP admission and transport deadlines;
+Version 3.4.4 makes unauthenticated WebSocket errors generic, rejects control
+bytes and malformed custom header names in client request heads, and parses log
+delimiters without slicing inside UTF-8. Version 3.4.3 adds cancellation cleanup,
+MCP admission and transport deadlines;
 see [server limits](docs/server-limits.md). Blockchain scalar
 decoding now rejects malformed hexadecimal input, auth protocol parsing ignores
 invalid discriminators, and configuration loading no longer prints loaded values.
@@ -696,10 +699,12 @@ A `load_config` utility parses a JSON config file, defaulting to `etc/config.jso
 
 ## Releasing
 
-Put the `Cargo.toml` version bump in a pull request. After merge, the Rust
-workflow waits for tests, clippy, formatting, and the security audit, then runs
-`cargo publish` when the package version changed in that `master` update. The
-workflow uses the repository's `CARGO_REGISTRY_TOKEN` secret.
+Put the `Cargo.toml` version bump in a pull request. After review, local release
+checks, and merge, manually dispatch `Publish crate` on `master` with the full
+reviewed commit SHA and local-check attestation. No push automatically publishes
+or runs CI. The workflow uses the repository's `CARGO_REGISTRY_TOKEN` secret.
+Follow [the publishing contract](docs/cargo-publishing.md) for all local checks
+and the dependency release order.
 
 To verify the package locally without publishing:
 
