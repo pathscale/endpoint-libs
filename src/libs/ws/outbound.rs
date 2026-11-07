@@ -6,10 +6,11 @@
 //! the one [`crate::libs::ws::WsServerConfig::message_buffer_size`] names.
 //!
 //! [`Sender::try_send`] reports [`TrySendError::Full`] and
-//! [`TrySendError::Closed`]. [`Receiver::recv`] yields `None` once every
-//! sender is gone and the queue is empty, which the session classifies as
-//! `Outbound::Closed`. There is no asynchronous send: the producers use
-//! `try_send`, and a capacity of zero therefore never accepts a message.
+//! [`TrySendError::Closed`]. [`Sender::try_send_batch`] admits all frames at
+//! once or leaves the queue unchanged. [`Receiver::recv`] yields `None` once
+//! every sender is gone and the queue is empty, which the session classifies
+//! as `Outbound::Closed`. Sends are synchronous, and a capacity of zero
+//! never accepts a message.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -56,6 +57,26 @@ pub enum TrySendError<T> {
     /// The [`Receiver`] has been dropped. This is reported even when the
     /// buffer still has room, and even when it is already full.
     Closed(T),
+}
+
+/// A batch could not be queued atomically. The entire batch is returned.
+#[derive(Debug)]
+pub enum TrySendBatchError<T> {
+    /// The [`Receiver`] has been dropped. This takes precedence over capacity.
+    Closed(Vec<T>),
+    /// The batch itself is larger than the queue's total capacity.
+    TooLarge(Vec<T>),
+    /// The batch would fit in an empty queue but not in the remaining slots.
+    Full(Vec<T>),
+}
+
+impl<T> TrySendBatchError<T> {
+    /// The batch that was not queued.
+    pub fn into_inner(self) -> Vec<T> {
+        match self {
+            Self::Closed(batch) | Self::TooLarge(batch) | Self::Full(batch) => batch,
+        }
+    }
 }
 
 /// [`Receiver::try_recv`] found nothing.
@@ -166,6 +187,34 @@ impl<T> Sender<T> {
         }
         Ok(())
     }
+
+    /// Queue every value in order, or return the entire batch unchanged.
+    ///
+    /// A dropped receiver takes precedence over both capacity errors. An
+    /// empty batch succeeds while the receiver is alive.
+    pub fn try_send_batch(&self, batch: Vec<T>) -> Result<(), TrySendBatchError<T>> {
+        let waker = {
+            let mut inner = self.shared.lock();
+            if !inner.receiver_alive {
+                return Err(TrySendBatchError::Closed(batch));
+            }
+            if batch.is_empty() {
+                return Ok(());
+            }
+            if batch.len() > inner.capacity {
+                return Err(TrySendBatchError::TooLarge(batch));
+            }
+            if batch.len() > inner.capacity - inner.queue.len() {
+                return Err(TrySendBatchError::Full(batch));
+            }
+            inner.queue.extend(batch);
+            inner.recv_waker.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        Ok(())
+    }
 }
 
 impl<T> Drop for Receiver<T> {
@@ -243,7 +292,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use super::{TryRecvError, TrySendError, channel};
+    use super::{TryRecvError, TrySendBatchError, TrySendError, channel};
 
     struct Flag(AtomicBool);
 
@@ -270,6 +319,65 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), 2);
         assert_eq!(rx.try_recv().unwrap(), 3);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn batch_admission_is_atomic_and_preserves_order() {
+        let (tx, mut rx) = channel(4);
+        tx.try_send(0).unwrap();
+
+        let result = tx.try_send_batch(vec![1, 2, 3, 4]);
+        let Err(TrySendBatchError::Full(batch)) = result else {
+            panic!("expected Full, got {result:?}");
+        };
+        assert_eq!(batch, [1, 2, 3, 4]);
+        assert_eq!(rx.try_recv(), Ok(0));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        tx.try_send(0).unwrap();
+        let result = tx.try_send_batch(vec![1, 2, 3, 4, 5]);
+        let Err(TrySendBatchError::TooLarge(batch)) = result else {
+            panic!("expected TooLarge, got {result:?}");
+        };
+        assert_eq!(batch, [1, 2, 3, 4, 5]);
+        assert_eq!(rx.try_recv(), Ok(0));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        tx.try_send(0).unwrap();
+        tx.try_send_batch(vec![1, 2, 3]).unwrap();
+        for expected in 0..4 {
+            assert_eq!(rx.try_recv(), Ok(expected));
+        }
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn batch_rejects_closed_receiver_before_capacity_checks() {
+        let (tx, rx) = channel(1);
+        tx.try_send(0).unwrap();
+        drop(rx);
+
+        let error = tx.try_send_batch(vec![1, 2]).unwrap_err();
+        assert!(matches!(&error, TrySendBatchError::Closed(_)));
+        assert_eq!(error.into_inner(), [1, 2]);
+    }
+
+    #[test]
+    fn batch_wakes_a_parked_receiver_when_frames_are_admitted() {
+        let (tx, mut rx) = channel(2);
+        let (flag, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        {
+            let mut recv = std::pin::pin!(rx.recv());
+            assert!(recv.as_mut().poll(&mut cx).is_pending());
+            tx.try_send_batch(Vec::new()).unwrap();
+            assert!(!flag.0.load(Ordering::SeqCst));
+
+            tx.try_send_batch(vec![4, 5]).unwrap();
+            assert!(flag.0.load(Ordering::SeqCst));
+            assert_eq!(recv.as_mut().poll(&mut cx), Poll::Ready(Some(4)));
+        }
+        assert_eq!(rx.try_recv(), Ok(5));
     }
 
     #[test]

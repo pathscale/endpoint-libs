@@ -179,6 +179,14 @@ transport does not compile a TLS/WebSocket stack it never uses. Text payloads us
 `Utf8Bytes`; binary and control payloads use `bytes::Bytes`. Both clone cheaply and expose
 borrowed string or byte slices without allocating.
 
+`Toolbox::try_send_raw_batch` queues pre-serialized text frames together in FIFO
+order. It returns `Queued` on success, `Full` when the queue lacks available
+slots, `TooLarge` when the batch exceeds the queue's total capacity, and `Closed`
+when the connection or its receiver is gone. Rejected batches leave the queue
+unchanged and skip the close-on-full policy. Header-only mode and custom raw
+senders return `Unsupported`. Construct a toolbox with `Toolbox::new()` when
+migrating from a struct literal.
+
 ### `agent-control`
 
 The minimal built-in local wire surface for always-on application control. It enables

@@ -153,6 +153,8 @@ type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
 type SendFnArc = Arc<SendFn>;
 type SendRawFn = dyn Fn(ConnectionId, String) -> bool + Send + Sync;
 type SendRawFnArc = Arc<SendRawFn>;
+type SendRawBatchFn = dyn Fn(ConnectionId, Vec<String>) -> SendRawBatchOutcome + Send + Sync;
+type SendRawBatchFnArc = Arc<SendRawBatchFn>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnqueueOutcome {
@@ -161,9 +163,25 @@ enum EnqueueOutcome {
     Disconnected,
 }
 
+/// Result of atomically admitting pre-serialized frames to a connection queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SendRawBatchOutcome {
+    /// Every frame was queued in order.
+    Queued,
+    /// The frames fit an empty queue but not the available capacity.
+    Full,
+    /// The frame count exceeds the queue's total capacity.
+    TooLarge,
+    /// The connection is unregistered or its receiver has been dropped.
+    Closed,
+    /// Batch admission is unavailable in header-only mode or with a custom raw sender.
+    Unsupported,
+}
+
 pub struct Toolbox {
     pub send_msg: OnceLock<SendFnArc>,
     pub send_raw_msg: OnceLock<SendRawFnArc>,
+    send_raw_batch_msg: OnceLock<Option<SendRawBatchFnArc>>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
 impl Toolbox {
@@ -171,6 +189,7 @@ impl Toolbox {
         Arc::new(Self {
             send_msg: OnceLock::new(),
             send_raw_msg: OnceLock::new(),
+            send_raw_batch_msg: OnceLock::new(),
         })
     }
 
@@ -180,7 +199,28 @@ impl Toolbox {
         oneshot: bool,
         drop_on_buffer_full: bool,
     ) {
+        let mut initialized = false;
+        // One initializer installs all senders from the same connection table and mode.
+        let _ = self.send_raw_batch_msg.get_or_init(|| {
+            initialized = true;
+            self.install_ws_senders(states, oneshot, drop_on_buffer_full)
+        });
+        if !initialized {
+            warn!(
+                ws_server = true,
+                "set_ws_states called twice — ignoring second call"
+            );
+        }
+    }
+
+    fn install_ws_senders(
+        &self,
+        states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+        oneshot: bool,
+        drop_on_buffer_full: bool,
+    ) -> Option<SendRawBatchFnArc> {
         let raw_states = Arc::clone(&states);
+        let batch_states = Arc::clone(&states);
         let send_outcome = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
@@ -232,7 +272,29 @@ impl Toolbox {
         let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
             send_raw_outcome(conn_id, serialized) != EnqueueOutcome::Disconnected
         });
-        let _ = self.send_raw_msg.set(send_raw_fn);
+        // A manually installed raw sender may use a different route.
+        if self.send_raw_msg.set(send_raw_fn).is_err() {
+            return None;
+        }
+
+        Some(Arc::new(move |conn_id, batch| {
+            if oneshot {
+                return SendRawBatchOutcome::Unsupported;
+            }
+            let state = batch_states
+                .get(&conn_id)
+                .map(|state| Arc::clone(state.value()));
+            let Some(state) = state else {
+                return SendRawBatchOutcome::Closed;
+            };
+            let batch = batch.into_iter().map(Message::from).collect();
+            match state.message_queue.try_send_batch(batch) {
+                Ok(()) => SendRawBatchOutcome::Queued,
+                Err(outbound::TrySendBatchError::Full(_)) => SendRawBatchOutcome::Full,
+                Err(outbound::TrySendBatchError::TooLarge(_)) => SendRawBatchOutcome::TooLarge,
+                Err(outbound::TrySendBatchError::Closed(_)) => SendRawBatchOutcome::Closed,
+            }
+        }))
     }
 
     pub fn send_ws_msg(
@@ -340,6 +402,24 @@ impl Toolbox {
             None => false,
         }
     }
+
+    /// Queue pre-serialized text frames together in FIFO order.
+    ///
+    /// A failed admission leaves the queue and connection untouched. See
+    /// [`SendRawBatchOutcome`] for the possible results.
+    pub fn try_send_raw_batch(
+        &self,
+        conn_id: ConnectionId,
+        batch: Vec<String>,
+    ) -> SendRawBatchOutcome {
+        match self.send_raw_batch_msg.get() {
+            Some(Some(f)) => f(conn_id, batch),
+            Some(None) => SendRawBatchOutcome::Unsupported,
+            None if self.send_raw_msg.get().is_some() => SendRawBatchOutcome::Unsupported,
+            None => SendRawBatchOutcome::Closed,
+        }
+    }
+
     pub fn send_response(&self, ctx: &RequestContext, resp: impl Serialize) {
         let params = match serde_json::value::to_raw_value(&resp) {
             Ok(p) => p,
@@ -591,7 +671,7 @@ mod tests {
 
     use parking_lot::RwLock;
 
-    use super::Toolbox;
+    use super::{SendRawBatchOutcome, Toolbox};
     use crate::libs::peer::{Extensions, PeerIdentity};
     use crate::libs::ws::outbound;
     use crate::libs::ws::{WebsocketStates, WsConnection, WsMessage as Message};
@@ -636,6 +716,149 @@ mod tests {
         assert!(states.get_state(7).unwrap().end.is_cancelled());
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
         assert!(matches!(rx.try_recv().unwrap(), Message::Close(None)));
+    }
+
+    #[test]
+    fn raw_batch_shares_the_fifo_and_rejects_without_policy_close() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = outbound::channel(3);
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, true);
+        let state = states.get_state(7).unwrap();
+
+        assert!(toolbox.send_raw(7, "queued".into()));
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["first".into(), "second".into(), "third".into()]),
+            SendRawBatchOutcome::Full
+        );
+        assert_eq!(
+            toolbox.try_send_raw_batch(
+                7,
+                vec!["first".into(), "second".into(), "third".into(), "fourth".into()],
+            ),
+            SendRawBatchOutcome::TooLarge
+        );
+        assert!(!state.end.is_cancelled());
+
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["first".into(), "second".into()]),
+            SendRawBatchOutcome::Queued
+        );
+        for expected in ["queued", "first", "second"] {
+            assert_eq!(rx.try_recv(), Ok(Message::from(expected)));
+        }
+        assert_eq!(rx.try_recv(), Err(outbound::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn raw_batch_uses_the_same_setup_as_raw_during_concurrent_registration() {
+        let first = WebsocketStates::new();
+        let second = WebsocketStates::new();
+        let (first_tx, mut first_rx) = outbound::channel(2);
+        let (second_tx, mut second_rx) = outbound::channel(2);
+        first.insert(7, first_tx, conn(7));
+        second.insert(7, second_tx, conn(7));
+
+        let toolbox = Toolbox::new();
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                toolbox.set_ws_states(first.clone_states(), false, false);
+            });
+            start.wait();
+            toolbox.set_ws_states(second.clone_states(), false, false);
+        });
+
+        assert!(toolbox.send_raw(7, "raw".into()));
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["batch".into()]),
+            SendRawBatchOutcome::Queued
+        );
+        let (selected, other) = match first_rx.try_recv() {
+            Ok(frame) => {
+                assert_eq!(frame, Message::from("raw"));
+                (&mut first_rx, &mut second_rx)
+            }
+            Err(outbound::TryRecvError::Empty) => {
+                assert_eq!(second_rx.try_recv(), Ok(Message::from("raw")));
+                (&mut second_rx, &mut first_rx)
+            }
+            Err(error) => panic!("unexpected queue error: {error:?}"),
+        };
+        assert_eq!(selected.try_recv(), Ok(Message::from("batch")));
+        assert_eq!(other.try_recv(), Err(outbound::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn raw_batch_is_unsupported_with_a_custom_raw_sender() {
+        let toolbox = Toolbox::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(
+            toolbox
+                .send_raw_msg
+                .set(Arc::new(move |id, frame| tx.send((id, frame)).is_ok()))
+                .is_ok()
+        );
+
+        assert!(toolbox.send_raw(7, "before".into()));
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["batch".into()]),
+            SendRawBatchOutcome::Unsupported
+        );
+
+        let states = WebsocketStates::new();
+        let (queue_tx, mut queue_rx) = outbound::channel(1);
+        states.insert(7, queue_tx, conn(7));
+        toolbox.set_ws_states(states.clone_states(), false, false);
+
+        assert!(toolbox.send_raw(7, "after".into()));
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["batch".into()]),
+            SendRawBatchOutcome::Unsupported
+        );
+        assert_eq!(rx.try_recv().unwrap(), (7, String::from("before")));
+        assert_eq!(rx.try_recv().unwrap(), (7, String::from("after")));
+        assert_eq!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        assert_eq!(queue_rx.try_recv(), Err(outbound::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn raw_batch_is_unsupported_in_header_only_mode() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = outbound::channel(2);
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), true, false);
+
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["first".into(), "second".into()]),
+            SendRawBatchOutcome::Unsupported
+        );
+        assert_eq!(rx.try_recv(), Err(outbound::TryRecvError::Empty));
+        assert!(!states.get_state(7).unwrap().end.is_cancelled());
+    }
+
+    #[test]
+    fn raw_batch_reports_missing_connections_and_dropped_receivers_as_closed() {
+        let states = WebsocketStates::new();
+        let (tx, rx) = outbound::channel(1);
+        states.insert(7, tx, conn(7));
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, true);
+
+        assert_eq!(
+            toolbox.try_send_raw_batch(8, vec!["missing".into()]),
+            SendRawBatchOutcome::Closed
+        );
+
+        drop(rx);
+        assert_eq!(
+            toolbox.try_send_raw_batch(7, vec!["closed".into(), "oversized".into()]),
+            SendRawBatchOutcome::Closed
+        );
+        assert!(!states.get_state(7).unwrap().end.is_cancelled());
     }
 
     #[test]
