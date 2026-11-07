@@ -13,7 +13,58 @@ use crate::libs::toolbox::{ArcToolbox, CustomError, RequestContext, Toolbox};
 use crate::model::EndpointSchema;
 use crate::model::Type;
 
-use super::{WsConnection, WsRequest, WsResponseError, WsResponseValue};
+use super::{
+    ConnectionId, WsConnection, WsRequest, WsResponseError, WsResponseValue,
+    WsSuccessResponse,
+};
+
+/// The encoded decision from an authentication handler.
+///
+/// Controllers that wrap a typed controller should delegate `auth_reply` so the
+/// encoded response remains pending until the server's outer handshake gate ends.
+pub enum AuthReply {
+    Accepted(Option<WsSuccessResponse>),
+    Rejected(Option<WsResponseError>),
+}
+
+impl AuthReply {
+    /// Apply a reply after the server's authentication gate has completed.
+    #[doc(hidden)]
+    pub fn finish(self, toolbox: &ArcToolbox, connection_id: ConnectionId) -> Result<()> {
+        match self {
+            Self::Accepted(reply) => {
+                if let Some(reply) = reply {
+                    eyre::ensure!(
+                        toolbox.send(connection_id, WsResponseValue::Immediate(reply)),
+                        "authentication reply could not be queued"
+                    );
+                }
+                Ok(())
+            }
+            Self::Rejected(reply) => {
+                if let Some(reply) = reply {
+                    toolbox.send(connection_id, WsResponseValue::Error(reply));
+                }
+                Err(eyre::Report::new(AuthRejected))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AuthRejected;
+
+impl std::error::Error for AuthRejected {}
+
+impl std::fmt::Display for AuthRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("authentication reply rejected")
+    }
+}
+
+pub(super) fn is_auth_rejection(err: &eyre::Report) -> bool {
+    err.downcast_ref::<AuthRejected>().is_some()
+}
 
 pub trait AuthController: Sync + Send {
     fn auth(
@@ -22,6 +73,23 @@ pub trait AuthController: Sync + Send {
         header: String,
         conn: Arc<WsConnection>,
     ) -> LocalBoxFuture<'static, Result<()>>;
+
+    /// Return a deferred authentication decision. Legacy controllers keep their
+    /// existing behavior through this default; wrappers around typed controllers
+    /// should override it and delegate the inner reply.
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        header: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
+        let auth = self.auth(toolbox, header, conn);
+        async move {
+            auth.await?;
+            Ok(AuthReply::Accepted(None))
+        }
+        .boxed_local()
+    }
 }
 
 pub struct SimpleAuthController;
@@ -62,6 +130,23 @@ pub trait SubAuthControllerErased: Sync + Send {
         ctx: RequestContext,
         conn: Arc<WsConnection>,
     ) -> LocalBoxFuture<'static, ()>;
+
+    /// Deferred form of `auth`; the default preserves manual erased handlers
+    /// that historically send their own response.
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, AuthReply> {
+        let auth = self.auth(toolbox, param, ctx, conn);
+        async move {
+            auth.await;
+            AuthReply::Accepted(None)
+        }
+        .boxed_local()
+    }
 }
 
 impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
@@ -72,34 +157,56 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
         ctx: RequestContext,
         conn: Arc<WsConnection>,
     ) -> LocalBoxFuture<'static, ()> {
-        let toolbox = toolbox.clone();
+        let toolbox = Arc::clone(toolbox);
+        async move {
+            let reply = self
+                .auth_reply(&toolbox, param, ctx.clone(), conn)
+                .await;
+            let _ = reply.finish(&toolbox, ctx.connection_id);
+        }
+        .boxed_local()
+    }
 
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        param: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, AuthReply> {
+        let toolbox = Arc::clone(toolbox);
         async move {
             let data: T::Request = match serde_json::from_value(param) {
                 Ok(data) => data,
                 Err(_err) => {
-                    toolbox.send(
-                        ctx.connection_id,
-                        WsResponseValue::Error(WsResponseError {
-                            method: ctx.method,
-                            code: ErrorCode::BAD_REQUEST.to_u32(),
-                            seq: ctx.seq,
-                            log_id: ctx.log_id.to_string(),
-                            params: serde_json::json!({
-                                "kind": ErrorCode::BAD_REQUEST.kind(),
-                                "message": "authentication failed",
-                            }),
+                    return AuthReply::Rejected(Some(WsResponseError {
+                        method: ctx.method,
+                        code: ErrorCode::BAD_REQUEST.to_u32(),
+                        seq: ctx.seq,
+                        log_id: ctx.log_id.to_string(),
+                        params: serde_json::json!({
+                            "kind": ErrorCode::BAD_REQUEST.kind(),
+                            "message": "authentication failed",
                         }),
-                    );
-                    return;
+                    }));
                 }
             };
 
             let resp = SubAuthController::auth(self, &toolbox, data, ctx.clone(), conn).await;
-            if let Some(resp) =
-                Toolbox::encode_handler_response::<T::Request, T::Error>(ctx.clone(), resp)
-            {
-                toolbox.send(ctx.connection_id, resp);
+            match Toolbox::encode_handler_response::<T::Request, T::Error>(ctx.clone(), resp) {
+                Some(WsResponseValue::Immediate(reply)) => AuthReply::Accepted(Some(reply)),
+                Some(WsResponseValue::Error(error)) => AuthReply::Rejected(Some(error)),
+                None => AuthReply::Rejected(None),
+                Some(_) => AuthReply::Rejected(Some(WsResponseError {
+                    method: ctx.method,
+                    code: ErrorCode::INTERNAL_ERROR.to_u32(),
+                    seq: ctx.seq,
+                    log_id: ctx.log_id.to_string(),
+                    params: serde_json::json!({
+                        "kind": ErrorCode::INTERNAL_ERROR.kind(),
+                        "message": "authentication failed",
+                    }),
+                })),
             }
         }
         .boxed_local()
@@ -184,6 +291,22 @@ impl AuthController for EndpointAuthController {
         header: String,
         conn: Arc<WsConnection>,
     ) -> LocalBoxFuture<'static, Result<()>> {
+        let connection_id = conn.connection_id;
+        let toolbox = Arc::clone(toolbox);
+        async move {
+            self.auth_reply(&toolbox, header, conn)
+                .await?
+                .finish(&toolbox, connection_id)
+        }
+        .boxed_local()
+    }
+
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        header: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
         let toolbox = toolbox.clone();
 
         async move {
@@ -225,18 +348,18 @@ impl AuthController for EndpointAuthController {
                 peer: conn.peer.clone(),
                 extensions: conn.extensions.clone(),
             };
-            endpoint
+            let reply = endpoint
                 .handler
                 .clone()
-                .auth(
+                .auth_reply(
                     &toolbox,
                     serde_json::Value::Object(params),
                     ctx.clone(),
                     conn,
                 )
                 .await;
-            debug!(ws_server = true, "Auth response sent");
-            Ok(())
+            debug!(ws_server = true, "Auth response encoded");
+            Ok(reply)
         }
         .boxed_local()
     }
@@ -426,13 +549,16 @@ mod preauth_sanitization_regression {
         ctx.seq = 4;
         ctx.log_id = 123;
 
-        futures::executor::block_on(controller.clone().auth(
+        let reply = futures::executor::block_on(controller.clone().auth_reply(
             &toolbox,
             json!({"credential": "secret-input-must-not-leak"}),
             ctx.clone(),
             Arc::clone(&conn),
         ));
 
+        assert!(matches!(&reply, AuthReply::Rejected(_)));
+        assert!(sent.lock().unwrap().is_empty());
+        assert!(is_auth_rejection(&reply.finish(&toolbox, 9).unwrap_err()));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         {
             let sent = sent.lock().unwrap();
@@ -454,13 +580,16 @@ mod preauth_sanitization_regression {
             assert!(!wire_params.contains("expected u64"));
         }
 
-        futures::executor::block_on(controller.auth(
+        let reply = futures::executor::block_on(controller.auth_reply(
             &toolbox,
             json!({"credential": 42}),
             ctx,
             conn,
         ));
 
+        assert!(matches!(&reply, AuthReply::Accepted(_)));
+        assert_eq!(sent.lock().unwrap().len(), 1);
+        reply.finish(&toolbox, 9).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(accepted_credential.load(Ordering::SeqCst), 42);
         let sent = sent.lock().unwrap();

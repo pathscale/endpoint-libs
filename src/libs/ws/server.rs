@@ -34,7 +34,10 @@ use crate::libs::ws::{
 use crate::model::{EndpointSchema, TypeRegistry};
 
 use super::outbound;
-use super::{AuthController, SimpleAuthController, WebsocketStates, WsEndpoint};
+use super::{
+    AuthController, SimpleAuthController, WebsocketStates, WsEndpoint,
+    headers::is_auth_rejection,
+};
 
 pub struct WebsocketServer {
     pub auth_controller: Arc<dyn AuthController>,
@@ -481,23 +484,34 @@ impl WebsocketServer {
         };
 
         let auth_controller = Arc::clone(&self.auth_controller);
+        let auth_toolbox = Arc::clone(&self.toolbox);
+        let auth_connection_id = conn.connection_id;
+        let auth_conn = Arc::clone(&conn);
         let auth_result = with_deadline(
             self.config.handshake_timeout,
-            auth_controller.auth(
-                &self.toolbox,
-                auth_protocol.unwrap_or_default(),
-                Arc::clone(&conn),
-            ),
+            async move {
+                auth_controller
+                    .auth_reply(
+                        &auth_toolbox,
+                        auth_protocol.unwrap_or_default(),
+                        auth_conn,
+                    )
+                    .await?
+                    .finish(&auth_toolbox, auth_connection_id)
+            },
         )
         .await
         .and_then(|result| result);
         let raw_ctx = RequestContext::from_conn(&conn);
         if let Err(err) = auth_result {
-            self.toolbox.send_request_error(
-                &raw_ctx,
-                ErrorCode::BAD_REQUEST,
-                "authentication failed",
-            );
+            let typed_rejection = is_auth_rejection(&err);
+            if !typed_rejection {
+                self.toolbox.send_request_error(
+                    &raw_ctx,
+                    ErrorCode::BAD_REQUEST,
+                    "authentication failed",
+                );
+            }
             error!(
                 ws_server=true,
                 error_code=?ErrorCode::BAD_REQUEST,
@@ -505,6 +519,7 @@ impl WebsocketServer {
                 user_id=raw_ctx.user_id,
                 conn_id=raw_ctx.connection_id,
                 roles=?raw_ctx.roles,
+                typed_rejection,
                 error=%err,
                 "Error while handling connection"
             );

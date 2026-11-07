@@ -184,7 +184,7 @@ impl Toolbox {
                 Ok(serialized) => serialized,
                 Err(e) => {
                     error!(ws_server = true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
-                    return true;
+                    return false;
                 }
             };
             Self::enqueue(
@@ -194,8 +194,7 @@ impl Toolbox {
                 oneshot,
                 conn_id,
                 drop_on_buffer_full,
-            );
-            true
+            )
         });
         if self.send_msg.set(send_fn).is_err() {
             warn!(
@@ -217,8 +216,7 @@ impl Toolbox {
                 oneshot,
                 conn_id,
                 drop_on_buffer_full,
-            );
-            true
+            )
         });
         let _ = self.send_raw_msg.set(send_raw_fn);
     }
@@ -237,7 +235,7 @@ impl Toolbox {
                 return;
             }
         };
-        Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full)
+        let _ = Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full);
     }
 
     pub fn send_serialized_ws_msg(
@@ -247,7 +245,7 @@ impl Toolbox {
         conn_id: ConnectionId,
         drop_on_full: bool,
     ) {
-        Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full)
+        let _ = Self::enqueue(sender, None, serialized, oneshot, conn_id, drop_on_full);
     }
 
     /// Queue a frame, and on a policy close signal `end` as well.
@@ -262,9 +260,9 @@ impl Toolbox {
         oneshot: bool,
         conn_id: ConnectionId,
         drop_on_full: bool,
-    ) {
-        match sender.try_send(serialized.into()) {
-            Ok(()) => {}
+    ) -> bool {
+        let queued = match sender.try_send(serialized.into()) {
+            Ok(()) => true,
             Err(outbound::TrySendError::Full(_)) => {
                 error!(
                     ws_server = true,
@@ -273,17 +271,20 @@ impl Toolbox {
                 if drop_on_full {
                     Self::close_for_policy(sender, end);
                 }
+                false
             }
             Err(outbound::TrySendError::Closed(_)) => {
                 debug!(
                     ws_server = true,
                     conn_id, "Send channel closed — client already disconnected"
                 );
+                false
             }
-        }
+        };
         if oneshot {
             Self::close_for_policy(sender, end);
         }
+        queued
     }
 
     fn close_for_policy(sender: &Sender<Message>, end: Option<&Shutdown>) {
@@ -581,7 +582,7 @@ mod tests {
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), false, true);
 
-        assert!(toolbox.send_raw(7, "next".into()));
+        assert!(!toolbox.send_raw(7, "next".into()));
 
         assert!(states.get_state(7).unwrap().end.is_cancelled());
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
@@ -712,7 +713,7 @@ mod tests {
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), false, true);
 
-        assert!(toolbox.send_raw(7, "next".into()));
+        assert!(!toolbox.send_raw(7, "next".into()));
 
         // One queued frame fills a capacity of 1. The extra sender did not
         // open another slot, so the policy still fires and `next` is not queued.
@@ -730,7 +731,7 @@ mod tests {
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), false, false);
 
-        assert!(toolbox.send_raw(7, "next".into()));
+        assert!(!toolbox.send_raw(7, "next".into()));
 
         assert!(!states.get_state(7).unwrap().end.is_cancelled());
     }
