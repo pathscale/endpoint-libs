@@ -131,7 +131,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
             data: data.clone(),
         });
 
-        if !toolbox.send(sub.ctx.connection_id, msg) {
+        if !toolbox.send_to_subscriber(sub.ctx.connection_id, msg) {
             dead_connection = Some(sub.ctx.connection_id);
         }
 
@@ -196,7 +196,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
                 data,
             });
 
-            if !toolbox.send(sub.ctx.connection_id, msg) {
+            if !toolbox.send_to_subscriber(sub.ctx.connection_id, msg) {
                 dead_connections.push(sub.ctx.connection_id);
             }
         }

@@ -151,6 +151,7 @@ impl RequestContext {
 
 type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
 type SendFnArc = Arc<SendFn>;
+type SendOutcomeFn = dyn Fn(ConnectionId, WsResponseValue) -> EnqueueOutcome + Send + Sync;
 type SendRawFn = dyn Fn(ConnectionId, String) -> bool + Send + Sync;
 type SendRawFnArc = Arc<SendRawFn>;
 type SendRawBatchFn = dyn Fn(ConnectionId, Vec<String>) -> SendRawBatchOutcome + Send + Sync;
@@ -179,8 +180,11 @@ pub enum SendRawBatchOutcome {
 }
 
 pub struct Toolbox {
+    /// Typed sender. The built-in callback returns whether it queued the frame.
     pub send_msg: OnceLock<SendFnArc>,
+    /// Raw sender. The built-in callback returns whether it queued the frame.
     pub send_raw_msg: OnceLock<SendRawFnArc>,
+    built_in_send: OnceLock<(SendFnArc, Arc<SendOutcomeFn>)>,
     send_raw_batch_msg: OnceLock<Option<SendRawBatchFnArc>>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
@@ -189,6 +193,7 @@ impl Toolbox {
         Arc::new(Self {
             send_msg: OnceLock::new(),
             send_raw_msg: OnceLock::new(),
+            built_in_send: OnceLock::new(),
             send_raw_batch_msg: OnceLock::new(),
         })
     }
@@ -221,7 +226,7 @@ impl Toolbox {
     ) -> Option<SendRawBatchFnArc> {
         let raw_states = Arc::clone(&states);
         let batch_states = Arc::clone(&states);
-        let send_outcome = Arc::new(move |conn_id, msg| {
+        let send_outcome: Arc<SendOutcomeFn> = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
             } else {
@@ -243,22 +248,27 @@ impl Toolbox {
                 drop_on_buffer_full,
             )
         });
-        let send_fn: SendFnArc = {
-            let send_outcome = Arc::clone(&send_outcome);
-            Arc::new(move |conn_id, msg| send_outcome(conn_id, msg) != EnqueueOutcome::Disconnected)
-        };
-        if self.send_msg.set(send_fn).is_err() {
+        let mut installed = false;
+        self.send_msg.get_or_init(|| {
+            let outcome = Arc::clone(&send_outcome);
+            let send: SendFnArc =
+                Arc::new(move |conn_id, msg| outcome(conn_id, msg) == EnqueueOutcome::Queued);
+            // Associate the queue outcome with this callback before publishing it.
+            let _ = self.built_in_send.set((Arc::clone(&send), send_outcome));
+            installed = true;
+            send
+        });
+        if !installed {
             warn!(
                 ws_server = true,
-                "set_ws_states called twice — ignoring second call"
+                "Keeping the existing typed WebSocket sender"
             );
         }
+
         // Pre-serialized frames (JSON-RPC/MCP responses) bypass WsResponseValue.
-        let send_raw_outcome = Arc::new(move |conn_id, serialized| {
-            let state = if let Some(state) = raw_states.get(&conn_id) {
-                state
-            } else {
-                return EnqueueOutcome::Disconnected;
+        let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
+            let Some(state) = raw_states.get(&conn_id) else {
+                return false;
             };
             Self::enqueue(
                 &state.message_queue,
@@ -267,10 +277,7 @@ impl Toolbox {
                 oneshot,
                 conn_id,
                 drop_on_buffer_full,
-            )
-        });
-        let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
-            send_raw_outcome(conn_id, serialized) != EnqueueOutcome::Disconnected
+            ) == EnqueueOutcome::Queued
         });
         // A manually installed raw sender may use a different route.
         if self.send_raw_msg.set(send_raw_fn).is_err() {
@@ -371,12 +378,28 @@ impl Toolbox {
             end.cancel();
         }
     }
+    /// Send a typed response. The built-in sender returns `true` only when
+    /// the frame enters the outbound queue. Custom sender results pass through.
     pub fn send(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
         match self.send_msg.get() {
             Some(f) => f(conn_id, resp),
             None => false,
         }
     }
+
+    /// Send a subscription frame and report whether to keep the subscriber.
+    pub(super) fn send_to_subscriber(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
+        let Some(send) = self.send_msg.get() else {
+            return false;
+        };
+        match self.built_in_send.get() {
+            Some((built_in, outcome)) if Arc::ptr_eq(built_in, send) => {
+                outcome(conn_id, resp) != EnqueueOutcome::Disconnected
+            }
+            _ => send(conn_id, resp),
+        }
+    }
+
     pub(super) fn enqueue_response(
         state: &WsStreamState,
         resp: WsResponseValue,
@@ -395,7 +418,8 @@ impl Toolbox {
             drop_on_full,
         ) == EnqueueOutcome::Queued
     }
-    /// Sends a pre-serialized frame (e.g. a JSON-RPC/MCP response) as-is.
+    /// Send a pre-serialized frame as-is. The built-in sender returns `true`
+    /// only when the frame enters the outbound queue. Custom sender results pass through.
     pub fn send_raw(&self, conn_id: ConnectionId, serialized: String) -> bool {
         match self.send_raw_msg.get() {
             Some(f) => f(conn_id, serialized),
@@ -671,10 +695,12 @@ mod tests {
 
     use parking_lot::RwLock;
 
-    use super::{SendRawBatchOutcome, Toolbox};
+    use super::{RequestContext, SendRawBatchOutcome, Toolbox};
     use crate::libs::peer::{Extensions, PeerIdentity};
     use crate::libs::ws::outbound;
-    use crate::libs::ws::{WebsocketStates, WsConnection, WsMessage as Message};
+    use crate::libs::ws::{
+        SubscriptionManager, WebsocketStates, WsConnection, WsMessage as Message,
+    };
 
     fn conn(id: u32) -> Arc<WsConnection> {
         Arc::new(WsConnection {
@@ -735,7 +761,12 @@ mod tests {
         assert_eq!(
             toolbox.try_send_raw_batch(
                 7,
-                vec!["first".into(), "second".into(), "third".into(), "fourth".into()],
+                vec![
+                    "first".into(),
+                    "second".into(),
+                    "third".into(),
+                    "fourth".into()
+                ],
             ),
             SendRawBatchOutcome::TooLarge
         );
@@ -988,7 +1019,7 @@ mod tests {
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), false, false);
 
-        assert!(toolbox.send_raw(7, "next".into()));
+        assert!(!toolbox.send_raw(7, "next".into()));
         let reply = || {
             crate::libs::ws::WsResponseValue::Immediate(crate::libs::ws::WsSuccessResponse {
                 method: 1,
@@ -996,6 +1027,7 @@ mod tests {
                 params: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
             })
         };
+        assert!(!toolbox.send(7, reply()));
         assert!(!Toolbox::enqueue_response(
             &states.get_state(7).unwrap(),
             reply(),
@@ -1013,5 +1045,69 @@ mod tests {
             false
         ));
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+    }
+
+    #[test]
+    fn subscription_publishing_retains_live_connections_when_the_queue_is_full() {
+        let states = WebsocketStates::new();
+        let (tx, mut rx) = outbound::channel(1);
+        tx.try_send(Message::from("occupied")).unwrap();
+        let connection = conn(7);
+        let ctx = RequestContext::from_conn(&connection);
+        states.insert(7, tx, connection);
+        let toolbox = Toolbox::new();
+        toolbox.set_ws_states(states.clone_states(), false, false);
+
+        let mut subscriptions = SubscriptionManager::new(1);
+        subscriptions.subscribe_with_keys(ctx, vec!["topic"], (), |_| {});
+        subscriptions.publish_to(&toolbox, 7, &"first");
+        subscriptions.publish_to_all(&toolbox, &"second");
+        assert!(!states.get_state(7).unwrap().end.is_cancelled());
+        assert_eq!(rx.try_recv(), Ok(Message::from("occupied")));
+        assert_eq!(rx.try_recv(), Err(outbound::TryRecvError::Empty));
+
+        subscriptions.publish_to_key(&toolbox, &"topic", &"third");
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+        drop(rx);
+        subscriptions.publish_to_all(&toolbox, &"fourth");
+        assert!(!subscriptions.subscribes.contains_key(&7));
+    }
+
+    #[test]
+    fn subscription_publishing_respects_a_custom_typed_sender() {
+        for replace_built_in in [false, true] {
+            let states = WebsocketStates::new();
+            let (tx, mut rx) = outbound::channel(1);
+            let connection = conn(7);
+            let ctx = RequestContext::from_conn(&connection);
+            states.insert(7, tx, connection);
+            let mut toolbox = Toolbox::new();
+            if replace_built_in {
+                toolbox.set_ws_states(states.clone_states(), false, false);
+                let toolbox = Arc::get_mut(&mut toolbox).unwrap();
+                assert!(toolbox.send_msg.take().is_some());
+            }
+            let (sent, received) = std::sync::mpsc::channel();
+            assert!(
+                toolbox
+                    .send_msg
+                    .set(Arc::new(move |id, _| sent.send(id).is_ok()))
+                    .is_ok()
+            );
+            if !replace_built_in {
+                toolbox.set_ws_states(states.clone_states(), false, false);
+            }
+
+            let mut subscriptions: SubscriptionManager<()> = SubscriptionManager::new(1);
+            subscriptions.subscribe(ctx, (), |_| {});
+            subscriptions.publish_to(&toolbox, 7, &"first");
+            assert_eq!(received.try_recv(), Ok(7));
+            assert!(subscriptions.subscribes.contains_key(&7));
+            assert_eq!(rx.try_recv(), Err(outbound::TryRecvError::Empty));
+
+            drop(received);
+            subscriptions.publish_to(&toolbox, 7, &"second");
+            assert!(!subscriptions.subscribes.contains_key(&7));
+        }
     }
 }

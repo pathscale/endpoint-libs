@@ -27,8 +27,9 @@ pub enum AuthReply {
 }
 
 impl AuthReply {
-    /// Apply a reply using the legacy toolbox delivery contract.
-    /// The server uses its connection queue directly to confirm admission.
+    /// Apply a reply through the toolbox sender. A successful decision with a
+    /// reply requires the sender to report that the reply was queued.
+    /// The server checks its own connection queue directly.
     #[doc(hidden)]
     pub fn finish(self, toolbox: &ArcToolbox, connection_id: ConnectionId) -> Result<()> {
         self.finish_with(|reply| toolbox.send(connection_id, reply))
@@ -474,7 +475,8 @@ pub(super) mod preauth_sanitization_regression {
 
     use super::*;
     use crate::libs::peer::{Extensions, PeerIdentity};
-    use crate::libs::ws::WsResponse;
+    use crate::libs::ws::{WebsocketStates, WsMessage, WsResponse, outbound};
+    use crate::model::Field as SchemaField;
 
     #[derive(Debug)]
     pub(in crate::libs::ws) struct CapturedEvent {
@@ -536,7 +538,13 @@ pub(super) mod preauth_sanitization_regression {
         }
         let rejections: Vec<_> = events
             .iter()
-            .filter(|event| event.fields.0.get("message").is_some_and(|value| value == message))
+            .filter(|event| {
+                event
+                    .fields
+                    .0
+                    .get("message")
+                    .is_some_and(|value| value == message)
+            })
             .collect();
         let [rejection] = rejections.as_slice() else {
             panic!("expected one {message:?} event, got {events:?}");
@@ -614,6 +622,60 @@ pub(super) mod preauth_sanitization_regression {
             extensions: Extensions::new(),
             log_id: 123,
         })
+    }
+
+    #[test]
+    fn direct_endpoint_auth_requires_its_reply_to_be_queued() {
+        let mut controller = EndpointAuthController::new();
+        controller.add_auth_endpoint(
+            EndpointSchema::new(
+                "Login",
+                TypedAuthRequest::METHOD_ID,
+                vec![SchemaField::new("credential", Type::Int64)],
+                vec![],
+            ),
+            TypedAuthHandler {
+                calls: Arc::new(AtomicUsize::new(0)),
+                accepted_credential: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        let controller = Arc::new(controller);
+
+        for oneshot in [false, true] {
+            let states = WebsocketStates::new();
+            let conn = test_connection();
+            let (tx, mut rx) = outbound::channel(1);
+            tx.try_send(WsMessage::from("occupied")).unwrap();
+            states.insert(conn.connection_id, tx, Arc::clone(&conn));
+            let state = states.get_state(conn.connection_id).unwrap();
+            let toolbox = Toolbox::new();
+            toolbox.set_ws_states(states.clone_states(), oneshot, false);
+
+            let auth = || {
+                futures::executor::block_on(Arc::clone(&controller).auth(
+                    &toolbox,
+                    "0login,142".into(),
+                    Arc::clone(&conn),
+                ))
+            };
+            assert_eq!(
+                auth().unwrap_err().to_string(),
+                "authentication reply could not be queued"
+            );
+            assert_eq!(state.end.is_cancelled(), oneshot);
+            assert_eq!(rx.try_recv(), Ok(WsMessage::from("occupied")));
+            assert_eq!(rx.try_recv(), Err(outbound::TryRecvError::Empty));
+
+            if !oneshot {
+                auth().unwrap();
+                let WsMessage::Text(frame) = rx.try_recv().unwrap() else {
+                    panic!("expected a queued auth response");
+                };
+                let reply: serde_json::Value = serde_json::from_str(frame.as_str()).unwrap();
+                assert_eq!(reply["method"], json!(TypedAuthRequest::METHOD_ID));
+                assert_eq!(reply["params"], json!({"accepted": true}));
+            }
+        }
     }
 
     #[test]

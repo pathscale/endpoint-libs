@@ -179,6 +179,12 @@ transport does not compile a TLS/WebSocket stack it never uses. Text payloads us
 `Utf8Bytes`; binary and control payloads use `bytes::Bytes`. Both clone cheaply and expose
 borrowed string or byte slices without allocating.
 
+With the built-in connection queue, `Toolbox::send` and `Toolbox::send_raw`
+return `true` only when the frame is queued. A full queue returns `false`,
+including in header-only mode. The configured close policy still applies, and
+subscriptions stay registered through transient backpressure. A custom sender
+supplies its own result.
+
 `Toolbox::try_send_raw_batch` queues pre-serialized text frames together in FIFO
 order. It returns `Queued` on success, `Full` when the queue lacks available
 slots, `TooLarge` when the batch exceeds the queue's total capacity, and `Closed`

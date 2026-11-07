@@ -95,7 +95,7 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
                     data: data.clone(),
                 });
                 sub.stream_seq += 1;
-                if !toolbox.send(sub.ctx.connection_id, msg) {
+                if !toolbox.send_to_subscriber(sub.ctx.connection_id, msg) {
                     dead_connections.push(sub.ctx.connection_id);
                 }
             }
