@@ -14,8 +14,7 @@ use crate::model::EndpointSchema;
 use crate::model::Type;
 
 use super::{
-    ConnectionId, WsConnection, WsRequest, WsResponseError, WsResponseValue,
-    WsSuccessResponse,
+    ConnectionId, WsConnection, WsRequest, WsResponseError, WsResponseValue, WsSuccessResponse,
 };
 
 /// The encoded decision from an authentication handler.
@@ -28,14 +27,19 @@ pub enum AuthReply {
 }
 
 impl AuthReply {
-    /// Apply a reply after the server's authentication gate has completed.
+    /// Apply a reply using the legacy toolbox delivery contract.
+    /// The server uses its connection queue directly to confirm admission.
     #[doc(hidden)]
     pub fn finish(self, toolbox: &ArcToolbox, connection_id: ConnectionId) -> Result<()> {
+        self.finish_with(|reply| toolbox.send(connection_id, reply))
+    }
+
+    pub(super) fn finish_with(self, send: impl FnOnce(WsResponseValue) -> bool) -> Result<()> {
         match self {
             Self::Accepted(reply) => {
                 if let Some(reply) = reply {
                     eyre::ensure!(
-                        toolbox.send_queued(connection_id, WsResponseValue::Immediate(reply)),
+                        send(WsResponseValue::Immediate(reply)),
                         "authentication reply could not be queued"
                     );
                 }
@@ -43,7 +47,7 @@ impl AuthReply {
             }
             Self::Rejected(reply) => {
                 if let Some(reply) = reply {
-                    toolbox.send(connection_id, WsResponseValue::Error(reply));
+                    send(WsResponseValue::Error(reply));
                 }
                 Err(eyre::Report::new(AuthRejected))
             }
@@ -159,9 +163,7 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
     ) -> LocalBoxFuture<'static, ()> {
         let toolbox = Arc::clone(toolbox);
         async move {
-            let reply = self
-                .auth_reply(&toolbox, param, ctx.clone(), conn)
-                .await;
+            let reply = self.auth_reply(&toolbox, param, ctx.clone(), conn).await;
             let _ = reply.finish(&toolbox, ctx.connection_id);
         }
         .boxed_local()
