@@ -153,10 +153,20 @@ type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
 type SendFnArc = Arc<SendFn>;
 type SendRawFn = dyn Fn(ConnectionId, String) -> bool + Send + Sync;
 type SendRawFnArc = Arc<SendRawFn>;
+type SendQueuedFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
+type SendQueuedFnArc = Arc<SendQueuedFn>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EnqueueOutcome {
+    Queued,
+    Full,
+    Disconnected,
+}
 
 pub struct Toolbox {
     pub send_msg: OnceLock<SendFnArc>,
     pub send_raw_msg: OnceLock<SendRawFnArc>,
+    send_queued_msg: OnceLock<SendQueuedFnArc>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
 impl Toolbox {
@@ -164,6 +174,7 @@ impl Toolbox {
         Arc::new(Self {
             send_msg: OnceLock::new(),
             send_raw_msg: OnceLock::new(),
+            send_queued_msg: OnceLock::new(),
         })
     }
 
@@ -174,17 +185,17 @@ impl Toolbox {
         drop_on_buffer_full: bool,
     ) {
         let raw_states = Arc::clone(&states);
-        let send_fn: SendFnArc = Arc::new(move |conn_id, msg| {
+        let send_outcome = Arc::new(move |conn_id, msg| {
             let state = if let Some(state) = states.get(&conn_id) {
                 state
             } else {
-                return false;
+                return EnqueueOutcome::Disconnected;
             };
             let serialized = match serde_json::to_string(&msg) {
                 Ok(serialized) => serialized,
                 Err(e) => {
                     error!(ws_server = true, conn_id, err=%e, "Failed to serialize WS response — dropping message");
-                    return false;
+                    return EnqueueOutcome::Disconnected;
                 }
             };
             Self::enqueue(
@@ -196,18 +207,29 @@ impl Toolbox {
                 drop_on_buffer_full,
             )
         });
+        let send_fn: SendFnArc = {
+            let send_outcome = Arc::clone(&send_outcome);
+            Arc::new(move |conn_id, msg| {
+                send_outcome(conn_id, msg) != EnqueueOutcome::Disconnected
+            })
+        };
+        let send_queued_fn: SendQueuedFnArc = {
+            let send_outcome = Arc::clone(&send_outcome);
+            Arc::new(move |conn_id, msg| send_outcome(conn_id, msg) == EnqueueOutcome::Queued)
+        };
         if self.send_msg.set(send_fn).is_err() {
             warn!(
                 ws_server = true,
                 "set_ws_states called twice — ignoring second call"
             );
         }
+        let _ = self.send_queued_msg.set(send_queued_fn);
         // Pre-serialized frames (JSON-RPC/MCP responses) bypass WsResponseValue.
-        let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
+        let send_raw_outcome = Arc::new(move |conn_id, serialized| {
             let state = if let Some(state) = raw_states.get(&conn_id) {
                 state
             } else {
-                return false;
+                return EnqueueOutcome::Disconnected;
             };
             Self::enqueue(
                 &state.message_queue,
@@ -217,6 +239,9 @@ impl Toolbox {
                 conn_id,
                 drop_on_buffer_full,
             )
+        });
+        let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
+            send_raw_outcome(conn_id, serialized) != EnqueueOutcome::Disconnected
         });
         let _ = self.send_raw_msg.set(send_raw_fn);
     }
@@ -260,9 +285,9 @@ impl Toolbox {
         oneshot: bool,
         conn_id: ConnectionId,
         drop_on_full: bool,
-    ) -> bool {
-        let queued = match sender.try_send(serialized.into()) {
-            Ok(()) => true,
+    ) -> EnqueueOutcome {
+        let outcome = match sender.try_send(serialized.into()) {
+            Ok(()) => EnqueueOutcome::Queued,
             Err(outbound::TrySendError::Full(_)) => {
                 error!(
                     ws_server = true,
@@ -270,21 +295,23 @@ impl Toolbox {
                 );
                 if drop_on_full {
                     Self::close_for_policy(sender, end);
+                    EnqueueOutcome::Disconnected
+                } else {
+                    EnqueueOutcome::Full
                 }
-                false
             }
             Err(outbound::TrySendError::Closed(_)) => {
                 debug!(
                     ws_server = true,
                     conn_id, "Send channel closed — client already disconnected"
                 );
-                false
+                EnqueueOutcome::Disconnected
             }
         };
         if oneshot {
             Self::close_for_policy(sender, end);
         }
-        queued
+        outcome
     }
 
     fn close_for_policy(sender: &Sender<Message>, end: Option<&Shutdown>) {
@@ -297,6 +324,13 @@ impl Toolbox {
         match self.send_msg.get() {
             Some(f) => f(conn_id, resp),
             None => false,
+        }
+    }
+    /// Sends a response and reports whether the frame was actually queued.
+    pub fn send_queued(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
+        match self.send_queued_msg.get() {
+            Some(f) => f(conn_id, resp),
+            None => self.send(conn_id, resp),
         }
     }
     /// Sends a pre-serialized frame (e.g. a JSON-RPC/MCP response) as-is.
@@ -725,14 +759,26 @@ mod tests {
     #[test]
     fn a_full_buffer_without_the_policy_does_not_cancel() {
         let states = WebsocketStates::new();
-        let (tx, _rx) = outbound::channel(1);
+        let (tx, mut rx) = outbound::channel(1);
         tx.try_send(Message::from("queued")).unwrap();
         states.insert(7, tx, conn(7));
         let toolbox = Toolbox::new();
         toolbox.set_ws_states(states.clone_states(), false, false);
 
-        assert!(!toolbox.send_raw(7, "next".into()));
+        assert!(toolbox.send_raw(7, "next".into()));
+        let reply = || crate::libs::ws::WsResponseValue::Immediate(
+            crate::libs::ws::WsSuccessResponse {
+                method: 1,
+                seq: 1,
+                params: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
+            },
+        );
+        assert!(!toolbox.send_queued(7, reply()));
 
         assert!(!states.get_state(7).unwrap().end.is_cancelled());
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
+        assert!(rx.try_recv().is_err());
+        assert!(toolbox.send_queued(7, reply()));
+        assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
     }
 }

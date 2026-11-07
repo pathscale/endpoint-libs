@@ -1,6 +1,8 @@
 use eyre::{Context, Result, bail, eyre};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+#[cfg(feature = "ws-client")]
+use std::borrow::Cow;
 use tracing::*;
 
 // --- nago-wss/nagoya: only for the TCP(/TLS) constructors -------------------
@@ -515,7 +517,7 @@ pub struct WsClientBuilder {
     #[cfg(feature = "ws-client-tls")]
     tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
     protocol_header: String,
-    headers: Vec<(&'static str, &'static str)>,
+    headers: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     /// Only the TLS path reads this, and the TLS path is optional. Without the
     /// feature the field is still set — the builder method stays callable so a
     /// caller does not have to feature-gate its own code — and never read.
@@ -559,12 +561,22 @@ impl WsClientBuilder {
     }
 
     pub fn header(mut self, key: &'static str, value: &'static str) -> Self {
-        self.headers.push((key, value));
+        self.headers.push((Cow::Borrowed(key), Cow::Borrowed(value)));
         self
     }
 
     pub fn headers(mut self, headers: Vec<(&'static str, &'static str)>) -> Self {
-        self.headers.extend(headers);
+        self.headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (Cow::Borrowed(key), Cow::Borrowed(value))),
+        );
+        self
+    }
+
+    /// Add an owned header, for values that are not static strings.
+    pub fn owned_header(mut self, key: String, value: String) -> Self {
+        self.headers.push((Cow::Owned(key), Cow::Owned(value)));
         self
     }
 
@@ -619,7 +631,11 @@ impl WsClientBuilder {
             || self
                 .headers
                 .iter()
-                .any(|(name, value)| !is_valid_header_name(name) || has_control(value))
+                .any(|(name, value)| {
+                    !is_valid_header_name(name)
+                        || is_reserved_header_name(name)
+                        || has_control(value)
+                })
         {
             bail!("invalid WebSocket request head");
         }
@@ -634,7 +650,11 @@ impl WsClientBuilder {
         } else {
             vec![self.protocol_header.as_str()]
         };
-        let headers: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (*k, *v)).collect();
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(key, value)| (key.as_ref(), value.as_ref()))
+            .collect();
 
         debug!(
             host = %target.host,
@@ -720,6 +740,23 @@ fn is_valid_header_name(name: &str) -> bool {
                         | b'~'
                 )
         })
+}
+
+#[cfg(feature = "ws-client")]
+fn is_reserved_header_name(name: &str) -> bool {
+    [
+        "sec-websocket-protocol",
+        "host",
+        "sec-websocket-key",
+        "upgrade",
+        "connection",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "content-length",
+        "transfer-encoding",
+    ]
+    .iter()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
 }
 
 #[cfg(all(test, feature = "ws-client"))]
