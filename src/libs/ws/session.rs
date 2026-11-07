@@ -193,7 +193,16 @@ impl WsClientSession {
         };
         let req = match obj {
             Ok(req) => req,
-            Err(_err) => {
+            Err(err) => {
+                debug!(
+                    ws_server = true,
+                    error_class = ?err.classify(),
+                    line = err.line(),
+                    column = err.column(),
+                    connection_id = context.connection_id,
+                    log_id = context.log_id,
+                    "Rejected malformed WebSocket request"
+                );
                 self.server.toolbox.send(
                     context.connection_id,
                     WsResponseValue::Error(WsResponseError {
@@ -720,6 +729,19 @@ fn check_roles(actual_roles: &[u32], allowed_roles: &HashSet<u32>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+
+    use crate::libs::handler::{RequestHandler, Response};
+    use crate::libs::toolbox::{CustomError, RequestContext};
+    use crate::libs::ws::headers::preauth_sanitization_regression::{
+        assert_sanitized_rejection, capture_events,
+    };
+    use crate::libs::ws::{WsRequest, WsResponse};
+
     #[test]
     fn check_roles_allowed() {
         use super::check_roles;
@@ -868,6 +890,149 @@ mod tests {
             extensions: Extensions::new(),
             log_id: 0,
         })
+    }
+
+    #[derive(Clone, Deserialize, Serialize)]
+    struct DiagnosticEchoRequest {
+        message: String,
+    }
+
+    #[derive(Clone, Deserialize, Serialize)]
+    struct DiagnosticEchoResponse {
+        echoed: String,
+    }
+
+    impl WsRequest for DiagnosticEchoRequest {
+        type Response = DiagnosticEchoResponse;
+        const METHOD_ID: u32 = 99;
+        const ROLES: &'static [u32] = &[1];
+        const SCHEMA: &'static str = r#"{
+            "name":"DiagnosticEcho","code":99,
+            "parameters":[{"name":"message","ty":"String"}],
+            "returns":[{"name":"echoed","ty":"String"}],"roles":[]
+        }"#;
+    }
+
+    impl WsResponse for DiagnosticEchoResponse {
+        type Request = DiagnosticEchoRequest;
+    }
+
+    struct MethodDiagnosticEcho(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait(?Send)]
+    impl RequestHandler for MethodDiagnosticEcho {
+        type Request = DiagnosticEchoRequest;
+        type Error = CustomError;
+
+        async fn handle(
+            &self,
+            _: RequestContext,
+            req: DiagnosticEchoRequest,
+        ) -> Response<DiagnosticEchoRequest> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(DiagnosticEchoResponse {
+                echoed: req.message,
+            })
+        }
+    }
+
+    #[test]
+    fn malformed_text_and_binary_frames_are_sanitized_and_keep_dispatch_alive() {
+        use super::{Dispatch, ErrorCode, Message, WebsocketServer, WsClientSession, WsResponseValue};
+        use crate::libs::ws::{WsServerConfig, outbound};
+
+        let config = WsServerConfig {
+            request_timeout: None,
+            ..WsServerConfig::default()
+        };
+        let mut server = WebsocketServer::new(config);
+        let calls = Arc::new(AtomicUsize::new(0));
+        server.add_handler(MethodDiagnosticEcho(Arc::clone(&calls)));
+
+        let responses = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&responses);
+        assert!(
+            server
+                .toolbox
+                .send_msg
+                .set(Arc::new(move |id, response| {
+                    assert_eq!(id, 1);
+                    recorded.lock().unwrap().push(response);
+                    true
+                }))
+                .is_ok()
+        );
+
+        let mut conn = test_conn();
+        Arc::get_mut(&mut conn).unwrap().log_id = 123;
+        conn.set_roles(Arc::new(vec![1]));
+        let (_tx, rx) = outbound::channel(1);
+        let mut session = WsClientSession::new(
+            conn,
+            Box::new(PendingStream {
+                parked: Arc::new(AtomicBool::new(false)),
+            }),
+            rx,
+            Arc::new(server),
+        );
+
+        let secret = "secret-frame-must-not-leak";
+        let malformed = format!("{{\n  \"method\":\"{secret}\",\"seq\":8,\"params\":{{}}}}");
+        for frame in [
+            Message::from(malformed.as_str()),
+            Message::Binary(malformed.into_bytes().into()),
+        ] {
+            let (dispatch, events) = capture_events(|| session.handle_message(frame).unwrap());
+            assert!(matches!(dispatch, Dispatch::Keep));
+            assert_sanitized_rejection(
+                &events,
+                secret,
+                "Rejected malformed WebSocket request",
+                &[
+                    ("ws_server", "true"),
+                    ("error_class", "Data"),
+                    ("line", "2"),
+                    ("column", "39"),
+                    ("connection_id", "1"),
+                    ("log_id", "123"),
+                ],
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            let mut responses = responses.lock().unwrap();
+            assert_eq!(responses.len(), 1);
+            assert_eq!(
+                serde_json::to_value(responses.pop().unwrap()).unwrap(),
+                json!({
+                    "type": "Error",
+                    "method": 0,
+                    "seq": 0,
+                    "log_id": "123",
+                    "code": ErrorCode::BAD_REQUEST.to_u32(),
+                    "params": {
+                        "kind": ErrorCode::BAD_REQUEST.kind(),
+                        "message": "invalid request",
+                    },
+                }),
+            );
+        }
+
+        let valid = Message::from(r#"{"method":99,"seq":5,"params":{"message":"still connected"}}"#);
+        let Dispatch::Task(task) = session.handle_message(valid).unwrap() else {
+            panic!("expected the registered handler to be dispatched");
+        };
+        futures::executor::block_on(task);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let responses = responses.lock().unwrap();
+        let [WsResponseValue::Immediate(success)] = responses.as_slice() else {
+            panic!("expected one successful handler reply, got {responses:?}");
+        };
+        assert_eq!(success.method, 99);
+        assert_eq!(success.seq, 5);
+        assert_eq!(
+            serde_json::from_str::<Value>(success.params.get()).unwrap(),
+            json!({"echoed": "still connected"}),
+        );
     }
 
     /// The teardown edge: no sender left, so the session has to return rather

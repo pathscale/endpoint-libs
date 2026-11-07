@@ -180,7 +180,16 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
         async move {
             let data: T::Request = match serde_json::from_value(param) {
                 Ok(data) => data,
-                Err(_err) => {
+                Err(err) => {
+                    debug!(
+                        ws_server = true,
+                        error_class = ?err.classify(),
+                        request_type = std::any::type_name::<T::Request>(),
+                        method = ctx.method,
+                        connection_id = ctx.connection_id,
+                        log_id = ctx.log_id,
+                        "Rejected malformed typed authentication request"
+                    );
                     return AuthReply::Rejected(Some(WsResponseError {
                         method: ctx.method,
                         code: ErrorCode::BAD_REQUEST.to_u32(),
@@ -449,7 +458,9 @@ mod tests {
 }
 
 #[cfg(test)]
-mod preauth_sanitization_regression {
+pub(super) mod preauth_sanitization_regression {
+    use std::collections::BTreeMap;
+    use std::fmt::Debug;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -458,9 +469,92 @@ mod preauth_sanitization_regression {
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+
     use super::*;
     use crate::libs::peer::{Extensions, PeerIdentity};
     use crate::libs::ws::WsResponse;
+
+    #[derive(Debug)]
+    pub(in crate::libs::ws) struct CapturedEvent {
+        level: tracing::Level,
+        fields: EventFields,
+    }
+
+    #[derive(Debug, Default)]
+    struct EventFields(BTreeMap<&'static str, String>);
+
+    impl Visit for EventFields {
+        fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+            self.0.insert(field.name(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name(), value.to_owned());
+        }
+    }
+
+    struct Capture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut fields = EventFields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                fields,
+            });
+        }
+    }
+
+    pub(in crate::libs::ws) fn capture_events<T>(
+        operation: impl FnOnce() -> T,
+    ) -> (T, Vec<CapturedEvent>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&events)));
+        let result = tracing::subscriber::with_default(subscriber, operation);
+        let events = std::mem::take(&mut *events.lock().unwrap());
+        (result, events)
+    }
+
+    pub(in crate::libs::ws) fn assert_sanitized_rejection(
+        events: &[CapturedEvent],
+        secret: &str,
+        message: &str,
+        expected_fields: &[(&str, &str)],
+    ) {
+        for event in events {
+            for (name, value) in &event.fields.0 {
+                for forbidden in [secret, "invalid type", "expected u32", "expected u64"] {
+                    assert!(
+                        !name.contains(forbidden) && !value.contains(forbidden),
+                        "sensitive content in event: {event:?}"
+                    );
+                }
+            }
+        }
+        let rejections: Vec<_> = events
+            .iter()
+            .filter(|event| event.fields.0.get("message").is_some_and(|value| value == message))
+            .collect();
+        let [rejection] = rejections.as_slice() else {
+            panic!("expected one {message:?} event, got {events:?}");
+        };
+        assert_eq!(rejection.level, tracing::Level::DEBUG);
+        let actual_fields: BTreeMap<_, _> = rejection
+            .fields
+            .0
+            .iter()
+            .map(|(&name, value)| (name, value.as_str()))
+            .collect();
+        let expected_fields: BTreeMap<_, _> = expected_fields
+            .iter()
+            .copied()
+            .chain([("message", message)])
+            .collect();
+        assert_eq!(actual_fields, expected_fields);
+    }
 
     #[derive(Clone, Deserialize, Serialize)]
     struct TypedAuthRequest {
@@ -551,35 +645,51 @@ mod preauth_sanitization_regression {
         ctx.seq = 4;
         ctx.log_id = 123;
 
-        let reply = futures::executor::block_on(controller.clone().auth_reply(
-            &toolbox,
-            json!({"credential": "secret-input-must-not-leak"}),
-            ctx.clone(),
-            Arc::clone(&conn),
-        ));
+        let secret = "secret-input-must-not-leak";
+        let ((), events) = capture_events(|| {
+            let reply = futures::executor::block_on(controller.clone().auth_reply(
+                &toolbox,
+                json!({"credential": secret}),
+                ctx.clone(),
+                Arc::clone(&conn),
+            ));
 
-        assert!(matches!(&reply, AuthReply::Rejected(_)));
-        assert!(sent.lock().unwrap().is_empty());
-        assert!(is_auth_rejection(&reply.finish(&toolbox, 9).unwrap_err()));
+            assert!(matches!(&reply, AuthReply::Rejected(_)));
+            assert!(sent.lock().unwrap().is_empty());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(is_auth_rejection(&reply.finish(&toolbox, 9).unwrap_err()));
+        });
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_sanitized_rejection(
+            &events,
+            secret,
+            "Rejected malformed typed authentication request",
+            &[
+                ("ws_server", "true"),
+                ("error_class", "Data"),
+                ("request_type", std::any::type_name::<TypedAuthRequest>()),
+                ("method", "71"),
+                ("connection_id", "9"),
+                ("log_id", "123"),
+            ],
+        );
         {
             let sent = sent.lock().unwrap();
             assert_eq!(sent.len(), 1);
-            let WsResponseValue::Error(error) = &sent[0] else {
-                panic!("malformed authentication input should return an error");
-            };
-            assert_eq!(error.code, ErrorCode::BAD_REQUEST.to_u32());
             assert_eq!(
-                error.params,
+                serde_json::to_value(&sent[0]).unwrap(),
                 json!({
-                    "kind": ErrorCode::BAD_REQUEST.kind(),
-                    "message": "authentication failed",
-                })
+                    "type": "Error",
+                    "method": 71,
+                    "seq": 4,
+                    "log_id": "123",
+                    "code": ErrorCode::BAD_REQUEST.to_u32(),
+                    "params": {
+                        "kind": ErrorCode::BAD_REQUEST.kind(),
+                        "message": "authentication failed",
+                    },
+                }),
             );
-            let wire_params = serde_json::to_string(&error.params).unwrap();
-            assert!(!wire_params.contains("secret-input-must-not-leak"));
-            assert!(!wire_params.contains("invalid type"));
-            assert!(!wire_params.contains("expected u64"));
         }
 
         let reply = futures::executor::block_on(controller.auth_reply(
@@ -596,6 +706,14 @@ mod preauth_sanitization_regression {
         assert_eq!(accepted_credential.load(Ordering::SeqCst), 42);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
-        assert!(matches!(sent[1], WsResponseValue::Immediate(_)));
+        let WsResponseValue::Immediate(success) = &sent[1] else {
+            panic!("valid authentication input should return a success");
+        };
+        assert_eq!(success.method, 71);
+        assert_eq!(success.seq, 4);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(success.params.get()).unwrap(),
+            json!({"accepted": true}),
+        );
     }
 }

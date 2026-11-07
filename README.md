@@ -11,6 +11,11 @@ See [scalar decoding](docs/blockchain-scalar-decoding.md),
 [auth protocols](docs/auth-protocol-validation.md), and
 [config logging](docs/config-log-policy.md).
 
+Malformed typed authentication data and malformed legacy WebSocket frames receive the
+same generic client errors as before. Server debug logs record only the decoder error
+class and safe request metadata; raw input, frame contents, and decoder details are not
+logged.
+
 [![Crates.io](https://img.shields.io/crates/v/endpoint-libs)](https://crates.io/crates/endpoint-libs)
 [![Docs.rs](https://docs.rs/endpoint-libs/badge.svg)](https://docs.rs/endpoint-libs)
 [![CI](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml/badge.svg)](https://github.com/pathscale/endpoint-libs/actions/workflows/rust.yml)

@@ -12,6 +12,18 @@ The method discriminator is `0`; if it is missing or does not identify a registe
 endpoint, authentication returns an error before creating an authenticated request
 context.
 
+## Malformed input diagnostics
+
+Malformed typed authentication input still returns the generic `BAD_REQUEST`
+response `authentication failed`. Malformed legacy text and binary frames still
+return `BAD_REQUEST` with `invalid request`; the decode branch keeps dispatch
+running after the reply. A later connection policy may still close the session:
+`header_only` ends the session after sending its queued response. At debug level,
+the server records the Serde error class and safe correlation metadata (request
+type and method for typed authentication; line and column for legacy frames, plus
+connection and log IDs). It does not log the raw error, input value, frame
+contents, or decoder path, since those can contain credentials.
+
 ## Integration acceptance
 
 Use the admission lane's transport acceptance fixture as an external integrator
