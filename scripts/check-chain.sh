@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Verify the endpoint-libs dependency chain is internally consistent.
 #
-# Read-only: builds and inspects, never writes to a repo. Safe to run any time.
+# Graph checks preserve existing lockfiles and clean up locks they create.
 #
 #   ./scripts/check-chain.sh            # check everything
-#   ./scripts/check-chain.sh --quick    # skip cargo build/test (metadata only)
+#   ./scripts/check-chain.sh --quick    # skip builds, tests and feature checks
 #
 # Exits non-zero if anything is inconsistent. See docs/chain.md for why each of
 # these matters, and docs/release-order.md for the release runbook.
@@ -15,9 +15,9 @@ CODE_ROOT="${CODE_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 QUICK=false
 [[ "${1:-}" == "--quick" ]] && QUICK=true
 
-TOOLS=(endpoint-libs endpointgen honey_id-types EndpointValidator)
+TOOLS=(endpoint-libs EndpointGen honey_id-types EndpointValidator)
 BACKENDS=(api.support.cafe web3.trading-backend nofilter.io-backend
-          pays.online-backend auth.honey.id-backend api.honey.id-backend)
+          merchant.pays.online auth.honey.id-backend api.honey.id-backend)
 
 FAILURES=0
 pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
@@ -25,140 +25,100 @@ fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 skip() { printf '  \033[33m-\033[0m %s\n' "$1"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-repo() { echo "$CODE_ROOT/$1"; }
+repo() {
+    local name=$1
+    if [[ "$name" == EndpointGen && ! -d "$CODE_ROOT/$name" ]]; then
+        name=endpointgen
+    fi
+    printf '%s\n' "$CODE_ROOT/$name"
+}
 have() { [[ -d "$(repo "$1")" ]]; }
 
-# ── 1. Exactly one endpoint-libs per dependency graph ────────────────────────
-# Two copies in ONE graph means honey_id-types' re-exported WsRequest/WsResponse
-# traits are different types with the same name, and the resulting error names
-# two different endpoint-libs paths. See docs/chain.md.
-#
-# "Per graph" is the whole point, and a Cargo.lock cannot answer it. A lock is
-# per workspace: it lists every version any member resolved, with no record of
-# which member reached which. So counting copies in the lock cannot tell the
-# real defect from a workspace whose members resolve different versions in
-# graphs that never meet.
-#
-# EndpointValidator is the standing example of the second kind. Its
-# `endpoint-validator` member is on 2.1; `ws-load-test` is deliberately held on
-# 1.9, because endpoint-libs 2.0 made WsClient's futures non-Send and that
-# breaks its JoinSet-of-workers model -- moving it needs a runtime plus a
-# LocalSet per pinned core, which would change the concurrency characteristics
-# its benchmarks exist to measure. The reason is written down in
-# ws-load-test/Cargo.toml, where the pin is. Nothing links the two members, so
-# no binary ever sees two copies and nothing can fail to unify. The lock count
-# reported it anyway, every run, forever -- and a check that is permanently red
-# is a check people stop reading, which costs more than not having it.
-#
-# So the lock count is only a prefilter. When it is greater than 1, ask cargo
-# for the actual graphs: one `cargo tree` per workspace member. A member that
-# reaches two endpoint-libs versions is the real defect; members that each
-# reach one are fine no matter how many the lock holds.
-
-# Versions of endpoint-libs reachable from one workspace member, one per line.
-# --locked everywhere: this script is read-only, and a bare `cargo tree` will
-# rewrite a consumer's Cargo.lock if the manifests have moved past it. --offline
-# first so a normal run needs no network at all; the second form is allowed to
-# fetch the index for a crate missing from the local cache, and still refuses to
-# change the lock. If both fail the repo is reported unresolved, not green.
-member_graph_versions() {
-    cargo tree --locked --offline -p "$1" --prefix none --format '{p}' 2>/dev/null ||
-        cargo tree --locked -p "$1" --prefix none --format '{p}' 2>/dev/null
+# ── Dependency graphs ───────────────────────────────────────────────────────
+# A workspace lockfile combines member resolutions. Check members separately
+# so EndpointValidator's intentional ws-load-test split does not fail.
+graph_tree() {
+    local output
+    if output=$(cargo tree --locked --offline --color never --prefix none --format '{p}' "$@" 2>/dev/null); then
+        printf '%s\n' "$output"
+    else
+        cargo tree --locked --color never --prefix none --format '{p}' "$@"
+    fi
 }
 
-# Workspace members of the repo we are already cd'd into, one name per line.
-# A single-crate repo is a one-member workspace, so this needs no special case.
-workspace_members() {
-    { cargo tree --locked --offline --workspace --depth 0 --prefix none --format '{p}' 2>/dev/null ||
-        cargo tree --locked --workspace --depth 0 --prefix none --format '{p}' 2>/dev/null; } |
-        sed -nE 's/^([^ ]+) v[0-9].*/\1/p'
-}
+check_workspace() (
+    r=$1
+    FAILURES=0
+    cd "$(repo "$r")" || { fail "$r: could not enter checkout"; exit 1; }
+    manifest=$(cargo locate-project --workspace --message-format plain) ||
+        { fail "$r: could not locate Cargo workspace"; exit 1; }
+    lock="${manifest%/*}/Cargo.lock"
+    if [[ ! -e "$lock" && ! -L "$lock" ]]; then
+        # Reserve the path without clobbering another writer. Cargo preserves
+        # the leading comment, so cleanup can recognize the lock we created.
+        marker="# check-chain temporary lock $$-$RANDOM-$RANDOM"
+        trap '
+            if [[ -e "$lock" || -L "$lock" ]]; then
+                if [[ -f "$lock" && ! -L "$lock" ]] && grep -Fxq -- "$marker" "$lock"; then
+                    rm -- "$lock" || exit 1
+                else
+                    fail "$r: lock ownership could not be verified; left $lock in place"
+                    exit 1
+                fi
+            fi
+        ' EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        if ! (set -C; printf '%s\n' '# This file is automatically @generated by Cargo.' \
+            '# It is not intended for manual editing.' "$marker" > "$lock"); then
+            fail "$r: could not reserve $lock"
+            exit 1
+        fi
+        cargo generate-lockfile || { fail "$r: could not generate Cargo.lock"; exit 1; }
+    elif [[ ! -f "$lock" ]]; then
+        fail "$r: $lock is not a regular file"
+        exit 1
+    fi
+
+    if ! members=$(graph_tree --workspace --depth 0 | sed -nE 's/^([^ ]+) v[0-9].*/\1/p') || [[ -z "$members" ]]; then
+        fail "$r: could not list workspace members"
+        exit 1
+    fi
+    for member in $members; do
+        if ! packages=$(graph_tree -p "$member" | sed -nE 's/ \(\*\)$//; /^endpoint-libs v[0-9]/p' | sort -u); then
+            fail "$r/$member: could not resolve dependency graph"
+        elif [[ "$packages" == *$'\n'* ]]; then
+            fail "$r/$member resolves multiple endpoint-libs packages: ${packages//$'\n'/, }"
+        elif [[ -n "$packages" ]]; then
+            pass "$r/$member resolves $packages"
+        else
+            skip "$r/$member does not depend on endpoint-libs"
+        fi
+    done
+    (( FAILURES == 0 ))
+)
 
 head_ "One endpoint-libs per graph"
 for r in "${TOOLS[@]}" "${BACKENDS[@]}"; do
     have "$r" || { skip "$r (not checked out)"; continue; }
-    lock="$(repo "$r")/Cargo.lock"
-    [[ -f "$lock" ]] || { skip "$r (no Cargo.lock)"; continue; }
-    n=$(grep -c '^name = "endpoint-libs"$' "$lock" 2>/dev/null || echo 0)
-    vers=$(grep -A1 '^name = "endpoint-libs"$' "$lock" | grep '^version' | sed 's/[" ]//g;s/version=//' | tr '\n' ' ')
-    if [[ "$n" -eq 0 ]]; then
-        skip "$r does not depend on endpoint-libs"
-        continue
-    fi
-    if [[ "$n" -eq 1 ]]; then
-        pass "$r resolves exactly 1 ($vers)"
-        continue
-    fi
-
-    # More than one in the lock. Only cargo can say whether any single graph
-    # sees more than one, so without cargo this is unresolved, not green.
-    if ! command -v cargo >/dev/null 2>&1; then
-        skip "$r holds $n copies in Cargo.lock (${vers}) and cargo is not installed, so the graphs cannot be checked"
-        continue
-    fi
-
-    members=$(cd "$(repo "$r")" && workspace_members)
-    if [[ -z "$members" ]]; then
-        skip "$r holds $n copies in Cargo.lock (${vers}) and cargo tree could not list its workspace members"
-        continue
-    fi
-
-    bad=""
-    split=""
-    for m in $members; do
-        mv_=$(cd "$(repo "$r")" && member_graph_versions "$m" |
-            sed -nE 's/^endpoint-libs v([0-9][^ ]*).*/\1/p' | sort -u | tr '\n' ' ')
-        case "$(echo "$mv_" | wc -w | tr -d ' ')" in
-            0) ;;
-            1) split="$split $m=${mv_% }" ;;
-            *) bad="$bad $m sees ${mv_% };" ;;
-        esac
-    done
-
-    if [[ -n "$bad" ]]; then
-        fail "$r:${bad% } -- traits re-exported through honey_id-types will not unify. See docs/chain.md"
-    else
-        pass "$r resolves $n copies in one lock but one per graph:${split} (separate members, nothing to unify)"
-    fi
+    check_workspace "$r" || FAILURES=$((FAILURES + 1))
 done
 
-# ── 2. version.toml agrees with Cargo.lock ───────────────────────────────────
-# endpoint-gen compares its own endpoint-libs requirement against [libs] here.
-# A stale declaration is the usual cause of a baffling refusal to generate.
-head_ "config/version.toml matches Cargo.lock"
+# ── Generator compatibility and artifact drift ──────────────────────────────
+# --check validates version.toml against the installed binary's requirements
+# before checking the generated artifacts.
+head_ "Generator compatibility and generated docs (endpoint-gen --check)"
 for r in "${BACKENDS[@]}"; do
     have "$r" || { skip "$r (not checked out)"; continue; }
-    vt="$(repo "$r")/config/version.toml"
-    lock="$(repo "$r")/Cargo.lock"
-    [[ -f "$vt" && -f "$lock" ]] || { skip "$r (missing version.toml or lock)"; continue; }
-
-    declared=$(awk '/^\[libs\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"");sub(/version=/,"");print;exit}' "$vt")
-    resolved=$(grep -A1 '^name = "endpoint-libs"$' "$lock" | grep '^version' | head -1 | sed 's/[" ]//g;s/version=//')
-
-    if [[ "$declared" == "$resolved" ]]; then
-        pass "$r declares $declared"
+    if out=$(cd "$(repo "$r")" && endpoint-gen --config-dir config --check 2>&1); then
+        pass "$r: ${out##*: }"
     else
-        fail "$r declares [libs] $declared but Cargo.lock resolves $resolved"
+        fail "$r: $out"
     fi
 done
 
-# ── 3. Generated artifacts still match the RON ───────────────────────────────
-head_ "Generated docs match their RON (endpoint-gen --check)"
-if ! command -v endpoint-gen >/dev/null 2>&1; then
-    skip "endpoint-gen not installed (cargo install endpoint-gen)"
-else
-    for r in "${BACKENDS[@]}"; do
-        have "$r" || { skip "$r (not checked out)"; continue; }
-        [[ -d "$(repo "$r")/config" ]] || { skip "$r (no config/)"; continue; }
-        if out=$(cd "$(repo "$r")" && endpoint-gen --config-dir config --check 2>&1); then
-            pass "$r: ${out##*: }"
-        else
-            fail "$r: $(echo "$out" | head -3 | tr '\n' ' ')"
-        fi
-    done
-fi
-
-# ── 4. Each tool repo builds and tests ───────────────────────────────────────
+# ── Each tool repo builds and tests ───────────────────────────────────────
 if $QUICK; then
     head_ "Build & test"
     skip "--quick: skipped"
@@ -174,7 +134,7 @@ else
     done
 fi
 
-# ── 5. Every endpoint-libs feature compiles standalone ───────────────────────
+# ── Every endpoint-libs feature compiles standalone ───────────────────────
 # A consumer picks features one at a time, so every feature has to declare the
 # dependencies its own code names. `signal` and `log_reader` did not, and it
 # stayed invisible because nothing ever built them without `types`. The feature
@@ -193,11 +153,11 @@ else
     fi
 fi
 
-# ── 6. Local versions vs crates.io ───────────────────────────────────────────
+# ── Local versions vs crates.io ───────────────────────────────────────────
 # Informational: an unpublished local bump is normal mid-release, but you should
 # know it is the case rather than discover it from a consumer.
 head_ "Local version vs crates.io"
-for r in endpoint-libs endpointgen honey_id-types; do
+for r in endpoint-libs EndpointGen honey_id-types; do
     have "$r" || { skip "$r (not checked out)"; continue; }
     name=$(awk '/^\[package\]/{f=1;next} f&&/^name/{gsub(/[" ]/,"");sub(/name=/,"");print;exit}' "$(repo "$r")/Cargo.toml")
     local_v=$(awk '/^\[package\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"");sub(/version=/,"");print;exit}' "$(repo "$r")/Cargo.toml")

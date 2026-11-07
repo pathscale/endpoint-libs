@@ -11,11 +11,11 @@ dependent repo's `AGENTS.md` links to it rather than restating it.
 
 ```
 endpoint-libs                    the runtime, and the schema model everything else uses
-├── endpoint-gen                 reads RON, writes models/docs/MCP schemas/specs
+├── EndpointGen                  reads RON, writes models/docs/MCP schemas/specs
 ├── honey_id-types               re-exports endpoint-libs' WsRequest/WsResponse traits
 ├── endpoint-validator           reads generated services.json, drives endpoint tests
 └── six backends                 api.support.cafe · web3.trading-backend ·
-                                 nofilter.io-backend · pays.online-backend ·
+                                 nofilter.io-backend · merchant.pays.online ·
                                  auth.honey.id-backend · api.honey.id-backend
 ```
 
@@ -26,16 +26,17 @@ edited, but later, in a different repo, with an error that does not name the cau
 
 ```bash
 ./scripts/check-chain.sh          # full
-./scripts/check-chain.sh --quick  # metadata only, no cargo
+./scripts/check-chain.sh --quick  # skip builds, tests and feature checks
 ```
 
-Read-only and safe to run any time. It expects the sibling repos beside this one; set
-`CODE_ROOT` if they live elsewhere, and it skips anything not checked out rather than
-failing.
+Set `CODE_ROOT` if the sibling checkouts live elsewhere. Missing checkouts are skipped.
+Graph checks use existing workspace lockfiles or generate and remove a transient local
+`Cargo.lock`. Run the check separately from commands that update the same workspace
+lockfiles. Configure temporary tooling output through the caller’s environment.
 
 It verifies:
 
-1. **Exactly one `endpoint-libs` per dependency graph.** Two copies in one graph means
+1. **At most one `endpoint-libs` per dependency graph.** Two copies in one graph means
    the traits `honey_id-types` re-exports are different types with the same name. The
    resulting error names two different `endpoint-libs` paths and reads like a broken
    handler.
@@ -43,20 +44,18 @@ It verifies:
    *Per graph*, not per lockfile. A `Cargo.lock` is per workspace and records every
    version any member resolved, not which member reached which, so counting copies in
    the lock cannot tell the real defect from a workspace whose members resolve
-   different versions in graphs that never meet. The lock count is only a prefilter:
-   above one, the check asks `cargo tree` per workspace member, and fails only when a
-   single member reaches two versions. `EndpointValidator` is the standing example of
-   the harmless shape, described at the end of this document.
-2. **`config/version.toml` agrees with `Cargo.lock`** in every backend. `endpoint-gen`
-   compares its own requirement against `[libs] version` and refuses to run on a
-   mismatch — a stale declaration is the usual cause of a baffling refusal.
-3. **Generated artifacts still match their RON** (`endpoint-gen --check` per backend).
-4. **Each tool repo builds and tests.**
-5. **Every `endpoint-libs` feature compiles standalone**
+   different versions in graphs that never meet. The script runs `cargo tree --locked`
+   for each member and fails on duplicate packages or unresolved graphs.
+2. **Generator compatibility and generated artifacts** (`endpoint-gen --check` per
+   backend). The generator checks `[binary] version` against the installed binary
+   and `[libs] version` against its compiled-in `endpoint-libs` requirement. It then
+   compares generated artifacts with the backend's docs.
+3. **Each tool repo builds and tests.**
+4. **Every `endpoint-libs` feature compiles standalone**
    (`./scripts/check-features.sh`). A consumer enables one feature, not the set you
    built with, so each feature must name every dependency its own code uses with
    `dep:`. Skipped under `--quick`.
-6. **Local versions against crates.io**, so an unpublished bump is a known state rather
+5. **Local versions against crates.io**, so an unpublished bump is a known state rather
    than something a consumer discovers.
 
 A red line is a real problem or a deliberate, documented one — never noise to skim past.
@@ -97,7 +96,7 @@ human before publishing unless they have asked for it in this session.
 ## The `EndpointValidator` split, which is not a failure
 
 `EndpointValidator` is a workspace whose two members sit on different majors on purpose.
-`endpoint-validator` is on 2.1; `ws-load-test` is held on 1.9 because endpoint-libs 2.0
+`endpoint-validator` is on 3.x. `ws-load-test` is held on 1.9 because endpoint-libs 2.0
 made `WsClient`'s futures non-`Send`, which breaks its `JoinSet`-of-workers model. Moving
 it needs a runtime plus a `LocalSet` per pinned core, changing the very concurrency
 characteristics its CIDR 2027 measurements record. The reason lives in
@@ -107,9 +106,3 @@ The two members do not depend on each other, so no binary ever sees two copies a
 nothing can fail to unify. Check 1 used to report it anyway, on every run, because it
 counted the lockfile instead of the graphs. It no longer does. **Do not "fix" this by
 bumping `ws-load-test`**, and do not reintroduce a lockfile count.
-
-## Known-red, as of 2026-09-22
-
-Nothing. `./scripts/check-chain.sh --quick` is green across all ten repos. Add an entry
-here the moment a check goes red on purpose, and delete it when it is resolved -- a red
-line with no entry is a real problem.

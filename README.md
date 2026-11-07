@@ -101,18 +101,14 @@ endpoint-libs 2.1, endpoint-gen 1.13 and honey_id-types 2.0 interoperate in prod
 
 What is actually enforced:
 
-- **`endpoint-gen`** records the `endpoint-libs` version it was built against and checks
-  it at generation time against `[libs] version` in your `config/version.toml`. A
-  mismatch fails generation with an explicit message rather than emitting subtly wrong
-  code.
+- **`endpoint-gen`** checks that `[libs] version` in `config/version.toml` satisfies
+  its compiled-in `endpoint-libs` requirement and that the installed binary satisfies
+  `[binary] version`. `endpoint-gen --check` runs both compatibility checks.
 - **`honey_id-types`** re-exports this crate's `WsRequest`/`WsResponse` traits. Bumping
   one without the other can put two incompatible copies of `endpoint-libs` in a single
   dependency graph; the resulting error names two different `endpoint-libs` paths and is
-  otherwise baffling. The check that catches it is one line:
-
-  ```sh
-  grep -c 'name = "endpoint-libs"' Cargo.lock   # must be exactly 1
-  ```
+  otherwise baffling. Run `./scripts/check-chain.sh --quick` to check each workspace
+  member's dependency graph.
 
 The release order for the whole chain is in [`docs/release-order.md`](docs/release-order.md).
 

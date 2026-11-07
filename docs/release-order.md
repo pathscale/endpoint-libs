@@ -13,7 +13,7 @@ endpoint-libs
 └──────────────────┐ │
                    ▼ ▼
    api.support.cafe · auth.honey.id-backend · api.honey.id-backend
-   nofilter.io-backend · pays.online-backend · web3.trading-backend
+   nofilter.io-backend · merchant.pays.online · web3.trading-backend
 ```
 
 ## Why the order matters
@@ -57,9 +57,9 @@ at build time (it is a binary), so it can move independently of `honey_id-types`
 Broader cross-repo guidance — the traps, and what to verify when changing any node —
 is in [`chain.md`](chain.md).
 
-[`scripts/check-chain.sh`](../scripts/check-chain.sh) runs every check in this document
-across all the repos at once, plus the `version.toml`/`Cargo.lock` agreement and
-`endpoint-gen --check` per backend. Read-only; `--quick` skips the cargo builds.
+[`scripts/check-chain.sh`](../scripts/check-chain.sh) checks each workspace member's
+dependency graph and runs `endpoint-gen --check` per backend for version compatibility
+and artifact drift. Use `--quick` to skip builds, tests and feature checks.
 
 ```bash
 ./scripts/check-chain.sh
@@ -67,14 +67,9 @@ across all the repos at once, plus the `version.toml`/`Cargo.lock` agreement and
 
 ## The check that proves it
 
-After any bump, in each consumer:
-
-```bash
-grep -c 'name = "endpoint-libs"' Cargo.lock     # must be exactly 1
-```
-
-More than one means the split has happened. Also confirm it resolves from the
-registry rather than a local path override:
+After any bump, use the chain check to verify that each consumer resolves a single
+`endpoint-libs` package in its graph. To confirm the package source is the registry,
+inspect the source field when a local `Cargo.lock` is available:
 
 ```bash
 grep -A2 'name = "endpoint-libs"' Cargo.lock | grep source
