@@ -35,8 +35,7 @@ use crate::model::{EndpointSchema, TypeRegistry};
 
 use super::outbound;
 use super::{
-    AuthController, SimpleAuthController, WebsocketStates, WsEndpoint,
-    headers::is_auth_rejection,
+    AuthController, SimpleAuthController, WebsocketStates, WsEndpoint, headers::is_auth_rejection,
 };
 
 pub struct WebsocketServer {
@@ -485,21 +484,29 @@ impl WebsocketServer {
 
         let auth_controller = Arc::clone(&self.auth_controller);
         let auth_toolbox = Arc::clone(&self.toolbox);
+        let auth_states = Arc::clone(&states);
         let auth_connection_id = conn.connection_id;
+        let auth_oneshot = self.config.header_only;
+        let auth_drop_on_full = self.config.drop_conn_on_buffer_full;
         let auth_conn = Arc::clone(&conn);
-        let auth_result = with_deadline(
-            self.config.handshake_timeout,
-            async move {
-                auth_controller
-                    .auth_reply(
-                        &auth_toolbox,
-                        auth_protocol.unwrap_or_default(),
-                        auth_conn,
-                    )
-                    .await?
-                    .finish(&auth_toolbox, auth_connection_id)
-            },
-        )
+        let auth_result = with_deadline(self.config.handshake_timeout, async move {
+            auth_controller
+                .auth_reply(&auth_toolbox, auth_protocol.unwrap_or_default(), auth_conn)
+                .await?
+                .finish_with(|reply| {
+                    auth_states
+                        .get_state(auth_connection_id)
+                        .is_some_and(|state| {
+                            !state.end.is_cancelled()
+                                && Toolbox::enqueue_response(
+                                    &state,
+                                    reply,
+                                    auth_oneshot,
+                                    auth_drop_on_full,
+                                )
+                        })
+                })
+        })
         .await
         .and_then(|result| result);
         let raw_ctx = RequestContext::from_conn(&conn);
@@ -583,13 +590,12 @@ impl WebsocketServer {
             ?conn_id,
             "Starting websocket session"
         );
-        let end = states
-            .get_state(conn.connection_id)
-            .map(|state| Arc::clone(&state.end));
+        let Some(state) = states.get_state(conn.connection_id) else {
+            return;
+        };
+        let end = Arc::clone(&state.end);
         let mut session = WsClientSession::new(conn, stream, rx, self);
-        if let Some(end) = end {
-            session.bind_end(end);
-        }
+        session.bind_end(end);
         session.run().await;
 
         info!(ws_server = true, ?addr, ?conn_id, "Websocket session ended");

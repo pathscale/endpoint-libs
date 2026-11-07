@@ -153,8 +153,6 @@ type SendFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
 type SendFnArc = Arc<SendFn>;
 type SendRawFn = dyn Fn(ConnectionId, String) -> bool + Send + Sync;
 type SendRawFnArc = Arc<SendRawFn>;
-type SendQueuedFn = dyn Fn(ConnectionId, WsResponseValue) -> bool + Send + Sync;
-type SendQueuedFnArc = Arc<SendQueuedFn>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnqueueOutcome {
@@ -166,7 +164,6 @@ enum EnqueueOutcome {
 pub struct Toolbox {
     pub send_msg: OnceLock<SendFnArc>,
     pub send_raw_msg: OnceLock<SendRawFnArc>,
-    send_queued_msg: OnceLock<SendQueuedFnArc>,
 }
 pub type ArcToolbox = Arc<Toolbox>;
 impl Toolbox {
@@ -174,7 +171,6 @@ impl Toolbox {
         Arc::new(Self {
             send_msg: OnceLock::new(),
             send_raw_msg: OnceLock::new(),
-            send_queued_msg: OnceLock::new(),
         })
     }
 
@@ -209,13 +205,7 @@ impl Toolbox {
         });
         let send_fn: SendFnArc = {
             let send_outcome = Arc::clone(&send_outcome);
-            Arc::new(move |conn_id, msg| {
-                send_outcome(conn_id, msg) != EnqueueOutcome::Disconnected
-            })
-        };
-        let send_queued_fn: SendQueuedFnArc = {
-            let send_outcome = Arc::clone(&send_outcome);
-            Arc::new(move |conn_id, msg| send_outcome(conn_id, msg) == EnqueueOutcome::Queued)
+            Arc::new(move |conn_id, msg| send_outcome(conn_id, msg) != EnqueueOutcome::Disconnected)
         };
         if self.send_msg.set(send_fn).is_err() {
             warn!(
@@ -223,7 +213,6 @@ impl Toolbox {
                 "set_ws_states called twice — ignoring second call"
             );
         }
-        let _ = self.send_queued_msg.set(send_queued_fn);
         // Pre-serialized frames (JSON-RPC/MCP responses) bypass WsResponseValue.
         let send_raw_outcome = Arc::new(move |conn_id, serialized| {
             let state = if let Some(state) = raw_states.get(&conn_id) {
@@ -326,12 +315,23 @@ impl Toolbox {
             None => false,
         }
     }
-    /// Sends a response and reports whether the frame was actually queued.
-    pub fn send_queued(&self, conn_id: ConnectionId, resp: WsResponseValue) -> bool {
-        match self.send_queued_msg.get() {
-            Some(f) => f(conn_id, resp),
-            None => self.send(conn_id, resp),
-        }
+    pub(super) fn enqueue_response(
+        state: &WsStreamState,
+        resp: WsResponseValue,
+        oneshot: bool,
+        drop_on_full: bool,
+    ) -> bool {
+        let Ok(serialized) = serde_json::to_string(&resp) else {
+            return false;
+        };
+        Self::enqueue(
+            &state.message_queue,
+            Some(&state.end),
+            serialized,
+            oneshot,
+            state.conn.connection_id,
+            drop_on_full,
+        ) == EnqueueOutcome::Queued
     }
     /// Sends a pre-serialized frame (e.g. a JSON-RPC/MCP response) as-is.
     pub fn send_raw(&self, conn_id: ConnectionId, serialized: String) -> bool {
@@ -766,19 +766,29 @@ mod tests {
         toolbox.set_ws_states(states.clone_states(), false, false);
 
         assert!(toolbox.send_raw(7, "next".into()));
-        let reply = || crate::libs::ws::WsResponseValue::Immediate(
-            crate::libs::ws::WsSuccessResponse {
+        let reply = || {
+            crate::libs::ws::WsResponseValue::Immediate(crate::libs::ws::WsSuccessResponse {
                 method: 1,
                 seq: 1,
                 params: serde_json::value::to_raw_value(&serde_json::json!({})).unwrap(),
-            },
-        );
-        assert!(!toolbox.send_queued(7, reply()));
+            })
+        };
+        assert!(!Toolbox::enqueue_response(
+            &states.get_state(7).unwrap(),
+            reply(),
+            false,
+            false
+        ));
 
         assert!(!states.get_state(7).unwrap().end.is_cancelled());
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
         assert!(rx.try_recv().is_err());
-        assert!(toolbox.send_queued(7, reply()));
+        assert!(Toolbox::enqueue_response(
+            &states.get_state(7).unwrap(),
+            reply(),
+            false,
+            false
+        ));
         assert!(matches!(rx.try_recv().unwrap(), Message::Text(_)));
     }
 }
