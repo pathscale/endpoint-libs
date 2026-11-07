@@ -91,7 +91,7 @@ If it is deliberate, say so in the change that makes it red.
 ## Publishing
 
 Irreversible: a version number can never be reused, and yanking does not delete.
-`cargo publish --dry-run` first, publish from the default branch, tag the release. Ask a
+Run `cargo publish --dry-run` first, then use the manual publishing workflow from the default branch. Ask a
 human before publishing unless they have asked for it in this session.
 
 ## The `EndpointValidator` split, which is not a failure
