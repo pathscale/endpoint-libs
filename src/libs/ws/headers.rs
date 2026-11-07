@@ -35,7 +35,7 @@ impl AuthReply {
             Self::Accepted(reply) => {
                 if let Some(reply) = reply {
                     eyre::ensure!(
-                        toolbox.send(connection_id, WsResponseValue::Immediate(reply)),
+                        toolbox.send_queued(connection_id, WsResponseValue::Immediate(reply)),
                         "authentication reply could not be queued"
                     );
                 }
