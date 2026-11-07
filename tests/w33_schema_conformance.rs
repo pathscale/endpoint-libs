@@ -1,3 +1,5 @@
+#![cfg(feature = "types")]
+
 use endpoint_libs::model::{EndpointSchema, EnumVariant, Field, Type, TypeRegistry};
 use serde_json::Value;
 use std::collections::BTreeMap;
