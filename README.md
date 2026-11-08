@@ -554,6 +554,19 @@ Utilities for reading and parsing structured log files, including reverse-line i
 
 A `tracing` layer that captures recent error-level log events into an in-memory container, allowing them to be queried programmatically (e.g. to expose recent errors via an API endpoint).
 
+Each container queues up to 256 pending `ERROR` events from its subscriber, with
+one additional event held by the worker. Admission never waits for queue space.
+A full queue rejects the incoming event and preserves the existing backlog.
+Events whose rendered target and message exceed 8 KiB combined, measured before
+removing surrounding debug quotes, are rejected as well. Stdout and file layers
+receive events independently of this admission decision.
+
+Use `errors_container.dropped_events()` to see cumulative admission loss. This
+counter includes full-queue and rendering rejections and survives `clear()`.
+`ErrorAggregationConfig::limit` governs the retained error history separately.
+Dropping the last container owner closes admission and cancels the worker.
+Shutdown can discard pending entries.
+
 ### `log_throttling`
 
 > **Do not use.** This feature is currently non-functional and is excluded from CI. It is present for future development only.

@@ -148,10 +148,8 @@ log_reader = [
     "dep:chrono",
 ]
 error_aggregation = [
-    # `nagoya::sync::RwLock` for the storage, a `futures` unbounded channel for
-    # the entries, and `nagoya::runtime::background()` for the aggregation
-    # task. The channel is `futures` rather than `ws::outbound` because this
-    # one is unbounded and that one is a bounded single-consumer queue.
+    # Runtime-independent bounded ingress and a Nagoya aggregation worker.
+    "dep:async-channel",
     "dep:nagoya",
     "dep:regex",
     "dep:lazy_static",
@@ -183,6 +181,7 @@ convert_case = { version = "0.6", optional = true }
 itertools = { version = "0.12", optional = true }
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
 futures = "0.3"
+async-channel = { version = "2.5", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",

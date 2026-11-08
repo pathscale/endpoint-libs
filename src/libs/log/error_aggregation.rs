@@ -1,6 +1,8 @@
 /// Error Aggregation - Collection of recent errors with optional deduping and other convenience stuff
 use std::cmp::Ordering;
-use std::sync::Arc;
+use std::fmt::{self, Write};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, Weak};
 
 use itertools::Itertools;
 use tracing_subscriber::Layer;
@@ -12,13 +14,18 @@ use std::collections::HashMap;
 
 use std::hash::Hash;
 
+const PENDING_CAPACITY: usize = 256;
+const MAX_EVENT_BYTES: usize = 8 * 1024;
+
 // Version with error aggregation feature
 pub fn get_error_aggregation(
     error_aggregation: ErrorAggregationConfig,
 ) -> (Arc<ErrorAggregationContainer>, ErrorAggregationLayer) {
     // Create error aggregation container and layer
     let error_container = Arc::new(ErrorAggregationContainer::new(error_aggregation));
-    let error_layer = ErrorAggregationLayer::new(error_container.sender.clone());
+    let error_layer = ErrorAggregationLayer {
+        ingress: Arc::downgrade(&error_container.ingress),
+    };
 
     (error_container, error_layer)
 }
@@ -84,22 +91,35 @@ impl ErrorStorage {
     }
 }
 
-/// Container for aggregated errors with async query methods
+#[derive(Debug)]
+struct ErrorIngress {
+    sender: async_channel::Sender<ErrorEntry>,
+    dropped: AtomicUsize,
+}
+
+impl ErrorIngress {
+    fn record_drop(&self) {
+        let _ = self
+            .dropped
+            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
+    }
+}
+
+/// Container for aggregated errors with async query methods.
 ///
-/// The channel is `futures::channel::mpsc::unbounded` rather than this crate's
-/// own `ws::outbound` queue, which is bounded: the producer here is
-/// [`ErrorAggregationLayer::on_event`], a `tracing` layer callback that runs on
-/// whatever thread emitted the error and cannot await. A bounded queue leaves
-/// only two behaviours at the boundary - block a logging call site, or silently
-/// drop the error an operator is trying to see - and an aggregator that loses
-/// errors under load is worst exactly when it matters. `futures`'s flavour is
-/// already a dependency of this crate, names no runtime, and its
-/// `unbounded_send` takes `&self` and never blocks, which is what the tokio
-/// sender gave us.
+/// The aggregation layer admits up to 256 pending ERROR events without waiting
+/// for space. The worker can hold one additional event while processing it.
+/// Full queues reject the incoming event. The rendered target and message are
+/// limited to 8 KiB combined. See [Self::dropped_events] for admission loss.
+///
+/// Dropping the last container owner closes admission and cancels the worker.
+/// Pending entries may be discarded during shutdown.
 #[derive(Debug)]
 pub struct ErrorAggregationContainer {
     storage: Arc<nagoya::sync::RwLock<ErrorStorage>>,
-    sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>,
+    ingress: Arc<ErrorIngress>,
     /// `Option` only so [`Drop`] can take the handle: nagoya's
     /// `JoinHandle::cancel` consumes it, where tokio's `abort` took `&self`.
     task_handle: Option<nagoya::JoinHandle<()>>,
@@ -114,7 +134,11 @@ impl ErrorAggregationContainer {
         let storage = ErrorStorage::new();
         let storage = Arc::new(nagoya::sync::RwLock::new(storage));
 
-        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        let (sender, receiver) = async_channel::bounded(PENDING_CAPACITY);
+        let ingress = Arc::new(ErrorIngress {
+            sender,
+            dropped: AtomicUsize::new(0),
+        });
 
         // Spawn background aggregation task
         let storage_clone = Arc::clone(&storage);
@@ -127,10 +151,20 @@ impl ErrorAggregationContainer {
 
         Self {
             storage,
-            sender,
+            ingress,
             task_handle,
             config,
         }
+    }
+
+    /// Count of ERROR events rejected by this aggregator because the queue was
+    /// full or the event could not be rendered within its byte budget.
+    ///
+    /// This cumulative count saturates at `usize::MAX`. Clearing stored errors
+    /// leaves it intact. Retention evictions and shutdown discards are separate
+    /// from admission loss.
+    pub fn dropped_events(&self) -> usize {
+        self.ingress.dropped.load(AtomicOrdering::Relaxed)
     }
 
     /// Get errors with pagination support and optional custom sorting. Sorts by most-recent by default
@@ -199,6 +233,7 @@ impl ErrorAggregationContainer {
 
 impl Drop for ErrorAggregationContainer {
     fn drop(&mut self) {
+        self.ingress.sender.close();
         if let Some(handle) = self.task_handle.take() {
             handle.cancel();
         }
@@ -207,13 +242,11 @@ impl Drop for ErrorAggregationContainer {
 
 /// Background task that aggregates errors from the channel
 async fn aggregation_task(
-    mut receiver: futures::channel::mpsc::UnboundedReceiver<ErrorEntry>,
+    receiver: async_channel::Receiver<ErrorEntry>,
     storage: Arc<nagoya::sync::RwLock<ErrorStorage>>,
     config: ErrorAggregationConfig,
 ) {
-    use futures::StreamExt;
-
-    while let Some(entry) = receiver.next().await {
+    while let Ok(entry) = receiver.recv().await {
         let mut storage_lock = storage.write().await;
         let map = &mut storage_lock.storage;
 
@@ -314,13 +347,7 @@ fn normalize_message(message: &str) -> String {
 
 /// Tracing layer that captures ERROR level events and sends them to the aggregator
 pub struct ErrorAggregationLayer {
-    sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>,
-}
-
-impl ErrorAggregationLayer {
-    fn new(sender: futures::channel::mpsc::UnboundedSender<ErrorEntry>) -> Self {
-        Self { sender }
-    }
+    ingress: Weak<ErrorIngress>,
 }
 
 impl<S: tracing::Subscriber> Layer<S> for ErrorAggregationLayer {
@@ -334,55 +361,92 @@ impl<S: tracing::Subscriber> Layer<S> for ErrorAggregationLayer {
             return;
         }
 
-        // Extract metadata
-        let target = event.metadata().target().to_string();
-
-        let caller_location = event
-            .fields()
-            .find_or_first(|field| field.name() == "caller_location");
-
-        let target = {
-            if let Some(location) = caller_location {
-                format!("{location} ({target})")
-            } else {
-                target
-            }
+        let Some(ingress) = self.ingress.upgrade() else {
+            return;
         };
+        if ingress.sender.is_closed() {
+            return;
+        }
 
-        let timestamp = chrono::Utc::now().timestamp_millis();
-
-        // Extract message from event
-        let mut message = String::new();
-        let mut visitor = MessageVisitor(&mut message);
-        event.record(&mut visitor);
-
-        // Send to aggregator (non-blocking since unbounded channel)
-        let entry = ErrorEntry {
-            message,
-            timestamp,
-            target,
-            count: 1, // Will be recalculated by aggregation task
+        let Some(entry) = error_entry(event) else {
+            ingress.record_drop();
+            return;
         };
+        if let Err(async_channel::TrySendError::Full(_)) = ingress.sender.try_send(entry) {
+            ingress.record_drop();
+        }
+    }
+}
 
-        // Ignore send errors (channel closed means container dropped).
-        // `unbounded_send` is the `&self`, never-blocking half of the futures
-        // sender; its `Sink::send` would need `&mut self` and an await, neither
-        // of which a layer callback has.
-        let _ = self.sender.unbounded_send(entry);
+fn error_entry(event: &tracing::Event<'_>) -> Option<ErrorEntry> {
+    let metadata_target = event.metadata().target();
+    let caller_location = event
+        .fields()
+        .find_or_first(|field| field.name() == "caller_location");
+
+    let mut target = BoundedText::new(MAX_EVENT_BYTES);
+    if let Some(location) = caller_location {
+        write!(target, "{location} ({metadata_target})").ok()?;
+    } else {
+        target.write_str(metadata_target).ok()?;
+    }
+
+    let timestamp = chrono::Utc::now().timestamp_millis();
+    let mut message = BoundedText::new(MAX_EVENT_BYTES - target.text.len());
+    event.record(&mut MessageVisitor(&mut message));
+    if message.failed {
+        return None;
+    }
+
+    let mut message = message.text;
+    // Preserve the existing display of Debug values surrounded by quotes.
+    if message.len() > 1 && message.starts_with('"') && message.ends_with('"') {
+        message.pop();
+        message.remove(0);
+    }
+
+    Some(ErrorEntry {
+        message,
+        timestamp,
+        target: target.text,
+        count: 1,
+    })
+}
+
+struct BoundedText {
+    text: String,
+    limit: usize,
+    failed: bool,
+}
+
+impl BoundedText {
+    fn new(limit: usize) -> Self {
+        Self {
+            text: String::new(),
+            limit,
+            failed: false,
+        }
+    }
+}
+
+impl Write for BoundedText {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.failed || text.len() > self.limit - self.text.len() {
+            self.failed = true;
+            return Err(fmt::Error);
+        }
+        self.text.push_str(text);
+        Ok(())
     }
 }
 
 /// Visitor to extract message field from tracing Event
-struct MessageVisitor<'a>(&'a mut String);
+struct MessageVisitor<'a>(&'a mut BoundedText);
 
 impl<'a> tracing::field::Visit for MessageVisitor<'a> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            *self.0 = format!("{:?}", value);
-            // Remove quotes added by Debug formatting
-            if self.0.starts_with('"') && self.0.ends_with('"') && self.0.len() > 1 {
-                *self.0 = self.0[1..self.0.len() - 1].to_string();
-            }
+        if field.name() == "message" && write!(self.0, "{value:?}").is_err() {
+            self.0.failed = true;
         }
     }
 }
@@ -390,6 +454,103 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
 #[cfg(all(test, feature = "error_aggregation"))]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tracing_subscriber::prelude::*;
+
+    struct ErrorObserver(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> Layer<S> for ErrorObserver {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().level() == &tracing::Level::ERROR {
+                self.0.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn aggregation_ingress_saturation_recovers_and_closes() {
+        nagoya::block_on(nagoya::timeout(Duration::from_secs(10), async {
+            let (container, layer) = get_error_aggregation(ErrorAggregationConfig::default());
+            let observed = Arc::new(AtomicUsize::new(0));
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::registry()
+                    .with(layer)
+                    .with(ErrorObserver(Arc::clone(&observed))),
+            );
+            let emit_queued = || {
+                tracing::dispatcher::with_default(&dispatch, || {
+                    tracing::error!("queued error");
+                });
+            };
+            let storage = Arc::clone(&container.storage);
+            let blocked = storage.write().await;
+
+            // The worker takes one event before waiting on the storage lock.
+            emit_queued();
+            while !container.ingress.sender.is_empty() {
+                nagoya::sleep(Duration::from_millis(1)).await;
+            }
+            for _ in 0..PENDING_CAPACITY {
+                emit_queued();
+            }
+            assert_eq!(container.dropped_events(), 0);
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::error!("rejected at capacity");
+            });
+            assert_eq!(container.dropped_events(), 1);
+            drop(blocked);
+
+            loop {
+                let errors = container.get_all_errors().await;
+                if errors.iter().map(|entry| entry.count).sum::<usize>() == PENDING_CAPACITY + 1 {
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].message, "queued error");
+                    break;
+                }
+                nagoya::sleep(Duration::from_millis(1)).await;
+            }
+
+            tracing::dispatcher::with_default(&dispatch, || {
+                tracing::error!("{}", "é".repeat(MAX_EVENT_BYTES / 2 + 1));
+                tracing::error!("admitted after draining");
+            });
+            assert_eq!(container.dropped_events(), 2);
+            loop {
+                let errors = container.get_all_errors().await;
+                if errors.iter().any(|entry| entry.message == "admitted after draining") {
+                    assert_eq!(errors.len(), 2);
+                    break;
+                }
+                nagoya::sleep(Duration::from_millis(1)).await;
+            }
+            container.clear().await;
+            assert_eq!(container.dropped_events(), 2);
+
+            let _blocked = storage.write().await;
+            emit_queued();
+            while !container.ingress.sender.is_empty() {
+                nagoya::sleep(Duration::from_millis(1)).await;
+            }
+            emit_queued();
+            // Simulate an in-flight callback retaining ingress during shutdown.
+            let in_flight = Arc::clone(&container.ingress);
+            let ingress = Arc::downgrade(&container.ingress);
+            drop(container);
+            assert!(in_flight.sender.is_closed());
+            emit_queued();
+            drop(in_flight);
+            assert!(ingress.upgrade().is_none());
+            while Arc::strong_count(&storage) != 1 {
+                nagoya::sleep(Duration::from_millis(1)).await;
+            }
+            assert_eq!(observed.load(AtomicOrdering::Relaxed), PENDING_CAPACITY + 7);
+        }))
+        .expect("aggregation should admit, recover, and cancel within the deadline");
+    }
 
     #[test]
     fn test_message_normalization() {
@@ -447,8 +608,9 @@ mod tests {
         // Add 4 entries, oldest should be evicted when limit exceeded
         for i in 0..4 {
             container
+                .ingress
                 .sender
-                .unbounded_send(ErrorEntry {
+                .try_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -483,8 +645,9 @@ mod tests {
 
         // Add similar errors with different IPs
         container
+            .ingress
             .sender
-            .unbounded_send(ErrorEntry {
+            .try_send(ErrorEntry {
                 message: "Connection failed to 192.168.1.1".to_string(),
                 timestamp: 1000,
                 target: "network".to_string(),
@@ -493,8 +656,9 @@ mod tests {
             .unwrap();
 
         container
+            .ingress
             .sender
-            .unbounded_send(ErrorEntry {
+            .try_send(ErrorEntry {
                 message: "Connection failed to 10.0.0.1".to_string(),
                 timestamp: 2000,
                 target: "network".to_string(),
@@ -530,8 +694,9 @@ mod tests {
         // Add 50 errors
         for i in 0..50 {
             container
+                .ingress
                 .sender
-                .unbounded_send(ErrorEntry {
+                .try_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -569,8 +734,9 @@ mod tests {
 
         // Add 3 different error types
         container
+            .ingress
             .sender
-            .unbounded_send(ErrorEntry {
+            .try_send(ErrorEntry {
                 message: "Error type A".to_string(),
                 timestamp: 1000,
                 target: "test".to_string(),
@@ -579,8 +745,9 @@ mod tests {
             .unwrap();
 
         container
+            .ingress
             .sender
-            .unbounded_send(ErrorEntry {
+            .try_send(ErrorEntry {
                 message: "Error type B".to_string(),
                 timestamp: 2000,
                 target: "test".to_string(),
@@ -589,8 +756,9 @@ mod tests {
             .unwrap();
 
         container
+            .ingress
             .sender
-            .unbounded_send(ErrorEntry {
+            .try_send(ErrorEntry {
                 message: "Error type C".to_string(),
                 timestamp: 3000,
                 target: "test".to_string(),
@@ -626,8 +794,9 @@ mod tests {
         // Add some errors
         for i in 0..5 {
             container
+                .ingress
                 .sender
-                .unbounded_send(ErrorEntry {
+                .try_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
@@ -662,8 +831,9 @@ mod tests {
         // Add 20 errors
         for i in 0..20 {
             container
+                .ingress
                 .sender
-                .unbounded_send(ErrorEntry {
+                .try_send(ErrorEntry {
                     message: format!("Error {}", i),
                     timestamp: i as i64,
                     target: "test".to_string(),
