@@ -208,6 +208,13 @@ The connecting half: `WsClient::new`, `WsClientBuilder` and the connect helpers.
 handshake and the framing are `nago-wss` over a nagoya socket. Standalone — you can
 build a client without the server.
 
+Use `WsClientBuilder::protocol_header` or the `protocol_header` argument to
+`WsClient::new` to set `Sec-WebSocket-Protocol`. For compatibility, a custom
+header with that name can also supply the value. If a nonempty value is set
+through the dedicated API, any custom value must match it exactly. The client
+sends one field. See `WsClientBuilder::connect` for the other handshake and
+HTTP framing fields that the client reserves.
+
 **Breaking change: the constructors take a `&nagoya::reactor::Handle`.** tokio supplied
 an ambient runtime, so a client built anywhere inside `#[tokio::main]` found a driver by
 itself. nagoya has no ambient anything: a descriptor is registered with one reactor when

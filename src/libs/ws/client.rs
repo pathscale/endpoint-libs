@@ -145,6 +145,7 @@ impl WsClient {
     /// This convenience form resolves the name itself, which blocks — see
     /// [`WsTarget::resolve`]. Use [`WsTarget`] plus
     /// [`WsClientBuilder::connect`] when a reactor is already running.
+    /// That method also documents which custom headers are accepted.
     #[cfg(feature = "ws-client")]
     pub async fn new(
         connect_addr: &str,
@@ -563,13 +564,16 @@ impl WsClientBuilder {
         self
     }
 
+    /// Set the `Sec-WebSocket-Protocol` value. See [`Self::connect`] for how
+    /// this interacts with the same field supplied as a custom header.
     pub fn protocol_header(mut self, protocol: impl Into<String>) -> Self {
         self.protocol_header = protocol.into();
         self
     }
 
     pub fn header(mut self, key: &'static str, value: &'static str) -> Self {
-        self.headers.push((Cow::Borrowed(key), Cow::Borrowed(value)));
+        self.headers
+            .push((Cow::Borrowed(key), Cow::Borrowed(value)));
         self
     }
 
@@ -614,9 +618,8 @@ impl WsClientBuilder {
         F: FnOnce(SocketAddr, SocketAddr) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        self.pre_upgrade_verifier = Some(Box::new(move |local, peer| {
-            verifier(local, peer).boxed()
-        }));
+        self.pre_upgrade_verifier =
+            Some(Box::new(move |local, peer| verifier(local, peer).boxed()));
         self
     }
 
@@ -641,6 +644,15 @@ impl WsClientBuilder {
     ///
     /// The socket this opens belongs to that reactor and makes progress only
     /// while it is polled. See [`WsClient::new`].
+    ///
+    /// A custom `Sec-WebSocket-Protocol` field (matched case-insensitively)
+    /// can supply the subprotocol when [`Self::protocol_header`] is unset or
+    /// empty. If supplied more than once or alongside a nonempty explicit
+    /// value, all values must match exactly. The client sends the value once.
+    ///
+    /// Custom `Host`, `Upgrade`, `Connection`, `Sec-WebSocket-Key`,
+    /// `Sec-WebSocket-Version`, `Sec-WebSocket-Extensions`, `Content-Length`
+    /// and `Transfer-Encoding` fields are rejected before opening a socket.
     pub async fn connect(
         self,
         target: &WsTarget,
@@ -651,16 +663,28 @@ impl WsClientBuilder {
             || has_control(&target.path)
             || has_control(&target.host)
             || has_control(&target.host_header)
-            || self
-                .headers
-                .iter()
-                .any(|(name, value)| {
-                    !is_valid_header_name(name)
-                        || is_reserved_header_name(name)
-                        || has_control(value)
-                })
         {
             bail!("invalid WebSocket request head");
+        }
+
+        let mut protocol =
+            (!self.protocol_header.is_empty()).then_some(self.protocol_header.as_str());
+        let mut headers = Vec::with_capacity(self.headers.len());
+        for (name, value) in &self.headers {
+            let (name, value) = (name.as_ref(), value.as_ref());
+            if !is_valid_header_name(name) || has_control(value) {
+                bail!("invalid WebSocket request head");
+            }
+            if name.eq_ignore_ascii_case("sec-websocket-protocol") {
+                if protocol.is_some_and(|configured| configured != value) {
+                    bail!("conflicting Sec-WebSocket-Protocol values");
+                }
+                protocol = Some(value);
+            } else if is_reserved_header_name(name) {
+                bail!("invalid WebSocket request head");
+            } else {
+                headers.push((name, value));
+            }
         }
 
         // The subprotocol goes out as one header value, exactly as it was
@@ -668,16 +692,7 @@ impl WsClientBuilder {
         // scheme puts `0<method>, 1<key>` in that field, and splitting it on
         // the comma and rejoining it would be a round trip through a meaning
         // the string does not have.
-        let protocols: Vec<&str> = if self.protocol_header.is_empty() {
-            Vec::new()
-        } else {
-            vec![self.protocol_header.as_str()]
-        };
-        let headers: Vec<(&str, &str)> = self
-            .headers
-            .iter()
-            .map(|(key, value)| (key.as_ref(), value.as_ref()))
-            .collect();
+        let protocols = protocol.as_slice();
 
         debug!(
             host = %target.host,
@@ -693,7 +708,7 @@ impl WsClientBuilder {
                 return connect_secure(
                     target,
                     handle,
-                    &protocols,
+                    protocols,
                     &headers,
                     self.danger_accept_invalid_certs,
                     self.tls_config,
@@ -717,7 +732,7 @@ impl WsClientBuilder {
             stream,
             &target.path,
             &target.host_header,
-            &protocols,
+            protocols,
             &headers,
             handshake_entropy(),
             Limits::default(),
@@ -792,7 +807,6 @@ fn is_valid_header_name(name: &str) -> bool {
 #[cfg(feature = "ws-client")]
 fn is_reserved_header_name(name: &str) -> bool {
     [
-        "sec-websocket-protocol",
         "host",
         "sec-websocket-key",
         "upgrade",
