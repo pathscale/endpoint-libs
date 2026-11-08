@@ -1,12 +1,14 @@
 #![cfg(all(feature = "ws", feature = "ws-client"))]
 
 use async_trait::async_trait;
+use endpoint_libs::libs::error_code::ErrorCode;
 use endpoint_libs::libs::handler::{RequestHandler, Response};
 use endpoint_libs::libs::peer::PeerIdentity;
 use endpoint_libs::libs::toolbox::{ArcToolbox, CustomError, RequestContext};
 use endpoint_libs::libs::ws::{
-    AuthController, AuthReply, MessageStream, NagoWssUpgrader, OnDisconnect, StreamError,
-    WebsocketServer, WebsocketStates, WsConnection, WsMessage, WsRequest, WsResponse,
+    AuthController, AuthReply, EndpointAuthController, MessageStream, NagoWssUpgrader,
+    OnDisconnect, StreamError, SubAuthControllerErased, WebsocketServer, WebsocketStates,
+    WsAuthController, WsConnection, WsMessage, WsRequest, WsResponse, WsResponseError,
     WsResponseValue, WsServerConfig, WsSuccessResponse, WsUpgrader,
 };
 use endpoint_libs::model::{EndpointSchema, TypeRegistry};
@@ -26,12 +28,12 @@ struct Auth {
     pending: bool,
 }
 impl AuthController for Auth {
-    fn auth(
+    fn auth_reply(
         self: Arc<Self>,
         _: &ArcToolbox,
         _: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
         async move {
             if self.pending {
                 futures::future::pending::<()>().await;
@@ -40,7 +42,7 @@ impl AuthController for Auth {
                 eyre::bail!("fixture rejection");
             }
             conn.set_roles(Arc::new(vec![1]));
-            Ok(())
+            Ok(AuthReply::Accepted(None))
         }
         .boxed_local()
     }
@@ -48,15 +50,6 @@ impl AuthController for Auth {
 
 struct QueueFillingAuth;
 impl AuthController for QueueFillingAuth {
-    fn auth(
-        self: Arc<Self>,
-        _: &ArcToolbox,
-        _: String,
-        _: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
-        async { Ok(()) }.boxed_local()
-    }
-
     fn auth_reply(
         self: Arc<Self>,
         toolbox: &ArcToolbox,
@@ -263,6 +256,148 @@ fn full_auth_queue_rejects_even_when_custom_toolbox_hook_returns_true() {
         );
         assert_eq!(text(rx.next().await.unwrap()), "occupied");
         assert!(rx.next().await.is_none());
+    });
+}
+
+const AUTH_METHOD: u32 = 41;
+
+struct ManualAuth {
+    reject: bool,
+}
+
+fn auth_refusal(method: u32, log_id: u64, reason: &str) -> AuthReply {
+    AuthReply::Rejected(Some(WsResponseError {
+        method,
+        seq: 0,
+        log_id: log_id.to_string(),
+        code: ErrorCode::FORBIDDEN.to_u32(),
+        params: serde_json::json!({ "reason": reason }),
+    }))
+}
+
+impl SubAuthControllerErased for ManualAuth {
+    fn auth_reply(
+        self: Arc<Self>,
+        _: &ArcToolbox,
+        _: serde_json::Value,
+        ctx: RequestContext,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, AuthReply> {
+        async move {
+            if self.reject {
+                return auth_refusal(ctx.method, ctx.log_id, "handler");
+            }
+            conn.set_roles(Arc::new(vec![1]));
+            AuthReply::Accepted(Some(WsSuccessResponse {
+                method: ctx.method,
+                seq: ctx.seq,
+                params: serde_json::value::to_raw_value(&()).unwrap(),
+            }))
+        }
+        .boxed_local()
+    }
+}
+
+struct AuthWrapper {
+    inner: Arc<EndpointAuthController>,
+    reject: bool,
+}
+
+impl AuthController for AuthWrapper {
+    fn auth_reply(
+        self: Arc<Self>,
+        toolbox: &ArcToolbox,
+        header: String,
+        conn: Arc<WsConnection>,
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
+        let log_id = conn.log_id;
+        let inner_reply = Arc::clone(&self.inner).auth_reply(toolbox, header, conn);
+        async move {
+            match inner_reply.await? {
+                AuthReply::Accepted(_) if self.reject => {
+                    Ok(auth_refusal(AUTH_METHOD, log_id, "wrapper"))
+                }
+                reply => Ok(reply),
+            }
+        }
+        .boxed_local()
+    }
+}
+
+#[test]
+fn deferred_auth_wrapper_and_erased_handler_gate_dispatch() {
+    let reactor = Reactor::local().unwrap();
+    block_on_with(&reactor, async {
+        for (handler_rejects, wrapper_rejects, refusal) in [
+            (false, false, None),
+            (true, false, Some("handler")),
+            (false, true, Some("wrapper")),
+        ] {
+            let mut inner = EndpointAuthController::new();
+            inner.auth_endpoints.insert(
+                "login".into(),
+                WsAuthController {
+                    schema: EndpointSchema::new("Login", AUTH_METHOD, vec![], vec![]),
+                    handler: Arc::new(ManualAuth {
+                        reject: handler_rejects,
+                    }),
+                },
+            );
+            let dispatched = Arc::new(AtomicUsize::new(0));
+            let mut server = WebsocketServer::new(WsServerConfig {
+                message_buffer_size: 1,
+                ..Default::default()
+            });
+            server.set_auth_controller(AuthWrapper {
+                inner: Arc::new(inner),
+                reject: wrapper_rejects,
+            });
+            server.add_handler(MethodWaitCountDispatch(Arc::clone(&dispatched)));
+
+            let states = Arc::new(WebsocketStates::new());
+            server
+                .toolbox
+                .set_ws_states(states.clone_states(), false, false);
+            let (stream, tx, mut rx) = stream();
+            tx.unbounded_send(WsMessage::Text(
+                r#"{"method":1,"seq":9,"params":{"pending":false}}"#.into(),
+            ))
+            .unwrap();
+
+            let run = Arc::new(server).serve_connection(
+                peer(),
+                Arc::clone(&states),
+                stream,
+                Some("0login".into()),
+            );
+            let client = async move {
+                let first = text(rx.next().await.expect("auth frame"));
+                let auth: serde_json::Value = serde_json::from_str(&first).unwrap();
+                assert_eq!(auth["method"], AUTH_METHOD);
+                assert_eq!(auth["seq"], 0);
+                if let Some(reason) = refusal {
+                    assert_eq!(auth["type"], "Error");
+                    assert_eq!(auth["code"], ErrorCode::FORBIDDEN.to_u32());
+                    assert_eq!(auth["params"]["reason"], reason);
+                    assert!(rx.next().await.is_none(), "only the rejection may be sent");
+                } else {
+                    assert_eq!(auth["type"], "Immediate");
+                    let second = text(rx.next().await.expect("request reply"));
+                    let reply: serde_json::Value = serde_json::from_str(&second).unwrap();
+                    assert_eq!(reply["seq"], 9);
+                    assert_eq!(reply["params"]["done"], true);
+                }
+                drop(tx);
+            };
+            nagoya::timeout(Duration::from_secs(3), futures::future::join(run, client))
+                .await
+                .expect("auth exchange must terminate");
+            assert_eq!(
+                dispatched.load(Ordering::SeqCst),
+                refusal.is_none() as usize,
+            );
+            assert!(states.clone_states().is_empty());
+        }
     });
 }
 

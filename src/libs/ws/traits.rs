@@ -162,7 +162,7 @@ pub struct UpgradeEvent {
     /// The subprotocols the client offered, as the header spelled them.
     ///
     /// The offered list rather than the selection, because this is what reaches
-    /// `AuthController::auth` and the fleet carries its bearer token there.
+    /// `AuthController::auth_reply` and the fleet carries its bearer token there.
     pub protocol: String,
 }
 

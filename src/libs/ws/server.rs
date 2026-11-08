@@ -435,7 +435,8 @@ impl WebsocketServer {
     ///
     /// `auth_protocol` is whatever the transport uses to carry credentials at connect
     /// time — the WebSocket subprotocol string today, a handed-over token for local
-    /// transports. It is passed to [`AuthController::auth`] unchanged.
+    /// transports. [`AuthController::auth_reply`] receives the supplied string
+    /// or an empty string when the transport supplies none.
     ///
     /// If the process has exhausted its connection IDs, this returns before
     /// authentication or registration.

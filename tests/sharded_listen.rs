@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use endpoint_libs::libs::handler::{RequestHandler, Response};
 use endpoint_libs::libs::toolbox::{ArcToolbox, CustomError, RequestContext};
 use endpoint_libs::libs::ws::{
-    AuthController, WebsocketServer, WsClientBuilder, WsConnection, WsRequest, WsResponse,
-    WsServerConfig,
+    AuthController, AuthReply, WebsocketServer, WsClientBuilder, WsConnection, WsRequest,
+    WsResponse, WsServerConfig,
 };
 use eyre::Result;
 use futures::FutureExt;
@@ -75,15 +75,15 @@ fn thread_name() -> String {
 struct AllowAll;
 
 impl AuthController for AllowAll {
-    fn auth(
+    fn auth_reply(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         _header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
         async move {
             conn.set_roles(Arc::new(vec![1]));
-            Ok(())
+            Ok(AuthReply::Accepted(None))
         }
         .boxed_local()
     }

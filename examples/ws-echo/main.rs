@@ -10,7 +10,7 @@ use endpoint_libs::libs::log::{LogLevel, LoggingConfig, OtelConfig, setup_loggin
 use endpoint_libs::libs::toolbox::{ArcToolbox, RequestContext};
 use endpoint_libs::libs::ws::toolbox::CustomError;
 use endpoint_libs::libs::ws::{
-    AuthController, WebsocketServer, WsConnection, WsRequest, WsResponse, WsServerConfig,
+    AuthController, AuthReply, WebsocketServer, WsConnection, WsRequest, WsResponse, WsServerConfig,
 };
 use eyre::Result;
 use futures::FutureExt;
@@ -169,12 +169,12 @@ impl RequestHandler for MethodReceiveUserInfo {
 struct AllowAllAuthController;
 
 impl AuthController for AllowAllAuthController {
-    fn auth(
+    fn auth_reply(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
         async move {
             let conn_id = conn.connection_id;
             tracing::info!(
@@ -188,7 +188,7 @@ impl AuthController for AllowAllAuthController {
             );
             conn.set_roles(Arc::new(vec![1]));
             tracing::info!(conn_id = %conn_id, "Roles set successfully");
-            Ok(())
+            Ok(AuthReply::Accepted(None))
         }
         .boxed_local()
     }

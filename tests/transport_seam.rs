@@ -44,8 +44,8 @@ use endpoint_libs::libs::toolbox::{ArcToolbox, CustomError, RequestContext};
 use endpoint_libs::libs::ws::transport::TransportStream;
 use endpoint_libs::libs::ws::transport::framed::framed_json_neutral;
 use endpoint_libs::libs::ws::{
-    AuthController, MessageStream, WebsocketServer, WebsocketStates, WsClient, WsConnection,
-    WsRequest, WsResponse, WsServerConfig,
+    AuthController, AuthReply, MessageStream, WebsocketServer, WebsocketStates, WsClient,
+    WsConnection, WsRequest, WsResponse, WsServerConfig,
 };
 use eyre::Result;
 use futures::FutureExt;
@@ -114,15 +114,15 @@ impl RequestHandler for MethodEcho {
 struct AllowAllAuthController;
 
 impl AuthController for AllowAllAuthController {
-    fn auth(
+    fn auth_reply(
         self: Arc<Self>,
         _toolbox: &ArcToolbox,
         _header: String,
         conn: Arc<WsConnection>,
-    ) -> LocalBoxFuture<'static, Result<()>> {
+    ) -> LocalBoxFuture<'static, Result<AuthReply>> {
         async move {
             conn.set_roles(Arc::new(vec![1]));
-            Ok(())
+            Ok(AuthReply::Accepted(None))
         }
         .boxed_local()
     }

@@ -231,8 +231,8 @@ impl NagoWssUpgrader {
         Ok(Some(UpgradeEvent {
             stream: Box::new(NagoWsStream { inner: connection }),
             // The whole offered list, not the selection. This is what reaches
-            // `AuthController::auth`, which is where the fleet carries its bearer
-            // token, and the hyper upgrader passed the raw header value.
+            // `AuthController::auth_reply`. The fleet carries its bearer token
+            // there, and the hyper upgrader passed the raw header value.
             protocol: request.protocols.join(", "),
         }))
     }

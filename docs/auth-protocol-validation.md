@@ -12,6 +12,30 @@ The method discriminator is `0`; if it is missing or does not identify a registe
 endpoint, authentication returns an error before creating an authenticated request
 context.
 
+## Decisions and reply admission
+
+`AuthController::auth_reply` is required. A controller that used to return
+`Ok(())` from `auth` after checking credentials without sending a frame can
+return `Ok(AuthReply::Accepted(None))` after the same checks. A controller that
+sent its own response returns it as part of `AuthReply` for the caller to send.
+A wrapper delegates to the inner `auth_reply` and makes its final decision
+before handing back any response. Calling the inner `auth` applies the reply
+immediately.
+
+`SubAuthController` implementations registered through `add_auth_endpoint` keep
+their typed `AuthResponse` contract. A manual `SubAuthControllerErased`
+implementation must provide `auth_reply` with an explicit decision, including
+`Rejected(None)` for a silent refusal or `Rejected(Some(error))` for a refusal
+with a frame. The erased direct-call `auth` method now returns a result that
+reports rejection and failed success-frame admission.
+
+The server queues an accepted decision's success frame before enabling request
+dispatch. It refuses the session if the frame cannot enter the queue. A rejected
+decision prevents dispatch even if its error frame cannot be queued. The same
+admission requirement applies to direct auth through the toolbox. When a
+custom sender is installed for direct calls, it must return true only after
+accepting the frame. Queue admission does not promise delivery to the peer.
+
 ## Malformed input diagnostics
 
 Malformed typed authentication input still returns the generic `BAD_REQUEST`

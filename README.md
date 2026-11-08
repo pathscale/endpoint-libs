@@ -331,6 +331,23 @@ impl SubAuthController for MethodSignup {
 }
 ```
 
+Custom `AuthController` implementations provide `auth_reply` and return an explicit
+decision. Use `AuthReply::Accepted(None)` for a successful check with no frame,
+`Accepted(Some(reply))` to send a success frame, or `Rejected` with an optional
+error frame. Returning an error from `auth_reply` gives the server a generic
+authentication failure. Wrappers await the inner controller's `auth_reply` and
+apply their own checks before returning the final decision.
+
+Implementations that previously provided only `auth` must migrate. The default
+`auth` applies the decision on a direct call and reports success after acceptance
+and admission of any success frame. On the server, the frame must enter the
+connection's own queue before dispatch. For direct calls,
+the built-in toolbox sender reports actual queue admission, and a custom
+sender's return value serves as its acknowledgement of admission.
+
+See the [auth protocol contract](docs/auth-protocol-validation.md) for migration
+details, including manual erased handlers.
+
 ### Server limits
 
 Server admission defaults to 1024 connections, 1 MiB messages and 32 concurrent
