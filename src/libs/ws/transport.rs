@@ -147,6 +147,9 @@ where
 #[cfg(feature = "framed-transport")]
 pub mod framed;
 
+#[cfg(feature = "framed-transport")]
+pub mod ndjson;
+
 #[cfg(feature = "nagoya-transport")]
 pub mod nagoya;
 

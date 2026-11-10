@@ -13,6 +13,7 @@ mod listener;
 #[cfg(feature = "ws-core")]
 pub mod mcp;
 pub mod mcp_wire;
+pub mod mcp_client;
 mod message;
 #[cfg(feature = "ws-core")]
 pub mod outbound;
