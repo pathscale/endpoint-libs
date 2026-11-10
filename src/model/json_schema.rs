@@ -106,8 +106,8 @@ pub(crate) fn fields_to_object_schema(
     for field in fields {
         let key = field.name.to_case(Case::Camel);
         let mut schema = match &field.ty {
-            // Unwrap Optional at the field level: the field is simply not required.
-            Type::Optional(inner) => inner.to_json_schema(registry, defs)?,
+            // Optional fields may be omitted or explicitly null on the wire.
+            Type::Optional(_) => field.ty.to_json_schema(registry, defs)?,
             other => {
                 required.push(Value::String(key.clone()));
                 other.to_json_schema(registry, defs)?
@@ -135,7 +135,7 @@ fn enum_to_schema(name: &str, variants: &[crate::model::types::EnumVariant]) -> 
         .iter()
         .map(|v| {
             let mut entry = serde_json::Map::new();
-            entry.insert("const".into(), json!(v.value));
+            entry.insert("const".into(), Value::String(v.name.clone()));
             entry.insert("title".into(), Value::String(v.name.clone()));
             if !v.description.is_empty() {
                 entry.insert("description".into(), Value::String(v.description.clone()));
@@ -144,7 +144,7 @@ fn enum_to_schema(name: &str, variants: &[crate::model::types::EnumVariant]) -> 
         })
         .collect();
     json!({
-        "type": "integer",
+        "type": "string",
         "title": name,
         "oneOf": one_of,
     })
@@ -199,8 +199,7 @@ impl Type {
                 json!({ "type": "array", "items": inner.to_json_schema(registry, defs)? })
             }
             Type::Optional(inner) => {
-                // Standalone Optional (not unwrapped by a parent object):
-                // nullable variant of the inner schema.
+                // Optional values accept null in every schema position.
                 let inner = inner.to_json_schema(registry, defs)?;
                 json!({ "anyOf": [inner, { "type": "null" }] })
             }

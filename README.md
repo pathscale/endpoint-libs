@@ -166,6 +166,10 @@ change, but it surfaces as a build error in someone else's crate rather than her
 
 Endpoint schema types shared between services and `endpoint-gen`:
 
+Generated JSON schemas accept optional fields as omitted, null, or an inner value.
+Enums use variant-name strings, matching the generated Serde serialization.
+Run `cargo run --example mcp-output-schema` to print a response schema with both.
+
 - `Type`, `Field`, `EnumVariant` — the type system used to describe endpoint request/response schemas
 - `TypeRegistry` and `Type::to_json_schema` — conversion of endpoint schemas to JSON Schema (used for MCP tool definitions, see below)
 - Blockchain primitive types: `BlockchainAddress`, `BlockchainTransactionHash`, `U256`, `H256`
