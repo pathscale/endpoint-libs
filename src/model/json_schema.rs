@@ -368,7 +368,10 @@ mod tests {
         let def = &schema["$defs"]["UserInfo"];
         assert_eq!(def["type"], json!("object"));
         assert_eq!(def["properties"]["userId"]["type"], json!("integer"));
-        assert_eq!(def["properties"]["email"]["type"], json!("string"));
+        assert_eq!(
+            def["properties"]["email"],
+            json!({ "anyOf": [{ "type": "string" }, { "type": "null" }] })
+        );
         // Optional field is not required.
         assert_eq!(def["required"], json!(["userId"]));
         assert_eq!(def["additionalProperties"], json!(false));
@@ -386,11 +389,11 @@ mod tests {
         let schema = schema_of(&ty);
         assert_eq!(schema["$ref"], json!("#/$defs/Role"));
         let def = &schema["$defs"]["Role"];
-        assert_eq!(def["type"], json!("integer"));
-        assert_eq!(def["oneOf"][0]["const"], json!(1));
+        assert_eq!(def["type"], json!("string"));
+        assert_eq!(def["oneOf"][0]["const"], json!("Admin"));
         assert_eq!(def["oneOf"][0]["title"], json!("Admin"));
         assert_eq!(def["oneOf"][0]["description"], json!("administrator"));
-        assert_eq!(def["oneOf"][1], json!({ "const": 2, "title": "User" }));
+        assert_eq!(def["oneOf"][1], json!({ "const": "User", "title": "User" }));
     }
 
     #[test]
@@ -522,7 +525,10 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "userId": { "type": "integer" },
-                    "nickname": { "type": "string", "description": "Optional display name" },
+                    "nickname": {
+                        "anyOf": [{ "type": "string" }, { "type": "null" }],
+                        "description": "Optional display name",
+                    },
                 },
                 "required": ["userId"],
                 "additionalProperties": false,

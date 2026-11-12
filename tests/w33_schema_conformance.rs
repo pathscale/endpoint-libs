@@ -86,7 +86,7 @@ fn public_dto_shapes_resolve_and_match_schema_fixture() {
         .to_json_schema(&registry, &mut stream_defs)
         .unwrap();
     assert_eq!(stream_schema, expected["stream_schema"]["root"]);
-    assert_eq!(stream_defs["HealthSample"]["properties"]["latestSlot"]["type"], "integer");
+    assert_eq!(stream_defs["HealthSample"]["properties"]["latestSlot"]["anyOf"][0]["type"], "integer");
     assert!(!stream_defs["HealthSample"]["required"].as_array().unwrap().contains(&Value::String("latestSlot".into())));
 }
 
