@@ -12,6 +12,8 @@ repository = "https://github.com/pathscale/endpoint-libs"
 readme = "README.md"
 license = "MIT"
 publish = ["crates-io"]
+# Repository working files that are not part of the library and do not ship in the package.
+exclude = [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "PLAN-*.md", "TODO.md", "docs/pending/", "docs/decisions/", "cliff.toml"]
 
 [features]
 default = ["types"]
