@@ -307,22 +307,18 @@ where
                 };
             }
 
-            let before = this.read_buf.len();
-            this.read_buf.resize(before + READ_CHUNK_BYTES, 0);
-            let result = Pin::new(&mut this.io).poll_read(cx, &mut this.read_buf[before..]);
+            let mut scratch = [0u8; READ_CHUNK_BYTES];
+            let result = Pin::new(&mut this.io).poll_read(cx, &mut scratch);
 
             match result {
                 Poll::Ready(Ok(0)) => {
-                    this.read_buf.truncate(before);
                     this.read_eof = true;
                 }
-                Poll::Ready(Ok(read)) => this.read_buf.truncate(before + read),
+                Poll::Ready(Ok(read)) => this.read_buf.extend_from_slice(&scratch[..read]),
                 Poll::Ready(Err(err)) => {
-                    this.read_buf.truncate(before);
                     return Poll::Ready(Some(Err(FramedError::Io(err))));
                 }
                 Poll::Pending => {
-                    this.read_buf.truncate(before);
                     return Poll::Pending;
                 }
             }
@@ -392,6 +388,9 @@ where
             }
         }
 
+        if this.write_buf.is_empty() && this.write_buf.capacity() > READ_CHUNK_BYTES * 8 {
+            this.write_buf = BytesMut::new();
+        }
         Pin::new(&mut this.io)
             .poll_flush(cx)
             .map_err(FramedError::Io)
