@@ -1,4 +1,5 @@
-use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::WsMessage as Message;
@@ -7,9 +8,11 @@ use super::outbound::Sender;
 use super::{ConnectionId, WsConnection};
 use crate::libs::signal::Shutdown;
 
+pub type SharedWsStates = Arc<RwLock<HashMap<ConnectionId, Arc<WsStreamState>>>>;
+
 #[derive(Default)]
 pub struct WebsocketStates {
-    states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+    states: SharedWsStates,
 }
 
 impl WebsocketStates {
@@ -17,13 +20,13 @@ impl WebsocketStates {
         WebsocketStates::default()
     }
     pub fn remove(&self, connection_id: u32) {
-        self.states.remove(&connection_id);
+        self.states.write().remove(&connection_id);
     }
 
     pub fn get_state(&self, connection_id: u32) -> Option<Arc<WsStreamState>> {
-        self.states.get(&connection_id).map(|x| x.value().clone())
+        self.states.read().get(&connection_id).cloned()
     }
-    pub fn clone_states(&self) -> Arc<DashMap<u32, Arc<WsStreamState>>> {
+    pub fn clone_states(&self) -> SharedWsStates {
         Arc::clone(&self.states)
     }
     pub fn insert(
@@ -32,7 +35,7 @@ impl WebsocketStates {
         message_queue: Sender<Message>,
         conn: Arc<WsConnection>,
     ) {
-        self.states.insert(
+        self.states.write().insert(
             connection_id,
             Arc::new(WsStreamState {
                 conn,

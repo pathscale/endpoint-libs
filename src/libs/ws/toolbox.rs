@@ -1,6 +1,6 @@
 use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::ws::WsMessage as Message;
-use dashmap::DashMap;
+use super::conn::SharedWsStates;
 use eyre::Result;
 use serde::*;
 use serde_json::{Map, Value};
@@ -200,7 +200,7 @@ impl Toolbox {
 
     pub fn set_ws_states(
         &self,
-        states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+        states: SharedWsStates,
         oneshot: bool,
         drop_on_buffer_full: bool,
     ) {
@@ -220,16 +220,14 @@ impl Toolbox {
 
     fn install_ws_senders(
         &self,
-        states: Arc<DashMap<ConnectionId, Arc<WsStreamState>>>,
+        states: SharedWsStates,
         oneshot: bool,
         drop_on_buffer_full: bool,
     ) -> Option<SendRawBatchFnArc> {
         let raw_states = Arc::clone(&states);
         let batch_states = Arc::clone(&states);
         let send_outcome: Arc<SendOutcomeFn> = Arc::new(move |conn_id, msg| {
-            let state = if let Some(state) = states.get(&conn_id) {
-                state
-            } else {
+            let Some(state) = states.read().get(&conn_id).cloned() else {
                 return EnqueueOutcome::Disconnected;
             };
             let serialized = match serde_json::to_string(&msg) {
@@ -267,7 +265,7 @@ impl Toolbox {
 
         // Pre-serialized frames (JSON-RPC/MCP responses) bypass WsResponseValue.
         let send_raw_fn: SendRawFnArc = Arc::new(move |conn_id, serialized| {
-            let Some(state) = raw_states.get(&conn_id) else {
+            let Some(state) = raw_states.read().get(&conn_id).cloned() else {
                 return false;
             };
             Self::enqueue(
@@ -288,9 +286,7 @@ impl Toolbox {
             if oneshot {
                 return SendRawBatchOutcome::Unsupported;
             }
-            let state = batch_states
-                .get(&conn_id)
-                .map(|state| Arc::clone(state.value()));
+            let state = batch_states.read().get(&conn_id).cloned();
             let Some(state) = state else {
                 return SendRawBatchOutcome::Closed;
             };

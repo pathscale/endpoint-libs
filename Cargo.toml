@@ -51,7 +51,7 @@ ws-core = [
     "types",
     "signal",
     "dep:parking_lot",
-    "dep:dashmap",
+    "parking_lot?/std",
     "dep:async-trait",
     # Named directly, not taken through `signal`. Every feature has to name the
     # dependencies its own code uses or it does not compile alone, and this is
@@ -228,7 +228,6 @@ nago-wss = { version = "^0.3", default-features = false, features = [
 # kept. `std` stays off. dashmap 6 links `parking_lot_core` itself, not this
 # facade, so the two cores sit side by side.
 parking_lot = { package = "parking_lot_lite_hack", version = "^0.12", default-features = false, optional = true }
-dashmap = { version = "6.0", optional = true }
 tempfile = { version = "3.19", optional = true }
 regex = { version = "1.5", optional = true }
 rev_lines = { version = "0.3", optional = true }

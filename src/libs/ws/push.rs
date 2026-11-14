@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -21,7 +21,7 @@ pub struct Subscribers {
 }
 
 pub struct SubscribeManager<Key: Eq + Hash> {
-    pub topics: DashMap<Key, Subscribers>,
+    pub topics: RwLock<HashMap<Key, Subscribers>>,
 }
 
 impl<Key: Hash + Eq + Into<u32>> Default for SubscribeManager<Key> {
@@ -33,17 +33,18 @@ impl<Key: Hash + Eq + Into<u32>> Default for SubscribeManager<Key> {
 impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
     pub fn new() -> Self {
         Self {
-            topics: DashMap::new(),
+            topics: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn add_topics(&self, topics: Vec<Key>) {
+        let mut map = self.topics.write();
         for topic in topics {
-            self.add_topic(topic);
+            map.entry(topic).or_default();
         }
     }
     pub fn add_topic(&self, topic: Key) {
-        self.topics.entry(topic).or_default();
+        self.topics.write().entry(topic).or_default();
     }
     pub fn subscribe_multi(&self, topics: Vec<Key>, ctx: RequestContext) {
         for topic in topics {
@@ -51,8 +52,10 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
         }
     }
     pub fn subscribe(&self, topic: Key, ctx: RequestContext) {
-        let mut subscribers = self.topics.entry(topic).or_default();
-        subscribers
+        self.topics
+            .write()
+            .entry(topic)
+            .or_default()
             .subscribers
             .insert(ctx.connection_id, SubscriberContext { ctx, stream_seq: 0 });
     }
@@ -62,7 +65,7 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
         }
     }
     pub fn unsubscribe(&self, topic: Key, connection_id: ConnectionId) {
-        if let Some(mut subscribers) = self.topics.get_mut(&topic) {
+        if let Some(subscribers) = self.topics.write().get_mut(&topic) {
             subscribers.subscribers.remove(&connection_id);
         }
     }
@@ -73,21 +76,25 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
         msg: &impl Serialize,
         filter: impl Fn(&RequestContext) -> bool,
     ) {
-        if let Some(mut topic_2) = self.topics.get_mut(&topic) {
-            let data = match serde_json::value::to_raw_value(msg) {
-                Ok(d) => d,
-                Err(e) => {
-                    error!(ws_server=true, err=%e, "Failed to serialize stream data — skipping publish");
-                    return;
-                }
+        let data = match serde_json::value::to_raw_value(msg) {
+            Ok(d) => d,
+            Err(e) => {
+                error!(ws_server=true, err=%e, "Failed to serialize stream data - skipping publish");
+                return;
+            }
+        };
+        let mut deliveries = Vec::new();
+        {
+            let mut map = self.topics.write();
+            let Some(topic_2) = map.get_mut(&topic) else {
+                return;
             };
-            let mut dead_connections = vec![];
             let stream_code = topic.into();
             for sub in topic_2.subscribers.values_mut() {
                 if !filter(&sub.ctx) {
                     continue;
                 }
-                let msg = WsResponseGeneric::Stream(WsStreamResponseGeneric {
+                let outbound = WsResponseGeneric::Stream(WsStreamResponseGeneric {
                     original_seq: sub.ctx.seq,
                     method: sub.ctx.method,
                     stream_seq: sub.stream_seq,
@@ -95,8 +102,12 @@ impl<Key: Hash + Eq + Into<u32>> SubscribeManager<Key> {
                     data: data.clone(),
                 });
                 sub.stream_seq += 1;
-                if !toolbox.send_to_subscriber(sub.ctx.connection_id, msg) {
-                    dead_connections.push(sub.ctx.connection_id);
+                deliveries.push((sub.ctx.connection_id, outbound));
+            }
+            let mut dead_connections = Vec::new();
+            for (conn_id, outbound) in deliveries {
+                if !toolbox.send_to_subscriber(conn_id, outbound) {
+                    dead_connections.push(conn_id);
                 }
             }
             for conn_id in dead_connections {
