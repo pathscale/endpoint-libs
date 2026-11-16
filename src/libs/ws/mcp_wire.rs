@@ -7,14 +7,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const JSONRPC_VERSION: &str = "2.0";
-pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
-
-pub const PARSE_ERROR: i64 = -32700;
-pub const INVALID_REQUEST: i64 = -32600;
-pub const METHOD_NOT_FOUND: i64 = -32601;
-pub const INVALID_PARAMS: i64 = -32602;
-pub const INTERNAL_ERROR: i64 = -32603;
+pub use crate::libs::jsonrpc::{
+    INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST, JSONRPC_VERSION, MCP_PROTOCOL_VERSION,
+    METHOD_NOT_FOUND, PARSE_ERROR,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]

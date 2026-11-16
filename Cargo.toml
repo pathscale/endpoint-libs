@@ -26,6 +26,11 @@ std-deps = ["dep:eyre", "dep:futures", "dep:bytes"]
 # only: no dependency, no runtime, no proc macro, no build script. The same bytes
 # as `framed-transport`.
 frame-core = []
+# The door (`libs::door`): counted and framed request/reply over a local socket, TOON/JSON
+# documents, a strict JSON reader, MCP dispatch, the job queue. `no_std` on ekostd: no runtime,
+# no serde, no proc macro, no build script, so it builds in the stage0 world too. Was
+# ekopathrs's `crates/door` until 16 November 2026.
+door = ["frame-core", "dep:ekostd"]
 full = [
     "types",
     "ws",
@@ -221,6 +226,8 @@ alloy-primitives = { version = "1.3.0", features = [
 # `connect_any`, which is what the tokio removal needed and what 0.1.9 did not
 # have. A caret so the family moves on its own: 0.1.11 is the floor, not a pin.
 nagoya = { version = "^0.1.16", default-features = false, features = ["reactor"], optional = true }
+# The door's operating system: sockets, threads, time, `eko::clock`. `no_std` itself.
+ekostd = { version = "^0.2.5", path = "../ekostd", optional = true }
 # The WebSocket protocol itself: the RFC 6455 handshake and framing over a
 # nagoya socket, replacing hyper on the serving side and tokio-tungstenite on
 # the connecting side. `default-features = false` is load bearing: the default

@@ -1,5 +1,8 @@
+#[cfg(feature = "door")]
+pub mod door;
 #[cfg(feature = "frame-core")]
 pub mod frame;
+pub mod jsonrpc;
 #[cfg(feature = "types")]
 pub mod log;
 #[cfg(feature = "log_reader")]
