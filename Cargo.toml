@@ -17,6 +17,15 @@ exclude = [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "PLAN-*.md", "TODO.
 
 [features]
 default = ["types"]
+# `eyre`, `futures` and `bytes` used to be unconditional dependencies. They are what
+# every std-bound feature below uses, so each of those names this feature and its
+# resolved set is unchanged. Off, the crate is `no_std` and carries only what
+# `frame-core` needs, which is nothing.
+std-deps = ["dep:eyre", "dep:futures", "dep:bytes"]
+# Sans-IO codec for the length-delimited frame in `libs::frame`. `core` and `alloc`
+# only: no dependency, no runtime, no proc macro, no build script. The same bytes
+# as `framed-transport`.
+frame-core = []
 full = [
     "types",
     "ws",
@@ -29,6 +38,7 @@ full = [
     "ws-tls12",
 ]
 types = [
+    "std-deps",
     "dep:serde",
     "dep:serde_json",
     "dep:derive_more",
@@ -43,8 +53,8 @@ types = [
     "dep:tracing-appender",
     "dep:serde_path_to_error",
 ]
-blockchain = ["dep:alloy-primitives"]
-wire-core = ["dep:async-trait", "dep:serde", "dep:serde_json"]
+blockchain = ["std-deps", "dep:alloy-primitives"]
+wire-core = ["std-deps", "dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
     # Shared WS infrastructure (WsMessage, server, session, traits, etc.)
     "wire-core",
@@ -114,6 +124,7 @@ ws = [
     "dep:nago-wss",
 ]
 signal = [
+    "std-deps",
     # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`, and
     # delivery is `nagoya::signal::Signal`. The dependency line enables
     # nagoya's `reactor` feature, so this feature pulls the reactor along with
@@ -128,6 +139,7 @@ signal = [
     "dep:tracing",
 ]
 scheduler = [
+    "std-deps",
     # `tokio-cron-scheduler` is gone with the runtime: it was an entire
     # tokio-native crate and a 500ms tick wheel behind an interface this crate
     # drives itself. The ticks are `nagoya::sleep` and
@@ -135,6 +147,7 @@ scheduler = [
     "dep:nagoya",
 ]
 log_reader = [
+    "std-deps",
     "dep:tempfile",
     "dep:regex",
     "dep:rev_lines",
@@ -150,6 +163,7 @@ log_reader = [
     "dep:chrono",
 ]
 error_aggregation = [
+    "std-deps",
     # Runtime-independent bounded ingress and a Nagoya aggregation worker.
     "dep:async-channel",
     "dep:nagoya",
@@ -157,6 +171,7 @@ error_aggregation = [
     "dep:lazy_static",
 ]
 log_throttling = [
+    "std-deps",
     "dep:tracing-throttle",
     # The metrics reporter in `log.rs` is a spawned loop:
     # `nagoya::runtime::background().spawn` plus `nagoya::sleep`.
@@ -177,12 +192,12 @@ ws-tls12 = ["ws"]
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", features = ["raw_value"], optional = true }
-eyre = "0.6"
+eyre = { version = "0.6", optional = true }
 derive_more = { version = "2.1.1", features = ["display"], optional = true }
 convert_case = { version = "0.6", optional = true }
 itertools = { version = "0.12", optional = true }
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
-futures = "0.3"
+futures = { version = "0.3", optional = true }
 async-channel = { version = "2.5", optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = [
@@ -190,7 +205,7 @@ tracing-subscriber = { version = "0.3", features = [
     "std",
     "fmt",
 ], optional = true }
-bytes = "1.7"
+bytes = { version = "1.7", optional = true }
 chrono = {version = "0.4.44", default-features = false, features = ["oldtime", "std", "now"], optional = true}
 urlencoding = { version = "2.1", optional = true }
 hex = { version = "0.4", optional = true }

@@ -1,3 +1,5 @@
+#[cfg(feature = "frame-core")]
+pub mod frame;
 #[cfg(feature = "types")]
 pub mod log;
 #[cfg(feature = "log_reader")]
