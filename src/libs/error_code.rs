@@ -1,5 +1,6 @@
+use alloc::string::String;
+use core::str::FromStr;
 use serde::*;
-use std::str::FromStr;
 
 /// `ErrorCode` is a wrapper around `u32` that represents an error code.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -257,10 +258,10 @@ impl FromStr for ErrorCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseErrorCodeError;
 
-impl std::fmt::Display for ParseErrorCodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ParseErrorCodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("invalid error code")
     }
 }
 
-impl std::error::Error for ParseErrorCodeError {}
+impl core::error::Error for ParseErrorCodeError {}

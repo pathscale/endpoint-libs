@@ -1,9 +1,11 @@
 //! Newline-delimited JSON (`NdjsonStream`) implementing `MessageStream` over `futures::io::{AsyncRead, AsyncWrite}`.
 
-use std::pin::Pin;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
-use eyre::eyre;
-use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use crate::eyre::eyre;
+use nagoya::io::{Read as AsyncRead, Write as AsyncWrite};
 
 use super::super::message::WireMessage;
 use super::super::traits::{MessageStream, StreamError};
@@ -65,11 +67,11 @@ where
         let mut frame = Vec::with_capacity(text.len() + 1);
         frame.extend_from_slice(text.as_bytes());
         frame.push(b'\n');
-        Pin::new(&mut self.io)
+        self.io
             .write_all(&frame)
             .await
             .map_err(|e| StreamError::Other(eyre!(e)))?;
-        Pin::new(&mut self.io)
+        self.io
             .flush()
             .await
             .map_err(|e| StreamError::Other(eyre!(e)))?;
@@ -106,12 +108,14 @@ where
                 ))));
             }
 
-            match Pin::new(&mut self.io).read(&mut byte).await {
+            let read_res = self.io.read(&mut byte).await;
+
+            match read_res {
                 Ok(0) => {
                     if self.buf.is_empty() {
                         return None;
                     }
-                    let tail = std::mem::take(&mut self.buf);
+                    let tail = core::mem::take(&mut self.buf);
                     if tail.iter().all(|b| *b == b'\r' || *b == b' ') {
                         return None;
                     }

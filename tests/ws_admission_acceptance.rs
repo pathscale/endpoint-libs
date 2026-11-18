@@ -12,7 +12,7 @@ use endpoint_libs::libs::ws::{
     WsResponseValue, WsServerConfig, WsSuccessResponse, WsUpgrader,
 };
 use endpoint_libs::model::{EndpointSchema, TypeRegistry};
-use eyre::Result;
+use endpoint_libs::eyre::{self, Result};
 use futures::future::LocalBoxFuture;
 use futures::{FutureExt, StreamExt};
 use nagoya::reactor::{Addr, Reactor, TcpListener, TcpStream, block_on_with};
@@ -156,7 +156,7 @@ fn auth_failure_and_cancellation_remove_registered_state_and_dispatch_once() {
                     "auth refusal must reach the transport"
                 );
             }
-            assert!(states.clone_states().is_empty(), "registered state leaked");
+            assert!(states.clone_states().read().is_empty(), "registered state leaked");
             wait_count(&count, 1).await;
         }
     });
@@ -227,6 +227,7 @@ fn full_auth_queue_rejects_even_when_custom_toolbox_hook_returns_true() {
                     // Fill the queue on the first call and report success on every call.
                     if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         hook_states
+                            .read()
                             .get(&connection_id)
                             .unwrap()
                             .message_queue
@@ -396,7 +397,7 @@ fn deferred_auth_wrapper_and_erased_handler_gate_dispatch() {
                 dispatched.load(Ordering::SeqCst),
                 refusal.is_none() as usize,
             );
-            assert!(states.clone_states().is_empty());
+            assert!(states.clone_states().read().is_empty());
         }
     });
 }
@@ -524,7 +525,7 @@ fn idle_session_expires_and_removes_state() {
         )
         .await
         .unwrap();
-        assert!(states.clone_states().is_empty());
+        assert!(states.clone_states().read().is_empty());
     });
 }
 
@@ -629,7 +630,7 @@ fn thousand_refused_auth_sessions_leave_no_registered_states() {
                 .clone()
                 .serve_connection(peer(), states.clone(), stream, None)
                 .await;
-            assert!(states.clone_states().is_empty());
+            assert!(states.clone_states().read().is_empty());
             assert!(rx.next().await.is_some());
         }
         wait_count(&count, 1000).await;

@@ -1,6 +1,6 @@
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
+use alloc::collections::BTreeMap as HashMap;
+use alloc::sync::Arc;
+use eko::thread::RwLock;
 
 use super::WsMessage as Message;
 use super::outbound::Sender;

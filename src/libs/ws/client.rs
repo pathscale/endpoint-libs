@@ -1,10 +1,20 @@
-use eyre::{Context, Result, bail, eyre};
+#[cfg(feature = "ws-client")]
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+#[cfg(feature = "ws-client")]
+use alloc::string::{String, ToString};
+#[cfg(feature = "ws-client")]
+use alloc::vec;
+#[cfg(feature = "ws-client")]
+use alloc::vec::Vec;
+#[cfg(feature = "ws-client")]
+use core::{future::Future, net::SocketAddr};
+
+use crate::eyre::{Context, Result, bail, eyre};
 #[cfg(feature = "ws-client")]
 use futures::{FutureExt, future::BoxFuture};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-#[cfg(feature = "ws-client")]
-use std::{borrow::Cow, future::Future, net::SocketAddr};
 use tracing::*;
 
 // --- nago-wss/nagoya: only for the TCP(/TLS) constructors -------------------
@@ -25,7 +35,7 @@ use nago_wss::stream::{ByteStream, StreamExt};
 #[cfg(feature = "ws-client")]
 use nagoya::reactor::{Addr, Handle, TcpStream, connect_any, resolve};
 #[cfg(feature = "ws-client")]
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::libs::log::LogLevel;
 use crate::libs::ws::WireMessage as Message;
@@ -248,7 +258,7 @@ impl WsClient {
 
     /// Send a fully pre-serialized request message.
     pub async fn send_raw(&mut self, request_bytes: &[u8]) -> Result<()> {
-        let text = std::str::from_utf8(request_bytes).context("Invalid UTF-8 in request bytes")?;
+        let text = core::str::from_utf8(request_bytes).context("Invalid UTF-8 in request bytes")?;
         self.stream_send(Message::Text(text.into())).await
     }
 
@@ -522,7 +532,7 @@ type PreUpgradeVerifier =
 #[cfg(feature = "ws-client")]
 pub struct WsClientBuilder {
     #[cfg(feature = "ws-client-tls")]
-    tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
+    tls_config: Option<alloc::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
     protocol_header: String,
     headers: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     /// Only the TLS path reads this, and the TLS path is optional. Without the
@@ -603,7 +613,7 @@ impl WsClientBuilder {
     #[cfg(feature = "ws-client-tls")]
     pub fn tls_config(
         mut self,
-        config: std::sync::Arc<nago_wss::tls::rustls::ClientConfig>,
+        config: alloc::sync::Arc<nago_wss::tls::rustls::ClientConfig>,
     ) -> Self {
         self.tls_config = Some(config);
         self
@@ -880,9 +890,7 @@ fn connect_response(protocol: Option<String>) -> WsConnectResponse {
 fn handshake_entropy() -> [u8; 16] {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |value| value.as_nanos() as u64);
+    let nanos = eko::clock::now_ns();
     let counted = COUNTER.fetch_add(1, Ordering::Relaxed);
     let local = 0u8;
     let address = core::ptr::addr_of!(local) as u64;
@@ -911,14 +919,14 @@ async fn connect_secure(
     protocols: &[&str],
     headers: &[(&str, &str)],
     danger_accept_invalid_certs: bool,
-    tls_config: Option<std::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
+    tls_config: Option<alloc::sync::Arc<nago_wss::tls::rustls::ClientConfig>>,
     pre_upgrade_verifier: Option<PreUpgradeVerifier>,
 ) -> Result<(WsClient, WsConnectResponse)> {
     // Through nago-wss's re-export, so this crate never names a rustls version
     // of its own and cannot end up linking a second, incompatible one.
+    use alloc::sync::Arc;
     use nago_wss::tls::rustls_pki_types::ServerName;
     use nago_wss::tls::{TlsStream, rustls};
-    use std::sync::Arc;
 
     if danger_accept_invalid_certs && tls_config.is_some() {
         bail!("explicit TLS policy cannot accept invalid certificates");
@@ -930,14 +938,14 @@ async fn connect_secure(
     } else if danger_accept_invalid_certs {
         Arc::new(make_dangerous_tls_config())
     } else {
-        nago_wss::tls::default_client_config()
+        nago_rustls::default_client_config()
     };
 
     // SNI and certificate validation both key off the name from the URL, not
     // the address that answered.
     let name = ServerName::try_from(target.host.clone())
         .map_err(|_| eyre!("invalid TLS server name: {}", target.host))?;
-    let session = rustls::ClientConnection::new(config, name)
+    let session = nago_wss::tls::ClientConnection::new(config, name)
         .map_err(|err| eyre!("TLS session setup failed: {err}"))?;
 
     let mut tls = TlsStream::client(stream, session);
@@ -969,11 +977,35 @@ async fn connect_secure(
 }
 
 #[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
-fn make_dangerous_tls_config() -> nago_wss::tls::rustls::ClientConfig {
-    use nago_wss::tls::rustls;
-    use std::sync::Arc;
+#[derive(Debug)]
+struct EkoWsTimeProvider;
 
-    rustls::ClientConfig::builder()
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+impl nago_wss::tls::rustls::time_provider::TimeProvider for EkoWsTimeProvider {
+    fn current_time(&self) -> Option<nago_wss::tls::rustls_pki_types::UnixTime> {
+        let secs = eko::time::epoch_secs();
+        if secs >= 0 {
+            return Some(nago_wss::tls::rustls_pki_types::UnixTime::since_unix_epoch(
+                core::time::Duration::from_secs(secs as u64),
+            ));
+        }
+        None
+    }
+}
+
+#[cfg(all(feature = "ws-client", feature = "ws-client-tls"))]
+fn make_dangerous_tls_config() -> nago_wss::tls::rustls::ClientConfig {
+    use alloc::sync::Arc;
+    use nago_wss::tls::rustls;
+
+    let builder = rustls::ClientConfig::builder_with_details(
+        Arc::new(ps_rustcrypto::provider()),
+        Arc::new(EkoWsTimeProvider),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("default TLS protocol versions");
+
+    builder
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAllVerifier))
         .with_no_client_auth()
@@ -992,7 +1024,7 @@ impl nago_wss::tls::rustls::client::danger::ServerCertVerifier for AcceptAllVeri
         _server_name: &nago_wss::tls::rustls_pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         _now: nago_wss::tls::rustls_pki_types::UnixTime,
-    ) -> std::result::Result<
+    ) -> core::result::Result<
         nago_wss::tls::rustls::client::danger::ServerCertVerified,
         nago_wss::tls::rustls::Error,
     > {
@@ -1004,7 +1036,7 @@ impl nago_wss::tls::rustls::client::danger::ServerCertVerifier for AcceptAllVeri
         _message: &[u8],
         _cert: &nago_wss::tls::rustls_pki_types::CertificateDer<'_>,
         _dss: &nago_wss::tls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<
+    ) -> core::result::Result<
         nago_wss::tls::rustls::client::danger::HandshakeSignatureValid,
         nago_wss::tls::rustls::Error,
     > {
@@ -1016,7 +1048,7 @@ impl nago_wss::tls::rustls::client::danger::ServerCertVerifier for AcceptAllVeri
         _message: &[u8],
         _cert: &nago_wss::tls::rustls_pki_types::CertificateDer<'_>,
         _dss: &nago_wss::tls::rustls::DigitallySignedStruct,
-    ) -> std::result::Result<
+    ) -> core::result::Result<
         nago_wss::tls::rustls::client::danger::HandshakeSignatureValid,
         nago_wss::tls::rustls::Error,
     > {

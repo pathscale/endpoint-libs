@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use alloc::string::{String, ToString};
+use alloc::collections::BTreeMap as HashMap;
 use tracing::warn;
 
 #[derive(Debug)]
@@ -32,8 +33,18 @@ impl WarnManager {
         &self.warns
     }
 
+    #[cfg(feature = "std")]
     pub fn dump_stats(&self, mut file: impl std::io::Write) -> std::io::Result<()> {
         writeln!(file, "Warnings at {}:", chrono::Utc::now())?;
+        for (msg, stats) in &self.warns {
+            writeln!(file, "count={} warn={}", stats.warn_count, msg)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn dump_stats(&self, mut file: impl core::fmt::Write) -> core::fmt::Result {
+        writeln!(file, "Warnings at {}:", crate::libs::utils::get_time_milliseconds())?;
         for (msg, stats) in &self.warns {
             writeln!(file, "count={} warn={}", stats.warn_count, msg)?;
         }

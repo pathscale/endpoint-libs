@@ -1,9 +1,13 @@
-use eyre::*;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::time::Duration;
+
+use crate::eyre::*;
+use eko::thread::RwLock;
 use futures::future::BoxFuture;
-use std::future::Future;
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::time::Duration;
 
 pub struct AdaptiveJob {
     duration: Arc<RwLock<Duration>>,
@@ -21,7 +25,7 @@ impl AdaptiveJob {
         }
     }
     pub fn set_duration(&self, duration: Duration) {
-        *self.duration.write().unwrap() = duration;
+        *self.duration.write() = duration;
     }
     pub fn get_trigger(&self) -> JobTrigger {
         JobTrigger {
@@ -30,7 +34,7 @@ impl AdaptiveJob {
     }
     pub async fn run(self) {
         loop {
-            let duration = *self.duration.read().unwrap();
+            let duration = *self.duration.read();
             nagoya::sleep(duration).await;
             let task = (self.task)();
             // Detached on purpose, as under `tokio::spawn` before: a tick must not
@@ -50,7 +54,7 @@ impl JobTrigger {
         Self { duration }
     }
     pub fn set_duration(&self, duration: Duration) {
-        *self.duration.write().unwrap() = duration;
+        *self.duration.write() = duration;
     }
 }
 /// A set of periodic jobs, started together by [`Scheduler::spawn`].

@@ -20,9 +20,11 @@
 //! (`.into_text()`, `.into_data()`, `.is_close()`, …) must migrate — see
 //! `docs/2.0-migration.md`.
 
-use std::borrow::Borrow;
-use std::fmt;
-use std::ops::Deref;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::fmt;
+use core::ops::Deref;
 
 use bytes::Bytes;
 
@@ -41,7 +43,7 @@ impl Utf8Bytes {
     pub fn as_str(&self) -> &str {
         // The only unchecked constructor is crate-private and is used when
         // converting from another type with the same UTF-8 invariant.
-        unsafe { std::str::from_utf8_unchecked(&self.0) }
+        unsafe { core::str::from_utf8_unchecked(&self.0) }
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -97,16 +99,16 @@ impl fmt::Display for Utf8Bytes {
 }
 
 impl TryFrom<Bytes> for Utf8Bytes {
-    type Error = std::str::Utf8Error;
+    type Error = core::str::Utf8Error;
 
     fn try_from(value: Bytes) -> Result<Self, Self::Error> {
-        std::str::from_utf8(&value)?;
+        core::str::from_utf8(&value)?;
         Ok(Self(value))
     }
 }
 
 impl TryFrom<Vec<u8>> for Utf8Bytes {
-    type Error = std::str::Utf8Error;
+    type Error = core::str::Utf8Error;
 
     fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
         Bytes::from(value).try_into()
@@ -208,7 +210,7 @@ impl WireMessage {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Self::Text(t) => Some(t.as_str()),
-            Self::Binary(b) => std::str::from_utf8(b).ok(),
+            Self::Binary(b) => core::str::from_utf8(b).ok(),
             _ => None,
         }
     }

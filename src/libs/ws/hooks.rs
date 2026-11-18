@@ -19,7 +19,9 @@
 //! short-circuits: the handler never runs and the error goes back in whichever
 //! envelope the caller used.
 
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -154,8 +156,8 @@ impl Hooks {
     }
 }
 
-impl std::fmt::Debug for Hooks {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Hooks")
             .field("before", &self.before.len())
             .field("after", &self.after.len())

@@ -9,9 +9,13 @@
 //! [`PeerIdentity`] is `#[non_exhaustive]`: new transports may add variants without a
 //! breaking release.
 
-use std::any::{Any, TypeId};
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use alloc::borrow::ToOwned;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::any::{Any, TypeId};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use alloc::collections::BTreeMap as HashMap;
 
 /// Who is on the other end of a connection.
 #[derive(Debug, Clone)]
@@ -114,8 +118,8 @@ impl PeerIdentity {
     }
 }
 
-impl std::fmt::Display for PeerIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for PeerIdentity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.display())
     }
 }
@@ -228,8 +232,8 @@ impl Extensions {
     }
 }
 
-impl std::fmt::Debug for Extensions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // Values are `dyn Any` and cannot be formatted; report the count so logs
         // still show whether anything was attached.
         f.debug_struct("Extensions")

@@ -1,9 +1,16 @@
-use eyre::Result;
+use alloc::collections::BTreeSet as HashSet;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use core::cell::Cell;
+use core::future::Future;
+use eko::time::Instant;
+
+use crate::eyre::Result;
 use futures::StreamExt;
 use futures::future::{FutureExt, LocalBoxFuture};
 use futures::stream::FuturesUnordered;
-use std::collections::HashSet;
-use std::sync::Arc;
 use tracing::*;
 
 use crate::libs::signal::Shutdown;
@@ -43,7 +50,7 @@ pub struct WsClientSession {
     /// A session built with [`WsClientSession::new`] and never [`WsClientSession::bind_end`]
     /// holds a flag nobody else can set.
     end: Arc<Shutdown>,
-    last_received: std::rc::Rc<std::cell::Cell<std::time::Instant>>,
+    last_received: Rc<Cell<Instant>>,
 }
 
 impl WsClientSession {
@@ -59,7 +66,7 @@ impl WsClientSession {
             rx,
             server,
             end: Arc::new(Shutdown::new()),
-            last_received: std::rc::Rc::new(std::cell::Cell::new(std::time::Instant::now())),
+            last_received: Rc::new(Cell::new(Instant::now())),
         }
     }
 
@@ -125,7 +132,7 @@ impl WsClientSession {
         if let Some(mcp) = &self.server.mcp {
             let payload = match &msg {
                 Message::Text(t) => Some(t.as_str()),
-                Message::Binary(b) => std::str::from_utf8(b).ok(),
+                Message::Binary(b) => core::str::from_utf8(b).ok(),
                 _ => None,
             };
             if let Some(frame) = payload.and_then(mcp::try_parse_jsonrpc) {
@@ -279,9 +286,9 @@ impl WsClientSession {
         Ok(Dispatch::Task(
             async move {
                 let _slot = slot;
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 let timeout_context = context.clone();
-                let responded = std::cell::Cell::new(false);
+                let responded = Cell::new(false);
                 let work = async {
                     let mut context = context;
                     // Polled alongside the session read loop so a slow hook cannot
@@ -418,8 +425,8 @@ impl WsClientSession {
                 Some(
                     async move {
                         let _slot = slot;
-                        let started = std::time::Instant::now();
-                        let responded = std::cell::Cell::new(false);
+                        let started = Instant::now();
+                        let responded = Cell::new(false);
                         let work = async {
                             let mut context = context;
                             // Same placement as the legacy path, but the rejection has to go
@@ -495,7 +502,7 @@ impl WsClientSession {
         // `pin_mut` holds those borrows to the end of its scope.
         enum Ready {
             Outbound(Outbound),
-            Inbound(Option<std::result::Result<Message, StreamError>>),
+            Inbound(Option<core::result::Result<Message, StreamError>>),
             Handler,
             End,
         }
@@ -599,7 +606,7 @@ impl WsClientSession {
                             break;
                         }
                     };
-                    self.last_received.set(std::time::Instant::now());
+                    self.last_received.set(Instant::now());
                     match self.handle_message(msg)? {
                         Dispatch::Close => break,
                         Dispatch::Keep => {}
@@ -690,10 +697,10 @@ pub(crate) async fn priority4<HF, OF, IF, EF>(
     end: EF,
 ) -> Arm<HF::Output, OF::Output, IF::Output, EF::Output>
 where
-    HF: std::future::Future,
-    OF: std::future::Future,
-    IF: std::future::Future,
-    EF: std::future::Future,
+    HF: Future,
+    OF: Future,
+    IF: Future,
+    EF: Future,
 {
     use futures::future::{Either, select};
 
@@ -745,9 +752,9 @@ mod tests {
     #[test]
     fn check_roles_allowed() {
         use super::check_roles;
-        use std::collections::HashSet;
+        use alloc::collections::BTreeSet;
 
-        let allowed_roles: HashSet<u32> = [1, 2, 3].iter().cloned().collect();
+        let allowed_roles: BTreeSet<u32> = [1, 2, 3].iter().cloned().collect();
         assert!(check_roles(&[1], &allowed_roles.clone()));
         assert!(check_roles(&[2], &allowed_roles.clone()));
         assert!(check_roles(&[1, 2], &allowed_roles.clone()));
@@ -759,9 +766,9 @@ mod tests {
     #[test]
     fn check_roles_empty() {
         use super::check_roles;
-        use std::collections::HashSet;
+        use alloc::collections::BTreeSet;
 
-        let allowed_roles: HashSet<u32> = HashSet::new();
+        let allowed_roles: BTreeSet<u32> = BTreeSet::new();
         assert!(!check_roles(&[1], &allowed_roles));
     }
 
@@ -878,7 +885,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::AtomicU64;
 
-        use parking_lot::RwLock;
+        use eko::thread::RwLock;
 
         use crate::libs::peer::{Extensions, PeerIdentity};
 

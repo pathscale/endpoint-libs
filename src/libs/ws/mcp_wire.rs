@@ -4,6 +4,8 @@
 //! This module belongs to `wire-core`, so local agent-control clients can speak
 //! MCP-compatible frames without compiling the server, HTTP, TLS, or schema stack.
 
+use alloc::format;
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

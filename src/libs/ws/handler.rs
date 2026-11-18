@@ -1,4 +1,8 @@
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::ToString;
 use async_trait::async_trait;
+use crate::eyre;
 use serde_json::Value;
 
 use crate::libs::{
@@ -103,7 +107,7 @@ impl<T: RequestHandler> RequestHandlerErased for T {
             Ok(data) => data,
             Err(err) => {
                 let jd = &mut serde_json::Deserializer::from_str(&buf);
-                let data: std::result::Result<T::Request, _> = serde_path_to_error::deserialize(jd);
+                let data: core::result::Result<T::Request, _> = serde_path_to_error::deserialize(jd);
                 let path = data.err().map(|err| err.path().to_string());
                 let message = if let Some(path) = path {
                     format!("{path}: {err}")
@@ -151,7 +155,7 @@ impl<T: RequestHandler> RequestHandlerErased for T {
                 // mirroring the legacy handle() diagnostics.
                 let buf = serde_json::to_string(&req).unwrap_or_default();
                 let jd = &mut serde_json::Deserializer::from_str(&buf);
-                let data: std::result::Result<T::Request, _> = serde_path_to_error::deserialize(jd);
+                let data: core::result::Result<T::Request, _> = serde_path_to_error::deserialize(jd);
                 let message = match data.err().map(|err| err.path().to_string()) {
                     Some(path) => format!("{path}: {err}"),
                     None => format!("{err}"),

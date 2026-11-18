@@ -1,13 +1,19 @@
-use parking_lot::RwLock;
+use alloc::boxed::Box;
+use alloc::collections::BTreeSet as HashSet;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt::Debug;
+use core::net::SocketAddr;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::eyre;
+
+use eko::thread::RwLock;
 use serde::de::DeserializeOwned;
 use serde::*;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
-use std::collections::HashSet;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use crate::libs::error_code::ErrorCode;
 use crate::libs::handler::RequestHandlerErased;
@@ -59,7 +65,7 @@ pub struct WsConnection {
 }
 impl WsConnection {
     pub fn get_user_id(&self) -> u64 {
-        self.user_id.load(std::sync::atomic::Ordering::Acquire)
+        self.user_id.load(Ordering::Acquire)
     }
 
     /// The peer's socket address.
@@ -76,8 +82,7 @@ impl WsConnection {
     }
 
     pub fn set_user_id(&self, user_id: u64) {
-        self.user_id
-            .store(user_id, std::sync::atomic::Ordering::Release);
+        self.user_id.store(user_id, Ordering::Release);
     }
 
     pub fn set_roles(&self, roles: Arc<Vec<u32>>) {

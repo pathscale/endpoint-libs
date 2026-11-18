@@ -1,9 +1,21 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use alloc::format;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use eyre::Result;
+use crate::eyre::{self, Result};
+
+fn now_micros() -> i64 {
+    let secs = eko::time::epoch_secs();
+    if secs > 0 {
+        return secs
+            .saturating_mul(1_000_000)
+            .saturating_add(((eko::clock::now_ns() / 1_000) % 1_000_000) as i64);
+    }
+    (eko::clock::now_ns() / 1_000) as i64
+}
 
 pub fn get_log_id() -> u64 {
-    chrono::Utc::now().timestamp_micros() as _
+    now_micros() as u64
 }
 
 /// Allocates a connection ID unique within this process.
@@ -90,16 +102,16 @@ mod conn_id_tests {
 }
 
 pub fn get_time_milliseconds() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    now_micros() / 1_000
 }
 pub fn get_time_micros() -> i64 {
-    chrono::Utc::now().timestamp_micros()
+    now_micros()
 }
 pub fn hex_decode(s: &[u8]) -> Result<Vec<u8>> {
     if s.starts_with(b"0x") {
-        Ok(hex::decode(&s[2..])?)
+        hex::decode(&s[2..]).map_err(|err| eyre::eyre!("invalid hex: {err}"))
     } else {
-        Ok(hex::decode(s)?)
+        hex::decode(s).map_err(|err| eyre::eyre!("invalid hex: {err}"))
     }
 }
 

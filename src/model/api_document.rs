@@ -20,9 +20,13 @@
 //! **The RON definitions are the source of truth.** Nothing here parses a
 //! document; these are outputs only.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
-use eyre::{Result, bail};
+use crate::eyre::{self, Result, bail};
+
 use serde_json::{Map, Value};
 
 use crate::model::endpoint::EndpointSchema;
@@ -156,7 +160,7 @@ fn apply_field_meta(
     fields: &[crate::model::types::Field],
     context: &str,
 ) -> Result<()> {
-    use convert_case::{Case, Casing};
+    use crate::convert_case::{Case, Casing};
 
     for field in fields {
         if field.meta.is_empty() {

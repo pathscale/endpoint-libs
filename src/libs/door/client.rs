@@ -166,19 +166,12 @@ fn evidence(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd",
-          target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
 fn errno_code() -> libc::c_int {
-    unsafe { *libc::__error() }
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn errno_code() -> libc::c_int {
-    unsafe { *libc::__errno_location() }
+    Errno::current().0
 }
 
 pub(crate) fn last_error() -> Errno {
-    Errno(errno_code())
+    Errno::current()
 }
 
 fn socket_option<T>(
@@ -199,7 +192,7 @@ fn socket_option<T>(
 }
 
 fn configure(fd: libc::c_int, options: ClientOptions) -> Result<(), Errno> {
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+    if unsafe { libc::fcntl3(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
         return Err(last_error());
     }
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd",

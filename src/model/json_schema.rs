@@ -5,10 +5,13 @@
 //! `StructTable` references are resolved through a caller-provided
 //! [`TypeRegistry`] and emitted as `$ref` entries under `$defs`.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 
-use convert_case::{Case, Casing};
-use eyre::{Result, bail};
+use crate::eyre::{Result, bail};
+use crate::convert_case::{Case, Casing};
 use serde_json::{Value, json};
 
 use crate::model::endpoint::EndpointSchema;

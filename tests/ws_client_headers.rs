@@ -1,5 +1,6 @@
 #![cfg(feature = "ws-client")]
 
+use endpoint_libs::eyre;
 use endpoint_libs::libs::ws::{WsClient, WsClientBuilder, WsTarget};
 use nago_wss::proto::message::Limits;
 use nago_wss::upgrade::{self, UpgradeOutcome};
@@ -40,7 +41,10 @@ fn custom_subprotocol_is_sent_once_through_the_upgrade() {
                 }
             };
             let peer = async {
-                let (socket, _) = listener.accept().await?;
+                let (socket, _) = listener
+                    .accept()
+                    .await
+                    .map_err(|error| eyre::eyre!("accept failed: {error:?}"))?;
                 let outcome = upgrade::accept(socket, Limits::default(), &[], |request| {
                     (request.protocols.first().cloned(), Vec::new())
                 })

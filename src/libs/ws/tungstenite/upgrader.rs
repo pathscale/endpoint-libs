@@ -44,10 +44,17 @@
 //! behind a cache that needed its own task to tick, RFC 9110 requires it only of
 //! a server with a clock it trusts, and nothing in the fleet reads it.
 
-use std::net::SocketAddr;
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::net::SocketAddr;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
+#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use crate::eyre::{Result, eyre};
+#[cfg(any(feature = "std", feature = "std-deps"))]
 use eyre::{Result, eyre};
 use nago_wss::conn::{Connection, Error as ConnError, Role};
 use nago_wss::proto::handshake::{

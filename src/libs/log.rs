@@ -15,12 +15,26 @@
 //! literal and deleting it would break their builds for no gain. It is inert: setting
 //! `enabled: true` now warns at setup and forwards nothing.
 
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::time::Duration;
 
+use alloc::collections::BTreeMap as HashMap;
+#[cfg(feature = "std")]
+use std::path::PathBuf;
+#[cfg(not(feature = "std"))]
+use eko::path::PathBuf;
+
+use crate::eyre::{self, DefaultHandler, EyreHandler, bail};
+
+#[cfg(feature = "std")]
 use chrono::SecondsFormat;
-use eyre::{DefaultHandler, EyreHandler, bail};
+#[cfg(feature = "std")]
 use tracing::Subscriber;
+#[cfg(feature = "std")]
 use tracing_appender::rolling::RollingFileAppender;
+#[cfg(feature = "std")]
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
     layer::SubscriberExt,
@@ -47,9 +61,23 @@ pub mod level_filter;
 pub use level_filter::*;
 
 // Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
+#[cfg(feature = "std")]
 pub use tracing_appender::rolling::Rotation as LogRotation;
 
+#[cfg(feature = "std")]
 pub use tracing_appender::non_blocking::WorkerGuard;
+
+#[cfg(not(feature = "std"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogRotation {
+    MINUTELY,
+    HOURLY,
+    DAILY,
+    NEVER,
+}
+
+#[cfg(not(feature = "std"))]
+pub use legacy::WorkerGuard;
 
 /// Configuration for OpenTelemetry integration.
 ///
@@ -136,6 +164,7 @@ pub struct LogSetupReturn {
 }
 
 /// Internal struct to hold the result of building the logging subscriber
+#[cfg(feature = "std")]
 struct LoggingSubscriberParts {
     subscriber: Box<dyn Subscriber + Send + Sync + 'static>,
     reload_handle: LogReloadHandle,
@@ -148,6 +177,7 @@ struct LoggingSubscriberParts {
 
 /// Internal function that builds the logging subscriber without initializing it.
 /// Returns the subscriber along with reload handles and guards that need to be retained.
+#[cfg(feature = "std")]
 fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscriberParts> {
     // Build global env filter and wrap in reload::Layer for runtime reloading
     let global_env_filter = build_env_filter(config.level)?;
@@ -307,6 +337,7 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
 ///
 /// `otel_config.enabled` is accepted and warned about; there is no OTel guard to return
 /// any more because there is no exporter to flush.
+#[cfg(feature = "std")]
 pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -324,15 +355,35 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     })
 }
 
+#[cfg(not(feature = "std"))]
+pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
+    let _ = &config;
+    if config.otel_config.enabled {
+        tracing::warn!(
+            target: "otel::setup",
+            endpoint = config.otel_config.endpoint.as_deref().unwrap_or("unset"),
+            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
+             no traces or logs will be forwarded to a collector"
+        );
+    }
+    Ok(LogSetupReturn {
+        reload_handle: LogReloadHandle(()),
+        log_guards: (WorkerGuard, None),
+    })
+}
+
 /// Handle for reloading the global EnvFilter at runtime
+#[cfg(feature = "std")]
 pub type GlobalLogReloadHandle = Handle<EnvFilter, Registry>;
+#[cfg(not(feature = "std"))]
+pub type GlobalLogReloadHandle = ();
 
 /// Handle for reloading the global log level at runtime
 #[derive(Clone)]
 pub struct LogReloadHandle(GlobalLogReloadHandle);
 
-impl std::fmt::Debug for LogReloadHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for LogReloadHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LogReloadHandle")
             .field("inner", &"Handle<EnvFilter, Registry>")
             .finish()
@@ -343,26 +394,34 @@ impl LogReloadHandle {
     /// Sets a new global log level that applies to all layers (stdout, file, etc.)
     /// Errors will be logged by this function and can be safely ignored, but are returned for display purposes
     pub fn set_log_level(&self, level: LogLevel) -> eyre::Result<()> {
-        match build_env_filter(level) {
-            Ok(filter) => match self.0.modify(|env_filter| *env_filter = filter) {
-                Ok(_) => Ok(()),
+        #[cfg(feature = "std")]
+        {
+            match build_env_filter(level) {
+                Ok(filter) => match self.0.modify(|env_filter| *env_filter = filter) {
+                    Ok(_) => Ok(()),
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            "Error setting new global log filter. Ignoring reload attempt"
+                        );
+                        bail!("Error setting new global log filter: {error}. Ignoring reload attempt")
+                    }
+                },
                 Err(error) => {
                     tracing::error!(
                         ?error,
-                        "Error setting new global log filter. Ignoring reload attempt"
+                        "Error building new filter from given log level. Ignoring reload attempt"
                     );
-                    bail!("Error setting new global log filter: {error}. Ignoring reload attempt")
+                    bail!(
+                        "Error building new filter from given log level: {error}. Ignoring reload attempt"
+                    )
                 }
-            },
-            Err(error) => {
-                tracing::error!(
-                    ?error,
-                    "Error building new filter from given log level. Ignoring reload attempt"
-                );
-                bail!(
-                    "Error building new filter from given log level: {error}. Ignoring reload attempt"
-                )
             }
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = level;
+            Ok(())
         }
     }
 }
@@ -372,12 +431,12 @@ impl LogReloadHandle {
 /// for access within [error_aggregation::ErrorAggregationLayer::on_event] (see trait impl) so that the original caller can be recorded within the displayed target
 pub struct CustomEyreHandler {
     default_handler: Box<dyn EyreHandler>,
-    location: Option<&'static std::panic::Location<'static>>,
+    location: Option<&'static core::panic::Location<'static>>,
 }
 
 impl CustomEyreHandler {
     pub fn default_with_location_saving(
-        error: &(dyn std::error::Error + 'static),
+        error: &(dyn core::error::Error + 'static),
     ) -> Box<dyn EyreHandler> {
         Box::new(Self {
             default_handler: DefaultHandler::default_with(error),
@@ -385,7 +444,7 @@ impl CustomEyreHandler {
         })
     }
 
-    pub fn get_location(&self) -> &Option<&'static std::panic::Location<'static>> {
+    pub fn get_location(&self) -> &Option<&'static core::panic::Location<'static>> {
         &self.location
     }
 }
@@ -393,7 +452,7 @@ impl CustomEyreHandler {
 impl EyreHandler for CustomEyreHandler {
     fn display(
         &self,
-        error: &(dyn std::error::Error + 'static),
+        error: &(dyn core::error::Error + 'static),
         f: &mut core::fmt::Formatter<'_>,
     ) -> core::fmt::Result {
         self.default_handler.display(error, f)
@@ -401,19 +460,19 @@ impl EyreHandler for CustomEyreHandler {
 
     fn debug(
         &self,
-        error: &(dyn std::error::Error + 'static),
+        error: &(dyn core::error::Error + 'static),
         f: &mut core::fmt::Formatter<'_>,
     ) -> core::fmt::Result {
         self.default_handler.debug(error, f)
     }
 
-    fn track_caller(&mut self, location: &'static std::panic::Location<'static>) {
+    fn track_caller(&mut self, location: &'static core::panic::Location<'static>) {
         self.location = Some(location); // Store the location for access later
         self.default_handler.track_caller(location);
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 pub struct LogSetupReturnTest {
     _guard: tracing::subscriber::DefaultGuard,
     reload_handle: LogReloadHandle,
@@ -426,7 +485,7 @@ pub struct LogSetupReturnTest {
 
 /// Test-specific logging setup that uses thread-local scoped dispatcher instead of global
 /// This allows multiple tests to run without conflicting over the global subscriber
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnTest> {
     let parts = build_logging_subscriber(config)?;
 
@@ -442,7 +501,7 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use std::fs;
@@ -491,7 +550,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: Some(FileLoggingConfig {
-                path: temp_dir.path().to_path_buf(),
+                path: eko::compat::path::PathBuf::from(temp_dir.path().to_str().unwrap()),
                 file_prefix: Some("test".to_string()),
                 rotation: None,
             }),
@@ -613,7 +672,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: Some(FileLoggingConfig {
-                path: temp_dir.path().to_path_buf(),
+                path: eko::compat::path::PathBuf::from(temp_dir.path().to_str().unwrap()),
                 file_prefix: Some("otel_test".to_string()),
                 rotation: None,
             }),
@@ -655,7 +714,7 @@ mod tests {
         let config = LoggingConfig {
             level: LogLevel::Info,
             file_config: Some(FileLoggingConfig {
-                path: temp_dir.path().to_path_buf(),
+                path: eko::compat::path::PathBuf::from(temp_dir.path().to_str().unwrap()),
                 file_prefix: Some("reload_test".to_string()),
                 rotation: None,
             }),

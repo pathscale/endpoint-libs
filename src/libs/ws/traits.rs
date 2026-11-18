@@ -1,8 +1,14 @@
-use std::fmt;
+use alloc::boxed::Box;
+use alloc::string::String;
+use core::fmt;
 #[cfg(feature = "ws-core")]
-use std::net::SocketAddr;
+use core::net::SocketAddr;
 
 use async_trait::async_trait;
+#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use crate::eyre;
+#[cfg(any(feature = "std", feature = "std-deps"))]
+use eyre;
 #[cfg(feature = "ws-core")]
 use eyre::Result;
 #[cfg(feature = "ws-core")]
@@ -119,8 +125,8 @@ impl fmt::Display for StreamError {
     }
 }
 
-impl std::error::Error for StreamError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for StreamError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             StreamError::Other(e) => Some(e.as_ref()),
             _ => None,

@@ -25,11 +25,10 @@
 //! # }
 //! ```
 
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
-use futures::io::{AsyncRead, AsyncWrite};
+use nagoya::io::{self, ErrorKind, Read as AsyncRead, Write as AsyncWrite};
 use nagoya::io::StreamError;
 use nagoya::net::TcpStream;
 
@@ -62,42 +61,26 @@ impl From<TcpStream> for NagoyaStream {
     }
 }
 
-/// The platform's own number, which is what Nagoya carries and what `std` wants.
 fn io_error(error: StreamError) -> io::Error {
-    io::Error::from_raw_os_error(error.0)
+    if error.interrupted() {
+        io::Error::new(ErrorKind::Interrupted)
+    } else {
+        io::Error::new(ErrorKind::Other)
+    }
 }
 
 impl AsyncRead for NagoyaStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        self.get_mut().0.poll_read(cx, buffer).map_err(io_error)
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, io::Error> {
+        core::future::poll_fn(|cx| self.0.poll_read(cx, buffer).map_err(io_error)).await
     }
 }
 
 impl AsyncWrite for NagoyaStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.get_mut().0.poll_write(cx, buffer).map_err(io_error)
+    async fn write(&mut self, buffer: &[u8]) -> Result<usize, io::Error> {
+        core::future::poll_fn(|cx| self.0.poll_write(cx, buffer).map_err(io_error)).await
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().0.poll_flush(cx).map_err(io_error)
-    }
-
-    /// Flush, and leave the close to the drop.
-    ///
-    /// Nagoya exposes no half-close, so this cannot shut the write side down while
-    /// leaving the read side open. Reporting success after a flush is the honest answer
-    /// available: everything written has been handed to the kernel, and the descriptor is
-    /// closed when the stream is dropped. A peer that needs to see end-of-stream before
-    /// the drop needs a half-close on the Nagoya side first.
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
+    async fn flush(&mut self) -> Result<(), io::Error> {
+        core::future::poll_fn(|cx| self.0.poll_flush(cx).map_err(io_error)).await
     }
 }

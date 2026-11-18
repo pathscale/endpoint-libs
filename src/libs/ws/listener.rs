@@ -1,7 +1,9 @@
+use alloc::boxed::Box;
+use alloc::format;
 use crate::libs::peer::PeerIdentity;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
-use eyre::{Result, bail};
+use crate::eyre::{self, Result, bail};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use nagoya::io::Stream;
@@ -52,14 +54,16 @@ pub struct TcpListener {
 }
 impl TcpListener {
     pub fn bind(addr: Addr, handle: &Handle) -> Result<Self> {
-        let listener = nagoya::net::TcpListener::bind(addr, handle)?;
+        let listener = nagoya::net::TcpListener::bind(addr, handle)
+            .map_err(|err| eyre::eyre!("bind failed: {err}"))?;
         Ok(Self { listener })
     }
 
     /// [`Self::bind`] with `SO_REUSEPORT`, so each shard's reactor can hold its own
     /// listener on the same port. Every listener on the port has to use this.
     pub fn bind_shared(addr: Addr, handle: &Handle) -> Result<Self> {
-        let listener = nagoya::net::TcpListener::bind_shared(addr, handle)?;
+        let listener = nagoya::net::TcpListener::bind_shared(addr, handle)
+            .map_err(|err| eyre::eyre!("bind_shared failed: {err}"))?;
         Ok(Self { listener })
     }
 
@@ -121,7 +125,9 @@ impl TcpListener {
 
     /// The address actually bound, which is how to learn the port when zero was asked for.
     pub fn local_addr(&self) -> Result<Addr> {
-        Ok(self.listener.local_addr()?)
+        self.listener
+            .local_addr()
+            .map_err(|err| eyre::eyre!("local_addr failed: {err}"))
     }
 }
 impl ConnectionListener for TcpListener {
@@ -130,7 +136,11 @@ impl ConnectionListener for TcpListener {
 
     fn accept(&self) -> BoxFuture<'_, Result<(Self::Channel1, SocketAddr)>> {
         async {
-            let (stream, addr) = self.listener.accept().await?;
+            let (stream, addr) = self
+                .listener
+                .accept()
+                .await
+                .map_err(|err| eyre::eyre!("accept failed: {err}"))?;
             Ok((stream, socket_addr(addr)?))
         }
         .boxed()

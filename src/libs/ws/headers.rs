@@ -1,10 +1,12 @@
-use convert_case::Case;
-use convert_case::Casing;
-use eyre::{Context, ContextCompat, Result, bail};
+use alloc::collections::BTreeMap as HashMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use crate::convert_case::{Case, Casing};
+use crate::urlencoding;
+use crate::eyre::{self, Context, ContextCompat, Result, bail};
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
-use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
@@ -59,10 +61,10 @@ impl AuthReply {
 #[derive(Debug)]
 struct AuthRejected;
 
-impl std::error::Error for AuthRejected {}
+impl core::error::Error for AuthRejected {}
 
-impl std::fmt::Display for AuthRejected {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AuthRejected {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("authentication reply rejected")
     }
 }
@@ -173,7 +175,7 @@ impl<T: SubAuthController + 'static> SubAuthControllerErased for T {
                     debug!(
                         ws_server = true,
                         error_class = ?err.classify(),
-                        request_type = std::any::type_name::<T::Request>(),
+                        request_type = core::any::type_name::<T::Request>(),
                         method = ctx.method,
                         connection_id = ctx.connection_id,
                         log_id = ctx.log_id,
@@ -438,7 +440,7 @@ pub(super) mod preauth_sanitization_regression {
     use std::sync::{Arc, Mutex};
 
     use futures::FutureExt;
-    use parking_lot::RwLock;
+    use eko::thread::RwLock;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 

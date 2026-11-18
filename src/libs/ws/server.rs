@@ -1,18 +1,24 @@
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::net::SocketAddr;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::time::Duration;
+use eko::thread::RwLock;
+use eko::time::Instant;
+type PathBuf = String;
+
 use super::WsMessage as Message;
+use crate::eyre::{self, ContextCompat, Result, WrapErr, bail};
 #[cfg(feature = "ws")]
-use eyre::eyre;
-use eyre::{ContextCompat, Result, WrapErr, bail};
+use crate::eyre::eyre;
 use itertools::Itertools;
 use nagoya::reactor::{Handle, Reactor, block_on_with, resolve};
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use tracing::*;
 
 // Used by serve_connection, which is transport-agnostic (ws-core), so these must
@@ -125,7 +131,7 @@ impl Drop for ConnectionCleanup {
     }
 }
 
-async fn with_deadline<F: std::future::Future>(
+async fn with_deadline<F: Future>(
     timeout: Option<Duration>,
     future: F,
 ) -> Result<F::Output> {
@@ -352,7 +358,7 @@ impl WebsocketServer {
         addr: SocketAddr,
         states: Arc<WebsocketStates>,
         stream: BoxedStream,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<Instant>,
     ) -> Result<()> {
         let upgrader = self.upgrader.as_ref().ok_or_else(|| {
             eyre!("No WS backend configured; call set_upgrader() before listen()")
@@ -365,8 +371,7 @@ impl WebsocketServer {
         // no h2, and HTTP/1.1 upgrades exactly once and then the socket is
         // WebSocket frames to the end. So the upgrader hands back the connection
         // directly and this is a straight line.
-        let remaining =
-            deadline.map(|end| end.saturating_duration_since(std::time::Instant::now()));
+        let remaining = deadline.map(|end| end.saturating_duration_since(Instant::now()));
         let Some(event) = with_deadline(
             remaining,
             upgrader.upgrade_stream(stream, addr, &self.config),
@@ -418,7 +423,7 @@ impl WebsocketServer {
         _addr: SocketAddr,
         _states: Arc<WebsocketStates>,
         _stream: BoxedStream,
-        _deadline: Option<std::time::Instant>,
+        _deadline: Option<Instant>,
     ) -> Result<()> {
         bail!(
             "WebSocket upgrades require a backend that can create WS streams (enable the `ws` feature)"
@@ -644,12 +649,12 @@ impl WebsocketServer {
 
         let mut connections = FuturesUnordered::new();
         let mut backoff = Duration::from_millis(10);
-        let mut retry_at: Option<std::time::Instant> = None;
+        let mut retry_at: Option<Instant> = None;
         loop {
             let retry = retry_at;
             let accept = async {
                 if let Some(at) = retry {
-                    nagoya::sleep(at.saturating_duration_since(std::time::Instant::now())).await;
+                    nagoya::sleep(at.saturating_duration_since(Instant::now())).await;
                 }
                 listener.accept().await
             };
@@ -666,7 +671,7 @@ impl WebsocketServer {
                 Ok(accepted) => accepted,
                 Err(err) => {
                     error!(ws_server = true, error = %err, "listener accept failed");
-                    retry_at = Some(std::time::Instant::now() + backoff);
+                    retry_at = Some(Instant::now() + backoff);
                     backoff = (backoff * 2).min(Duration::from_secs(1));
                     continue;
                 }
@@ -732,7 +737,7 @@ impl WebsocketServer {
     /// same process fails with `EBUSY`. A process that owns its signals, or runs
     /// more than one server, calls [`Self::listen_until`] instead.
     pub fn listen(self) -> Result<()> {
-        self.listen_on(None::<std::future::Pending<()>>)
+        self.listen_on(None::<core::future::Pending<()>>)
     }
 
     /// [`Self::listen`], stopping when `stop` resolves instead of on a signal.
@@ -745,14 +750,14 @@ impl WebsocketServer {
     /// a oneshot receiver or [`crate::libs::signal::Shutdown::cancelled`].
     pub fn listen_until<F>(self, stop: F) -> Result<()>
     where
-        F: std::future::Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         self.listen_on(Some(stop))
     }
 
     fn listen_on<F>(self, stop: Option<F>) -> Result<()>
     where
-        F: std::future::Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         self.validate_protocol_mode()?;
         self.refuse_tls_config()?;
@@ -762,15 +767,16 @@ impl WebsocketServer {
         // reactor exists to stall. `resolve` returns every address the name has,
         // not the first; `bind_any` decides what to do with them.
         let (host, port) = split_host_port(&self.config.address)?;
-        let addrs = resolve(host, port)
-            .wrap_err_with(|| format!("Failed to lookup host to bind: {}", self.config.address))?;
+        let addrs = resolve(host, port).map_err(|err| {
+            eyre::eyre!("Failed to lookup host to bind {}: {err:?}", self.config.address)
+        })?;
 
         // This thread is the first shard: `block_on_with` below waits for readiness
         // and polls the futures on this thread, so its accept loop, the signal
         // waiters and its connections share one reactor. The signal waiters in
         // particular only fire while their reactor is polled, which is why they are
         // created inside this reactor's future rather than anywhere else.
-        let reactor = Reactor::local()?;
+        let reactor = Reactor::local().map_err(|err| eyre::eyre!("reactor init failed: {err}"))?;
         let handle = reactor.handle();
         let shards = shard_count();
         if shards <= 1 {
@@ -794,11 +800,13 @@ impl WebsocketServer {
             let this = Arc::clone(&this);
             let states = Arc::clone(&states);
             let stop = Arc::clone(&shutdown);
-            let spawned = std::thread::Builder::new()
+            let builder = eko::thread::Builder::new();
+            let spawned = builder
                 .name(format!("ws-shard-{shard}"))
                 .spawn(move || {
                     let served = (|| {
-                        let reactor = Reactor::local()?;
+                        let reactor = Reactor::local()
+                            .map_err(|err| eyre::eyre!("reactor init failed: {err}"))?;
                         let handle = reactor.handle();
                         let listener = TcpListener::bind_shared(addr, &handle)?;
                         let stop = async move { stop.cancelled().await };
@@ -819,7 +827,7 @@ impl WebsocketServer {
                     for thread in threads {
                         let _ = thread.join();
                     }
-                    return Err(eyre::eyre!("failed to start shard {shard}: {err}"));
+                    return Err(eyre::eyre!("failed to start shard {shard}: {err:?}"));
                 }
             }
         }
@@ -885,7 +893,7 @@ impl WebsocketServer {
     ) -> Result<()>
     where
         T: ConnectionListener + 'static,
-        F: std::future::Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         let (this, states) = self.prepare();
         Self::serve_shard(this, states, listener, handle, stop).await
@@ -916,7 +924,7 @@ impl WebsocketServer {
     ) -> Result<()>
     where
         T: ConnectionListener + 'static,
-        F: std::future::Future<Output = ()> + 'static,
+        F: Future<Output = ()> + 'static,
     {
         use futures::StreamExt;
         use futures::future::{Either, FutureExt, select};
@@ -936,7 +944,7 @@ impl WebsocketServer {
         };
         let mut connections = FuturesUnordered::new();
         let mut backoff = Duration::from_millis(10);
-        let mut retry_at: Option<std::time::Instant> = None;
+        let mut retry_at: Option<Instant> = None;
         loop {
             // Shutdown is the outermost left arm, so a pending stop is not stuck
             // behind an accept or a live connection that is also ready. The one
@@ -946,7 +954,7 @@ impl WebsocketServer {
             let retry = retry_at;
             let accepted = async {
                 if let Some(at) = retry {
-                    nagoya::sleep(at.saturating_duration_since(std::time::Instant::now())).await;
+                    nagoya::sleep(at.saturating_duration_since(Instant::now())).await;
                 }
                 listener.accept().await
             };
@@ -971,7 +979,7 @@ impl WebsocketServer {
                 Ok(x) => x,
                 Err(err) => {
                     error!(ws_server = true, "Error while accepting stream: {:?}", err);
-                    retry_at = Some(std::time::Instant::now() + backoff);
+                    retry_at = Some(Instant::now() + backoff);
                     backoff = (backoff * 2).min(Duration::from_secs(1));
                     continue;
                 }
@@ -992,12 +1000,12 @@ impl WebsocketServer {
             let deadline = this
                 .config
                 .handshake_timeout
-                .map(|timeout| std::time::Instant::now() + timeout);
+                .map(|timeout| Instant::now() + timeout);
             connections.push(
                 async move {
                     let _slot = slot;
-                    let remaining = deadline
-                        .map(|end| end.saturating_duration_since(std::time::Instant::now()));
+                    let remaining =
+                        deadline.map(|end| end.saturating_duration_since(Instant::now()));
                     let stream = match with_deadline(remaining, listener.handshake(stream))
                         .await
                         .and_then(|result| result)
@@ -1046,7 +1054,6 @@ impl WebsocketServer {
     // This explicit opt-in writes public endpoint names for local documentation.
     #[allow(clippy::disallowed_methods)]
     pub fn dump_schemas(&self) -> Result<()> {
-        let _ = std::fs::create_dir_all("docs");
         let file = format!("docs/{}_alive_endpoints.json", self.config.name);
         let available_schemas: Vec<String> = self
             .handlers
@@ -1060,7 +1067,9 @@ impl WebsocketServer {
             available_schemas.len(),
             file
         );
-        serde_json::to_writer_pretty(File::create(file)?, &available_schemas)?;
+        let _ = eko::fs::create_dir_all("docs");
+        let json = serde_json::to_string_pretty(&available_schemas)?;
+        eko::file::write(file.as_str(), json.as_bytes())?;
         Ok(())
     }
 }
@@ -1105,7 +1114,9 @@ fn split_host_port(address: &str) -> Result<(&str, u16)> {
 /// 4. Hard fallback of 1 if all detection fails.
 fn shard_count() -> usize {
     // 1. Explicit override.
-    if let Ok(val) = std::env::var("WS_SHARDS") {
+    let env_val = eko::env::var("WS_SHARDS");
+
+    if let Some(val) = env_val {
         if let Ok(n) = val.trim().parse::<usize>()
             && n > 0
         {
@@ -1122,26 +1133,23 @@ fn shard_count() -> usize {
         return n.max(1);
     }
 
-    // 3. stdlib — cgroup v2 + affinity-aware on Linux (Rust 1.74+).
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    1
 }
 
 /// Read the cgroup v1 CPU quota and convert it to a thread count.
 /// Returns `None` if the files are absent, unparseable, or the quota is
 /// unlimited (quota == -1).
 fn read_cgroup_v1_quota() -> Option<usize> {
-    let quota: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-        .ok()?
+    let read_str = |p: &str| eko::file::read_to_string(p).ok();
+
+    let quota: i64 = read_str("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")?
         .trim()
         .parse()
         .ok()?;
     if quota <= 0 {
         return None; // -1 means no limit
     }
-    let period: i64 = std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
-        .ok()?
+    let period: i64 = read_str("/sys/fs/cgroup/cpu/cpu.cfs_period_us")?
         .trim()
         .parse()
         .ok()?;
@@ -1161,10 +1169,10 @@ pub fn check_name(cat: &str, be_name: &str, should_name: &str) -> Result<()> {
 }
 
 pub fn check_handler<T: RequestHandler + 'static>(schema: &EndpointSchema) -> Result<()> {
-    let handler_name = std::any::type_name::<T>();
+    let handler_name = core::any::type_name::<T>();
     let should_handler_name = format!("Method{}", schema.name);
     check_name("Method", handler_name, &should_handler_name)?;
-    let request_name = std::any::type_name::<T::Request>();
+    let request_name = core::any::type_name::<T::Request>();
     let should_req_name = format!("{}Request", schema.name);
     check_name("Request", request_name, &should_req_name)?;
 
@@ -1251,8 +1259,8 @@ pub struct WsServerConfig {
     pub on_limit: Option<Arc<dyn Fn(LimitEvent) + Send + Sync>>,
 }
 
-impl std::fmt::Debug for WsServerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for WsServerConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WsServerConfig").finish_non_exhaustive()
     }
 }
@@ -1478,7 +1486,11 @@ mod transport_deadline_tests {
         type Channel2 = TcpStream;
         fn accept(&self) -> BoxFuture<'_, Result<(TcpStream, SocketAddr)>> {
             async {
-                let (stream, addr) = self.listener.accept().await?;
+                let (stream, addr) = self
+                    .listener
+                    .accept()
+                    .await
+                    .map_err(|e| crate::eyre::eyre!("{e:?}"))?;
                 Ok((stream, format!("127.0.0.1:{}", addr.port()).parse()?))
             }
             .boxed()

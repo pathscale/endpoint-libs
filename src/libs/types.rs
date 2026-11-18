@@ -1,6 +1,9 @@
-use std::fmt::{Debug, Display, Formatter};
-use std::ops::{Deref, DerefMut};
-use std::str::FromStr;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::{Debug, Display, Formatter};
+use core::ops::{Deref, DerefMut};
+use core::str::FromStr;
 
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -27,12 +30,12 @@ macro_rules! byte_scalar {
             fn deref(&self) -> &Self::Target { &self.0 }
         }
         impl Debug for $ty {
-            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 Display::fmt(self, f)
             }
         }
         impl Display for $ty {
-            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
                 write!(f, "0x{}", hex::encode(&self.0))
             }
         }
@@ -71,16 +74,16 @@ impl Deref for U256 {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
         // A u64 array has a contiguous byte representation for read-only viewing.
-        unsafe { std::slice::from_raw_parts(self.0.as_ptr().cast::<u8>(), 32) }
+        unsafe { core::slice::from_raw_parts(self.0.as_ptr().cast::<u8>(), 32) }
     }
 }
 #[cfg(not(feature = "blockchain"))]
 impl Debug for U256 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { Display::fmt(self, f) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result { Display::fmt(self, f) }
 }
 #[cfg(not(feature = "blockchain"))]
 impl Display for U256 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { write!(f, "0x{}", hex::encode(&**self)) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result { write!(f, "0x{}", hex::encode(&**self)) }
 }
 #[cfg(not(feature = "blockchain"))]
 impl FromStr for U256 {
@@ -116,7 +119,7 @@ fn decode_scalar(value: &str, digits: usize) -> Result<Vec<u8>, String> {
 }
 
 fn parse_blockchain_scalar<E: Error, T: FromStr>(value: &str, digits: usize) -> Result<T, E>
-where T::Err: std::fmt::Display {
+where T::Err: core::fmt::Display {
     if value.len() != digits + 2 || !value.starts_with("0x") {
         return Err(E::custom(format!("expected 0x followed by exactly {digits} hexadecimal digits")));
     }
@@ -126,7 +129,7 @@ where T::Err: std::fmt::Display {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BlockchainAddress(pub Address);
 impl Debug for BlockchainAddress {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { Debug::fmt(&self.0, f) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result { Debug::fmt(&self.0, f) }
 }
 #[allow(non_snake_case)]
 pub mod WithBlockchainAddress {
@@ -161,7 +164,7 @@ impl DerefMut for BlockchainAddress { fn deref_mut(&mut self) -> &mut Self::Targ
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BlockchainTransactionHash(pub H256);
 impl Debug for BlockchainTransactionHash {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result { Debug::fmt(&self.0, f) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result { Debug::fmt(&self.0, f) }
 }
 #[allow(non_snake_case)]
 pub mod WithBlockchainTransactionHash {

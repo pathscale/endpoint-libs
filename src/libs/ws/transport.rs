@@ -82,6 +82,10 @@
 //! and goes through `framed_json_neutral` — that
 //! is the seam, and it is what this module is for.
 
+use alloc::boxed::Box;
+#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use crate::eyre::eyre;
+#[cfg(any(feature = "std", feature = "std-deps"))]
 use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 
@@ -98,13 +102,13 @@ where
     Self: Sink<SinkItem, Error = <Self as Transport<SinkItem, Item>>::TransportError>,
 {
     /// The error type shared by both directions.
-    type TransportError: std::error::Error + Send + Sync + 'static;
+    type TransportError: core::error::Error + Send + Sync + 'static;
 }
 
 impl<T, SinkItem, Item, E> Transport<SinkItem, Item> for T
 where
     T: ?Sized + Stream<Item = Result<Item, E>> + Sink<SinkItem, Error = E>,
-    E: std::error::Error + Send + Sync + 'static,
+    E: core::error::Error + Send + Sync + 'static,
 {
     type TransportError = E;
 }

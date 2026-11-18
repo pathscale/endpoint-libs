@@ -1,10 +1,15 @@
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::Write;
+
+use crate::eyre::{ContextCompat, Result};
 use crate::model::{Field, MetaMap, Type};
-use convert_case::{Case, Casing};
-use eyre::{ContextCompat, Result};
+use crate::urlencoding;
+use crate::convert_case::{Case, Casing};
 use serde::de::{Error, Unexpected};
 use serde::ser::SerializeStruct;
 use serde::*;
-use std::fmt::Write;
 
 /// `EndpointSchema` is a struct that represents a single endpoint in the API.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -165,7 +170,7 @@ impl EndpointErrorCodeRef {
         format!("{}::{}", Self::ENUM_NAME, self.variant)
     }
 
-    fn validate_ty(ty: Type) -> std::result::Result<Type, String> {
+    fn validate_ty(ty: Type) -> core::result::Result<Type, String> {
         match &ty {
             Type::EnumRef { name, .. } if name == Self::ENUM_NAME => Ok(ty),
             Type::EnumRef { name, .. } => {
@@ -175,7 +180,7 @@ impl EndpointErrorCodeRef {
         }
     }
 
-    fn parse_path(path: &str) -> std::result::Result<Self, String> {
+    fn parse_path(path: &str) -> core::result::Result<Self, String> {
         let (enum_name, variant) = path
             .split_once("::")
             .ok_or_else(|| format!("expected {}::Variant", Self::ENUM_NAME))?;
@@ -195,14 +200,14 @@ impl EndpointErrorCodeRef {
     }
 }
 
-impl std::fmt::Display for EndpointErrorCodeRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for EndpointErrorCodeRef {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.path())
     }
 }
 
 impl Serialize for EndpointErrorCodeRef {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> core::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -214,7 +219,7 @@ impl Serialize for EndpointErrorCodeRef {
 }
 
 impl<'de> Deserialize<'de> for EndpointErrorCodeRef {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {

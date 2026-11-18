@@ -1,6 +1,7 @@
-use std::future::Future;
+use alloc::vec::{self, Vec};
+use core::future::Future;
 
-use eyre::Result;
+use crate::eyre::Result;
 use serde::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -10,7 +11,7 @@ pub struct RDataTable<T> {
 
 impl<T> IntoIterator for RDataTable<T> {
     type Item = T;
-    type IntoIter = std::vec::IntoIter<T>;
+    type IntoIter = vec::IntoIter<T>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.rows.into_iter()

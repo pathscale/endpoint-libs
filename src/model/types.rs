@@ -1,6 +1,10 @@
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::hash::{Hash, Hasher};
 use serde::*;
-use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 
 /// Emitter-facing annotations attached to a [`Field`] or
 /// [`EndpointSchema`](crate::model::EndpointSchema).
@@ -43,7 +47,7 @@ impl Hash for MetaMap {
 }
 
 impl Ord for MetaMap {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.0
             .iter()
             .map(|(k, v)| (k, v.to_string()))
@@ -52,7 +56,7 @@ impl Ord for MetaMap {
 }
 
 impl PartialOrd for MetaMap {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }

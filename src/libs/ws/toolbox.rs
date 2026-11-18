@@ -1,16 +1,22 @@
+use alloc::borrow::ToOwned;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::cell::Cell;
+use core::fmt::{Debug, Display, Formatter};
+use core::future::Future;
+use core::net::{IpAddr, Ipv4Addr};
+use core::pin::Pin;
+use core::task::{Context, Poll};
+use eko::thread::OnceLock;
+
+use crate::eyre::{self, Result};
+
+use super::conn::SharedWsStates;
 use crate::libs::peer::{Extensions, PeerIdentity};
 use crate::libs::ws::WsMessage as Message;
-use super::conn::SharedWsStates;
-use eyre::Result;
 use serde::*;
 use serde_json::{Map, Value};
-use std::cell::Cell;
-use std::fmt::{Debug, Display, Formatter};
-use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr};
-use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
 use tracing::*;
 
 use crate::libs::error_code::ErrorCode;
@@ -27,12 +33,12 @@ use crate::libs::ws::{
 pub struct NoResponseError;
 
 impl Display for NoResponseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_str("NoResp")
     }
 }
 
-impl std::error::Error for NoResponseError {}
+impl core::error::Error for NoResponseError {}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CustomError {
@@ -92,12 +98,12 @@ impl CustomError {
 }
 
 impl Display for CustomError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.params.to_string())
     }
 }
 
-impl std::error::Error for CustomError {}
+impl core::error::Error for CustomError {}
 
 #[derive(Clone)]
 pub struct RequestContext {
@@ -594,7 +600,7 @@ impl Toolbox {
         Some(resp)
     }
 }
-thread_local! {
+eko::thread_local! {
     static TOOLBOX_SLOT: Cell<Option<ArcToolbox>> = const { Cell::new(None) };
 }
 
@@ -615,12 +621,12 @@ pub static TOOLBOX: ToolboxKey = ToolboxKey;
 pub struct ToolboxAccessError;
 
 impl Display for ToolboxAccessError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.write_str("TOOLBOX is not set for this poll")
     }
 }
 
-impl std::error::Error for ToolboxAccessError {}
+impl core::error::Error for ToolboxAccessError {}
 
 impl ToolboxKey {
     /// Poll `future` with `value` installed. The previous slot is restored
@@ -689,7 +695,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
 
-    use parking_lot::RwLock;
+    use eko::thread::RwLock;
 
     use super::{RequestContext, SendRawBatchOutcome, Toolbox};
     use crate::libs::peer::{Extensions, PeerIdentity};
@@ -1081,7 +1087,8 @@ mod tests {
             if replace_built_in {
                 toolbox.set_ws_states(states.clone_states(), false, false);
                 let toolbox = Arc::get_mut(&mut toolbox).unwrap();
-                assert!(toolbox.send_msg.take().is_some());
+                assert!(toolbox.send_msg.get().is_some());
+                toolbox.send_msg = super::OnceLock::new();
             }
             let (sent, received) = std::sync::mpsc::channel();
             assert!(

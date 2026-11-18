@@ -59,12 +59,11 @@
 //! it. The bytes on the wire do not change, so a bridged peer and an unbridged peer
 //! still talk to each other.
 
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+use core::pin::Pin;
+use core::task::{Context, Poll};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use futures::io::{AsyncRead, AsyncWrite};
+use nagoya::io::{self, ErrorKind, Read as AsyncRead, Write as AsyncWrite};
 use futures::{Sink, Stream};
 
 use super::super::message::{CloseFrame, WireMessage};
@@ -93,8 +92,8 @@ pub enum FramedError {
     MalformedClose,
 }
 
-impl std::fmt::Display for FramedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FramedError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(err) => write!(f, "io error: {err}"),
             Self::UnknownKind(kind) => write!(f, "unknown frame kind: {kind}"),
@@ -105,8 +104,8 @@ impl std::fmt::Display for FramedError {
     }
 }
 
-impl std::error::Error for FramedError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for FramedError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
             _ => None,
@@ -259,13 +258,7 @@ impl<S> NeutralFramed<S> {
         let frame_len = u32::from_be_bytes(prefix) as usize;
 
         if frame_len > self.max_frame_bytes {
-            return Err(FramedError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "frame of {frame_len} bytes exceeds the {} byte maximum",
-                    self.max_frame_bytes
-                ),
-            )));
+            return Err(FramedError::Io(io::Error::new(ErrorKind::InvalidData)));
         }
 
         if self.read_buf.len() < LENGTH_PREFIX_BYTES + frame_len {
@@ -301,16 +294,14 @@ where
                     Poll::Ready(None)
                 } else {
                     Poll::Ready(Some(Err(FramedError::Io(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "the stream ended in the middle of a frame",
+                        ErrorKind::UnexpectedEof,
                     )))))
                 };
             }
 
             let mut scratch = [0u8; READ_CHUNK_BYTES];
-            let result = Pin::new(&mut this.io).poll_read(cx, &mut scratch);
-
-            match result {
+            let mut fut = core::pin::pin!(this.io.read(&mut scratch));
+            match core::future::Future::poll(fut.as_mut(), cx) {
                 Poll::Ready(Ok(0)) => {
                     this.read_eof = true;
                 }
@@ -349,24 +340,15 @@ where
         let payload = encode(item);
 
         if payload.len() > this.max_frame_bytes {
-            return Err(FramedError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "frame of {} bytes exceeds the {} byte maximum",
-                    payload.len(),
-                    this.max_frame_bytes
-                ),
-            )));
+            return Err(FramedError::Io(io::Error::new(ErrorKind::InvalidData)));
         }
 
         this.write_buf.reserve(LENGTH_PREFIX_BYTES + payload.len());
         this.write_buf
-            .put_u32(u32::try_from(payload.len()).map_err(|_| {
-                FramedError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "frame length does not fit in u32",
-                ))
-            })?);
+            .put_u32(
+                u32::try_from(payload.len())
+                    .map_err(|_| FramedError::Io(io::Error::new(ErrorKind::InvalidData)))?,
+            );
         this.write_buf.put_slice(&payload);
         Ok(())
     }
@@ -375,12 +357,10 @@ where
         let this = self.get_mut();
 
         while !this.write_buf.is_empty() {
-            match Pin::new(&mut this.io).poll_write(cx, &this.write_buf) {
+            let mut fut = core::pin::pin!(this.io.write(&this.write_buf));
+            match core::future::Future::poll(fut.as_mut(), cx) {
                 Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(FramedError::Io(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "the stream accepted no bytes",
-                    ))));
+                    return Poll::Ready(Err(FramedError::Io(io::Error::new(ErrorKind::WriteZero))));
                 }
                 Poll::Ready(Ok(written)) => this.write_buf.advance(written),
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(FramedError::Io(err))),
@@ -391,20 +371,12 @@ where
         if this.write_buf.is_empty() && this.write_buf.capacity() > READ_CHUNK_BYTES * 8 {
             this.write_buf = BytesMut::new();
         }
-        Pin::new(&mut this.io)
-            .poll_flush(cx)
-            .map_err(FramedError::Io)
+        let mut fut = core::pin::pin!(this.io.flush());
+        core::future::Future::poll(fut.as_mut(), cx).map_err(FramedError::Io)
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        match self.as_mut().poll_flush(cx) {
-            Poll::Ready(Ok(())) => {}
-            other => return other,
-        }
-        let this = self.get_mut();
-        Pin::new(&mut this.io)
-            .poll_close(cx)
-            .map_err(FramedError::Io)
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.poll_flush(cx)
     }
 }
 

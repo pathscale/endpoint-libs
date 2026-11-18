@@ -1,10 +1,13 @@
 //! Log level enum and environment filter builder
 
-use std::str::FromStr;
+use alloc::format;
+use alloc::string::ToString;
+use core::str::FromStr;
 
-use eyre::eyre;
+use crate::eyre::{self, eyre};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, level_filters::LevelFilter};
+#[cfg(feature = "std")]
 use tracing_subscriber::EnvFilter;
 
 /// Helper function to determine if one level is more restrictive than another
@@ -35,6 +38,7 @@ pub enum LogLevel {
     Detail,
 }
 
+#[cfg(feature = "std")]
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
     let level: Level = log_level.into();
 
@@ -123,7 +127,7 @@ impl From<LogLevel> for Level {
 
 impl FromStr for LogLevel {
     type Err = eyre::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_ref() {
             "error" => Ok(LogLevel::Error),
             "warn" => Ok(LogLevel::Warn),
@@ -137,7 +141,7 @@ impl FromStr for LogLevel {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

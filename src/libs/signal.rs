@@ -1,6 +1,7 @@
-use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use core::pin::pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::eyre;
 use nagoya::reactor::Handle;
 use nagoya::signal::{Signal, SignalKind};
 use nagoya::sync::Notify;
@@ -93,8 +94,10 @@ pub static CANCELLATION_TOKEN: Shutdown = Shutdown::new();
 /// made before the first pair is dropped fails with `EBUSY`, which is also why
 /// [`signal_received_silent`] and this cannot both be live at once.
 pub fn init_signals(handle: &Handle) -> eyre::Result<(Signal, Signal)> {
-    let sigterm = Signal::new(SignalKind::terminate(), handle)?;
-    let sigint = Signal::new(SignalKind::interrupt(), handle)?;
+    let sigterm = Signal::new(SignalKind::terminate(), handle)
+        .map_err(|err| eyre::eyre!("failed to register SIGTERM: {err}"))?;
+    let sigint = Signal::new(SignalKind::interrupt(), handle)
+        .map_err(|err| eyre::eyre!("failed to register SIGINT: {err}"))?;
     Ok((sigterm, sigint))
 }
 
@@ -153,8 +156,8 @@ pub fn get_terminate_flag() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::task::Context;
+    use core::future::Future;
+    use core::task::Context;
 
     use super::*;
 

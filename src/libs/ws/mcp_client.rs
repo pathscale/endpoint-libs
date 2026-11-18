@@ -1,8 +1,14 @@
 //! Minimal runtime-neutral MCP client (`McpClient`) over `MessageStream`.
 
-use std::collections::VecDeque;
-use std::time::Duration;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::time::Duration;
 
+#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use crate::eyre::eyre;
+#[cfg(any(feature = "std", feature = "std-deps"))]
 use eyre::eyre;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

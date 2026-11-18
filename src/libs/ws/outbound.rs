@@ -12,13 +12,14 @@
 //! as `Outbound::Closed`. Sends are synchronous, and a capacity of zero
 //! never accepts a message.
 
-use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 
-use parking_lot::Mutex;
+use eko::thread::Mutex;
 
 /// The shared queue. One mutex covers the buffer, the sender count and the
 /// parked receiver, so a send cannot land between the empty check and the
@@ -97,8 +98,8 @@ impl<T> TrySendError<T> {
     }
 }
 
-impl<T> std::fmt::Display for TrySendError<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<T> core::fmt::Display for TrySendError<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             TrySendError::Full(_) => f.write_str("outbound queue full"),
             TrySendError::Closed(_) => f.write_str("outbound queue closed"),
@@ -106,10 +107,10 @@ impl<T> std::fmt::Display for TrySendError<T> {
     }
 }
 
-impl<T: std::fmt::Debug> std::error::Error for TrySendError<T> {}
+impl<T: core::fmt::Debug> core::error::Error for TrySendError<T> {}
 
-impl std::fmt::Display for TryRecvError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for TryRecvError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             TryRecvError::Empty => f.write_str("outbound queue empty"),
             TryRecvError::Disconnected => f.write_str("outbound queue disconnected"),
@@ -117,7 +118,7 @@ impl std::fmt::Display for TryRecvError {
     }
 }
 
-impl std::error::Error for TryRecvError {}
+impl core::error::Error for TryRecvError {}
 
 /// Create a bounded queue. `capacity` is the maximum number of queued
 /// messages, not a per-sender allowance. Zero accepts nothing via

@@ -1,6 +1,9 @@
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::model::{Field, Type};
-use convert_case::Case;
-use convert_case::Casing;
+use crate::convert_case::{Case, Casing};
 use itertools::Itertools;
 
 /// `ProceduralFunction` is a struct that represents a single procedural function in the API.

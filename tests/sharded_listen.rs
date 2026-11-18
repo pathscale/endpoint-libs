@@ -17,7 +17,7 @@ use endpoint_libs::libs::ws::{
     AuthController, AuthReply, WebsocketServer, WsClientBuilder, WsConnection, WsRequest,
     WsResponse, WsServerConfig,
 };
-use eyre::Result;
+use endpoint_libs::eyre::Result;
 use futures::FutureExt;
 use futures::future::LocalBoxFuture;
 use nagoya::reactor::{Reactor, block_on_with};

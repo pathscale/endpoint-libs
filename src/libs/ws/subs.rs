@@ -1,8 +1,13 @@
+#[cfg(not(feature = "std"))]
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::hash::Hash;
+use core::sync::atomic::{AtomicU32, Ordering};
 use serde::Serialize;
-use std::borrow::Borrow;
+#[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
-use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::error;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext};
@@ -21,7 +26,7 @@ pub struct SubscriptionManager<S, Key = ()> {
     pub mappings: HashMap<Key, HashSet<ConnectionId>>,
 }
 
-impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
+impl<S, Key: Eq + Hash + Ord> SubscriptionManager<S, Key> {
     pub fn new(stream_code: u32) -> Self {
         Self {
             stream_code,
@@ -142,7 +147,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
     pub fn publish_to_key<Q>(&mut self, toolbox: &ArcToolbox, key: &Q, msg: &impl Serialize)
     where
         Key: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        Q: Eq + Hash + Ord + ?Sized,
     {
         let Some(conn_ids) = self.mappings.get(key).cloned() else {
             return;
@@ -155,7 +160,7 @@ impl<S, Key: Eq + Hash> SubscriptionManager<S, Key> {
     pub fn publish_to_keys<Q>(&mut self, toolbox: &ArcToolbox, keys: &[&Q], msg: &impl Serialize)
     where
         Key: Borrow<Q>,
-        Q: Eq + Hash + ?Sized,
+        Q: Eq + Hash + Ord + ?Sized,
     {
         let mut published = HashSet::new();
         for key in keys {

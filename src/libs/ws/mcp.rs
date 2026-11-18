@@ -11,8 +11,18 @@
 //! [`McpAction::ToolCall`] for the session layer to dispatch to the endpoint's
 //! request handler.
 
+#[cfg(not(feature = "std"))]
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
 
+#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use crate::eyre;
+#[cfg(any(feature = "std", feature = "std-deps"))]
+use eyre;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -268,7 +278,7 @@ impl McpState {
         info: McpServerInfo,
     ) -> eyre::Result<Self> {
         let mut tools = Vec::with_capacity(handlers.len());
-        let mut by_name = HashMap::with_capacity(handlers.len());
+        let mut by_name = HashMap::new();
 
         // Sort by code for a deterministic tools/list order.
         let mut endpoints: Vec<&WsEndpoint> = handlers.values().collect();
