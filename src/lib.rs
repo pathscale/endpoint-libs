@@ -1,4 +1,4 @@
-#![cfg_attr(not(any(test, feature = "std")), no_std)]
+#![cfg_attr(not(test), no_std)]
 #![cfg_attr(test, allow(deprecated))]
 
 extern crate alloc;
@@ -283,6 +283,22 @@ pub mod eyre {
                 Ok(b) => Ok(b.0),
                 Err(inner) => Err(Self { inner, handler }),
             }
+        }
+
+        pub fn into_boxed_dyn_error(self) -> Box<dyn core::error::Error + Send + Sync + 'static> {
+            self.inner
+        }
+    }
+
+    impl From<Report> for Box<dyn core::error::Error + Send + Sync + 'static> {
+        fn from(report: Report) -> Self {
+            report.inner
+        }
+    }
+
+    impl From<Report> for Box<dyn core::error::Error + 'static> {
+        fn from(report: Report) -> Self {
+            report.inner
         }
     }
 

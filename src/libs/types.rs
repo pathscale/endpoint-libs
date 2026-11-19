@@ -1,7 +1,10 @@
 use alloc::format;
 use alloc::string::{String, ToString};
+#[cfg(not(feature = "blockchain"))]
 use alloc::vec::Vec;
-use core::fmt::{Debug, Display, Formatter};
+use core::fmt::{Debug, Formatter};
+#[cfg(not(feature = "blockchain"))]
+use core::fmt::Display;
 use core::ops::{Deref, DerefMut};
 use core::str::FromStr;
 
@@ -111,6 +114,7 @@ impl<'de> Deserialize<'de> for U256 {
     }
 }
 
+#[cfg(not(feature = "blockchain"))]
 fn decode_scalar(value: &str, digits: usize) -> Result<Vec<u8>, String> {
     if value.len() != digits * 2 + 2 || !value.starts_with("0x") {
         return Err(format!("expected 0x followed by exactly {} hexadecimal digits", digits * 2));

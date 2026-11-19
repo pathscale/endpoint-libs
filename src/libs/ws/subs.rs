@@ -1,4 +1,3 @@
-#[cfg(not(feature = "std"))]
 use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -6,8 +5,6 @@ use core::borrow::Borrow;
 use core::hash::Hash;
 use core::sync::atomic::{AtomicU32, Ordering};
 use serde::Serialize;
-#[cfg(feature = "std")]
-use std::collections::{HashMap, HashSet};
 use tracing::error;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext};

@@ -2,39 +2,14 @@ use alloc::string::{String, ToString};
 use core::fmt::Debug;
 
 use crate::eyre::{Result, eyre};
-
-#[cfg(feature = "std")]
-use clap::Parser;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-#[cfg(feature = "std")]
-use std::path::PathBuf;
 
-#[cfg(feature = "std")]
-#[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
-struct CliArgument {
-    /// The path to config file
-    #[arg(
-        short,
-        long,
-        value_name = "FILE",
-        default_value = "etc/config.json",
-        env = "CONFIG"
-    )]
-    config: PathBuf,
-    /// The path to config file
-    #[clap(long)]
-    config_entry: Option<String>,
-}
-
-#[cfg(not(feature = "std"))]
 struct CliArgument {
     config: String,
     config_entry: Option<String>,
 }
 
-#[cfg(not(feature = "std"))]
 impl CliArgument {
     fn parse() -> Self {
         let mut config = eko::env::var("CONFIG").unwrap_or_else(|| "etc/config.json".to_string());
@@ -71,11 +46,7 @@ impl CliArgument {
 }
 
 pub fn load_config<Config: DeserializeOwned + Debug>(mut service_name: String) -> Result<Config> {
-    let args: CliArgument = CliArgument::parse();
-
-    #[cfg(feature = "std")]
-    let config = std::fs::read_to_string(&args.config)?;
-    #[cfg(not(feature = "std"))]
+    let args = CliArgument::parse();
     let config = eko::file::read_to_string(args.config.as_str())?;
 
     let mut config: Value = serde_json::from_str(&config)?;

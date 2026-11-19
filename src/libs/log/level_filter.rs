@@ -1,14 +1,15 @@
 //! Log level enum and environment filter builder
 
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt::{self, Display};
 use core::str::FromStr;
 
 use crate::eyre::{self, eyre};
 use serde::{Deserialize, Serialize};
+use tracing::Metadata;
 use tracing::{Level, level_filters::LevelFilter};
-#[cfg(feature = "std")]
-use tracing_subscriber::EnvFilter;
 
 /// Helper function to determine if one level is more restrictive than another
 /// More restrictive = shows fewer logs
@@ -38,28 +39,255 @@ pub enum LogLevel {
     Detail,
 }
 
-#[cfg(feature = "std")]
+/// One parsed filter directive, either global (`info`) or target-scoped (`h2=warn`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Directive {
+    target: Option<String>,
+    level: LevelFilter,
+}
+
+impl From<LevelFilter> for Directive {
+    fn from(level: LevelFilter) -> Self {
+        Self {
+            target: None,
+            level,
+        }
+    }
+}
+
+impl From<Level> for Directive {
+    fn from(level: Level) -> Self {
+        Self {
+            target: None,
+            level: LevelFilter::from_level(level),
+        }
+    }
+}
+
+fn parse_level_filter(raw: &str) -> eyre::Result<LevelFilter> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(LevelFilter::OFF),
+        "error" => Ok(LevelFilter::ERROR),
+        "warn" => Ok(LevelFilter::WARN),
+        "info" => Ok(LevelFilter::INFO),
+        "debug" => Ok(LevelFilter::DEBUG),
+        "trace" => Ok(LevelFilter::TRACE),
+        other => Err(eyre!("invalid filter level directive: {other}")),
+    }
+}
+
+fn format_level_filter(level: LevelFilter) -> &'static str {
+    match level {
+        LevelFilter::OFF => "off",
+        LevelFilter::ERROR => "error",
+        LevelFilter::WARN => "warn",
+        LevelFilter::INFO => "info",
+        LevelFilter::DEBUG => "debug",
+        LevelFilter::TRACE => "trace",
+    }
+}
+
+impl FromStr for Directive {
+    type Err = eyre::Error;
+
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(eyre!("empty filter directive"));
+        }
+        if let Some((left, right)) = trimmed.split_once('=') {
+            let target = left.split('[').next().unwrap_or(left).trim();
+            let level = parse_level_filter(right)?;
+            if target.is_empty() {
+                Ok(Self {
+                    target: None,
+                    level,
+                })
+            } else {
+                Ok(Self {
+                    target: Some(target.to_string()),
+                    level,
+                })
+            }
+        } else if let Ok(level) = parse_level_filter(trimmed) {
+            Ok(Self {
+                target: None,
+                level,
+            })
+        } else {
+            let target = trimmed.split('[').next().unwrap_or(trimmed).trim();
+            if target.is_empty() {
+                return Err(eyre!("invalid filter directive: {trimmed}"));
+            }
+            Ok(Self {
+                target: Some(target.to_string()),
+                level: LevelFilter::TRACE,
+            })
+        }
+    }
+}
+
+impl Display for Directive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.target {
+            Some(target) => write!(f, "{target}={}", format_level_filter(self.level)),
+            None => f.write_str(format_level_filter(self.level)),
+        }
+    }
+}
+
+/// Environment-configurable target/level filter (`no_std` replacement for `tracing_subscriber::EnvFilter`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvFilter {
+    default_level: LevelFilter,
+    directives: Vec<(String, LevelFilter)>,
+}
+
+impl Default for EnvFilter {
+    fn default() -> Self {
+        Self {
+            default_level: LevelFilter::ERROR,
+            directives: Vec::new(),
+        }
+    }
+}
+
+impl EnvFilter {
+    /// Construct an empty filter whose base level is `OFF` until directives are added.
+    pub fn empty() -> Self {
+        Self {
+            default_level: LevelFilter::OFF,
+            directives: Vec::new(),
+        }
+    }
+
+    /// Construct a filter from `RUST_LOG`, falling back to `ERROR` if unset.
+    /// Malformed directives in `RUST_LOG` are ignored, matching `EnvFilter::from_default_env`.
+    pub fn from_default_env() -> Self {
+        let mut filter = Self::default();
+        if let Some(raw) = eko::env::var("RUST_LOG") {
+            for part in raw.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if let Ok(directive) = part.parse::<Directive>() {
+                    filter = filter.add_directive(directive);
+                }
+            }
+        }
+        filter
+    }
+
+    /// Add or replace a directive in this filter.
+    pub fn add_directive(mut self, directive: impl Into<Directive>) -> Self {
+        let directive = directive.into();
+        match directive.target {
+            None => {
+                self.default_level = directive.level;
+            }
+            Some(target) => {
+                if let Some((_, existing)) = self.directives.iter_mut().find(|(t, _)| *t == target)
+                {
+                    *existing = directive.level;
+                } else {
+                    self.directives.push((target, directive.level));
+                }
+            }
+        }
+        self
+    }
+
+    /// Maximum verbosity level any target in this filter can emit.
+    pub fn max_level_hint(&self) -> LevelFilter {
+        let mut max = self.default_level;
+        for (_, level) in &self.directives {
+            if *level > max {
+                max = *level;
+            }
+        }
+        max
+    }
+
+    /// Whether an event or span with `metadata` is enabled by this filter.
+    pub fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        let target = metadata.target();
+        let mut matched: Option<(usize, LevelFilter)> = None;
+        for (prefix, level) in &self.directives {
+            let prefix_bytes = prefix.as_bytes();
+            let target_bytes = target.as_bytes();
+            let is_match = if target_bytes.len() == prefix_bytes.len() {
+                target == prefix
+            } else if target_bytes.len() > prefix_bytes.len() && target.starts_with(prefix.as_str())
+            {
+                // Match on module boundary (`::`) or explicit prefix boundary.
+                target_bytes.get(prefix_bytes.len()..prefix_bytes.len() + 2) == Some(b"::")
+            } else {
+                false
+            };
+            if is_match {
+                match matched {
+                    Some((best_len, _)) if best_len > prefix.len() => {}
+                    _ => matched = Some((prefix.len(), *level)),
+                }
+            }
+        }
+
+        let allowed = matched.map(|(_, l)| l).unwrap_or(self.default_level);
+        match allowed.into_level() {
+            None => false,
+            Some(max_level) => {
+                // In tracing, Level::ERROR < Level::WARN < Level::INFO < Level::DEBUG < Level::TRACE
+                *metadata.level() <= max_level
+            }
+        }
+    }
+}
+
+impl FromStr for EnvFilter {
+    type Err = eyre::Error;
+
+    fn from_str(s: &str) -> core::result::Result<Self, Self::Err> {
+        let mut filter = Self::empty();
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            filter = filter.add_directive(part.parse::<Directive>()?);
+        }
+        Ok(filter)
+    }
+}
+
+impl Display for EnvFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.directives.is_empty() {
+            return f.write_str(format_level_filter(self.default_level));
+        }
+        for (idx, (target, level)) in self.directives.iter().enumerate() {
+            if idx > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{target}={}", format_level_filter(*level))?;
+        }
+        write!(f, ",{}", format_level_filter(self.default_level))
+    }
+}
+
 pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
-    let level: Level = log_level.into();
+    let level_filter: LevelFilter = log_level.into();
 
     // Start with the default env filter and add a base directive for all targets
-    let mut filter = EnvFilter::from_default_env().add_directive(level.into());
+    let mut filter = EnvFilter::from_default_env().add_directive(level_filter);
 
     // Only apply crate-specific capping when log level is Debug or Trace (but NOT Detail)
     // At Info and above, the global level already prevents excessive verbosity
     // At Detail, we let everything through at TRACE level without caps
     if log_level > LogLevel::Info && log_level != LogLevel::Detail {
+        let level: Level = log_level.into();
         const DIRECTIVES: &[(Level, &str)] = &[
             (Level::DEBUG, "tungstenite::protocol"),
-            // `tokio_util::codec::framed_impl` and `tokio_tungstenite` used to
-            // sit here. Both crates left the graph with tokio itself -- the
-            // framing is `framed_json_neutral` over `futures_io` and the
-            // WebSocket half is nago-wss -- so neither target can emit an event
-            // any more and the directives only cost a parse and a line in
-            // `EnvFilter`'s output. A consumer that runs tokio in its own graph
-            // and wants those two quiet says so in `RUST_LOG`, which this
-            // filter is built on top of; this list is for the noise *this*
-            // crate's dependencies make.
             (Level::INFO, "h2"),
             (Level::INFO, "rustls::client::hs"),
             (Level::INFO, "rustls::client::tls13"),
@@ -81,15 +309,15 @@ pub fn build_env_filter(log_level: LogLevel) -> eyre::Result<EnvFilter> {
 
         for (directive_level, crate_name) in DIRECTIVES {
             // Only apply directive if it's MORE RESTRICTIVE than the global level
-            // At Debug: only apply INFO directives (they're more restrictive)
-            // At Trace: apply both DEBUG and INFO directives (both are more restrictive)
+            // At Debug: only apply INFO/WARN directives (they're more restrictive)
+            // At Trace: apply DEBUG, INFO, and WARN directives (all are more restrictive)
             if is_more_restrictive(*directive_level, level) {
                 let directive_string = format!(
                     "{}={}",
                     crate_name,
                     directive_level.to_string().to_lowercase()
                 );
-                filter = filter.add_directive(directive_string.parse()?);
+                filter = filter.add_directive(directive_string.parse::<Directive>()?);
             }
         }
     }
@@ -141,13 +369,12 @@ impl FromStr for LogLevel {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_build_env_filter_all_levels() {
-        // Test that build_env_filter successfully builds for all LogLevel variants
         let levels = vec![
             LogLevel::Off,
             LogLevel::Error,
@@ -170,44 +397,37 @@ mod tests {
 
     #[test]
     fn test_build_env_filter_with_error_level() {
-        // Test specifically that ERROR level creates a valid filter
         let filter = build_env_filter(LogLevel::Error);
         assert!(filter.is_ok());
 
         let filter = filter.unwrap();
-        // The filter should exist and be usable
         drop(filter);
     }
 
     #[test]
     fn test_build_env_filter_with_detail_level() {
-        // Test that Detail level doesn't add specific crate directives
         let filter = build_env_filter(LogLevel::Detail);
         assert!(filter.is_ok());
     }
 
     #[test]
     fn test_build_env_filter_crate_directives_applied() {
-        // Test that non-Detail levels apply crate-specific directives
         let filter_info = build_env_filter(LogLevel::Info);
         let filter_detail = build_env_filter(LogLevel::Detail);
 
         assert!(filter_info.is_ok());
         assert!(filter_detail.is_ok());
-        // Both should be valid filters - the difference is in their internal directives
     }
 
     #[test]
     fn test_env_filter_directive_creation() {
-        // Test that we can create string-based directives for crates
         let level = Level::ERROR;
         let crate_name = "test_crate";
-        let capped_level = std::cmp::max(level, Level::INFO);
+        let capped_level = core::cmp::max(level, Level::INFO);
         let directive_string =
             format!("{}={}", crate_name, capped_level.to_string().to_lowercase());
 
-        // This should parse without error
-        let result = directive_string.parse::<tracing_subscriber::filter::Directive>();
+        let result = directive_string.parse::<Directive>();
         assert!(
             result.is_ok(),
             "Failed to parse directive: {}",
@@ -215,18 +435,11 @@ mod tests {
         );
     }
 
-    // Like the pair in `log.rs`: these were `#[tokio::test]` only to have a
-    // runtime in scope. Neither awaits anything -- `setup_logging_test` is
-    // synchronous, the macros are synchronous, and the wait is a
-    // `std::thread::sleep` for the non-blocking appender to drain, which a
-    // runtime would not have helped with anyway.
     #[test]
     fn test_min_logic_filters_verbose_crates() {
-        // Import necessary items for logging test setup
         use crate::libs::log::{LoggingConfig, setup_logging_test};
         use tracing::{debug, error, info, warn};
 
-        // Setup logging at Debug level (which is > Info, so directives apply)
         let config = LoggingConfig {
             level: LogLevel::Debug,
             file_config: None,
@@ -243,33 +456,22 @@ mod tests {
         let _guard = setup_logging_test(config);
         assert!(_guard.is_ok(), "Failed to setup logging for test");
 
-        // Global level logs (no target specified) at Debug level should all appear
         debug!("Global debug log should appear");
         info!("Global info log should appear");
         warn!("Global warn log should appear");
         error!("Global error log should appear");
 
-        // Emit logs from tungstenite::protocol (which has directive (Level::DEBUG, "tungstenite::protocol"))
-        // With LogLevel::Debug, min(DEBUG, DEBUG) = DEBUG, so DEBUG logs should appear
         debug!(target: "tungstenite::protocol", "Targeted debug log from tungstenite::protocol should appear");
         info!(target: "tungstenite::protocol", "Targeted info log from tungstenite::protocol should appear");
 
-        // Emit logs from h2 (which has directive (Level::INFO, "h2"))
-        // With LogLevel::Debug, h2 is capped at INFO, so DEBUG logs should NOT appear
         debug!(target: "h2", "Targeted debug log from h2 should NOT appear");
         info!(target: "h2", "Targeted info log from h2 should appear");
 
-        // Allow time for logs to be processed
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // If we got here without panic, the filter logic worked correctly
-        // The test passes if the logs are emitted without errors
+        eko::sleep_ms(100);
     }
 
     #[test]
     fn test_no_directives_applied_at_info_level() {
-        // When log level is Info or above, directives should NOT be applied
-        // because the global level is restrictive enough
         use crate::libs::log::{LoggingConfig, setup_logging_test};
         use tracing::{debug, error, info, warn};
 
@@ -289,45 +491,29 @@ mod tests {
         let _guard = setup_logging_test(config);
         assert!(_guard.is_ok(), "Failed to setup logging for test");
 
-        // Global level logs - at Info level, only Info and above should appear
         debug!("Global debug log should NOT appear");
         info!("Global info log should appear");
         warn!("Global warn log should appear");
         error!("Global error log should appear");
 
-        // At Info level, no crate directives are applied, so global level (info) applies
-        // This means debug logs from anywhere should not appear
         debug!(target: "tungstenite::protocol", "Targeted debug from tungstenite::protocol should NOT appear");
         info!(target: "tungstenite::protocol", "Targeted info from tungstenite::protocol should appear");
 
-        // Similarly for h2 - debug should not appear, info and above should
         debug!(target: "h2", "Targeted debug from h2 should NOT appear");
         info!(target: "h2", "Targeted info from h2 should appear");
         warn!(target: "h2", "Targeted warn from h2 should appear");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Test passes if logs are processed without errors
+        eko::sleep_ms(100);
     }
 
     #[test]
     fn test_filter_string_format() {
-        // Test to verify the actual filter directives being generated
         let filter_debug = build_env_filter(LogLevel::Debug).unwrap();
         let filter_info = build_env_filter(LogLevel::Info).unwrap();
         let filter_error = build_env_filter(LogLevel::Error).unwrap();
         let filter_trace = build_env_filter(LogLevel::Trace).unwrap();
         let filter_detail = build_env_filter(LogLevel::Detail).unwrap();
 
-        println!("Debug level filter: {}", filter_debug);
-        println!("Info level filter: {}", filter_info);
-        println!("Error level filter: {}", filter_error);
-        println!("Trace level filter: {}", filter_trace);
-        println!("Detail level filter: {}", filter_detail);
-
-        // At Debug level: should only have WARN/INFO directives (more restrictive than DEBUG)
-        // OTel crates are capped at WARN to prevent recursive verbosity
-        // Should have h2=warn (OTel cap), but NOT tungstenite::protocol=debug
         let debug_str = filter_debug.to_string();
         assert!(
             debug_str.contains("h2=warn"),
@@ -345,7 +531,6 @@ mod tests {
             debug_str
         );
 
-        // At Info level, should NOT have any crate-specific directives
         let info_str = filter_info.to_string();
         assert!(
             info_str.starts_with("info"),
@@ -358,7 +543,6 @@ mod tests {
             info_str
         );
 
-        // At Error level, should NOT have any crate-specific directives
         let error_str = filter_error.to_string();
         assert!(
             error_str.starts_with("error"),
@@ -371,7 +555,6 @@ mod tests {
             error_str
         );
 
-        // At Trace level: should have ALL directives (WARN/INFO/DEBUG are more restrictive than TRACE)
         let trace_str = filter_trace.to_string();
         assert!(
             trace_str.contains("tungstenite::protocol=debug"),
@@ -394,7 +577,6 @@ mod tests {
             trace_str
         );
 
-        // At Detail level, should NOT have any crate-specific directives
         let detail_str = filter_detail.to_string();
         assert!(
             detail_str.starts_with("trace"),
@@ -410,10 +592,6 @@ mod tests {
 
     #[test]
     fn test_level_ordering() {
-        // Verify that Level ordering matches our assumptions
-        // This test ensures the filtering logic remains correct if tracing crate behavior changes
-        // Ordering: TRACE (least restrictive) < DEBUG < INFO < WARN < ERROR (most restrictive)
-
         assert!(
             is_more_restrictive(Level::ERROR, Level::WARN),
             "ERROR should be more restrictive than WARN"
@@ -431,7 +609,6 @@ mod tests {
             "DEBUG should be more restrictive than TRACE"
         );
 
-        // Verify the inverse relationships
         assert!(
             !is_more_restrictive(Level::TRACE, Level::DEBUG),
             "TRACE should NOT be more restrictive than DEBUG"

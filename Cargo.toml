@@ -1,6 +1,6 @@
 [package]
 name = "endpoint-libs"
-version = "4.2.1"
+version = "4.3.0"
 edition = "2024"
 authors = ["Veon <dveonloch@protonmail.com>"]
 description = "Launch MCP services fast: describe endpoints once in RON, and endpoint-gen generates the Rust models, docs and MCP tool schemas that this crate serves over WebSocket RPC, with roles and typed errors built in."
@@ -17,26 +17,6 @@ exclude = [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "PLAN-*.md", "TODO.
 
 [features]
 default = ["types"]
-std = [
-    "serde?/std",
-    "serde_json?/std",
-    "derive_more?/std",
-    "itertools?/use_std",
-    "futures?/std",
-    "tracing?/std",
-    "bytes?/std",
-    "chrono?/std",
-    "chrono?/now",
-    "hex?/std",
-    "parking_lot/std",
-    "nagoya?/std",
-    "nago-wss?/std",
-    "nago-rustls?/std",
-    "ps-rustcrypto?/std",
-    "dep:clap",
-    "dep:tracing-subscriber",
-    "dep:tracing-appender",
-]
 # Sans-IO codec for the length-delimited frame in `libs::frame`. `core` and `alloc`
 # only: no dependency, no runtime, no proc macro, no build script. The same bytes
 # as `framed-transport`.
@@ -45,9 +25,8 @@ frame-core = []
 # documents, a strict JSON reader, MCP dispatch, the job queue. `no_std` on ekostd: no runtime,
 # no serde, no proc macro, no build script, so it builds in the stage0 world too. Was
 # ekopathrs's `crates/door` until 16 November 2026.
-door = ["frame-core", "dep:ekostd"]
+door = ["frame-core"]
 full = [
-    "std",
     "types",
     "ws",
     "signal",
@@ -59,7 +38,6 @@ full = [
     "ws-tls12",
 ]
 types = [
-    "dep:ekostd",
     "dep:futures",
     "dep:bytes",
     "dep:serde",
@@ -71,14 +49,13 @@ types = [
     "dep:hex",
     "dep:serde_path_to_error",
 ]
-blockchain = ["std", "dep:alloy-primitives"]
+blockchain = ["dep:alloy-primitives"]
 wire-core = ["dep:futures", "dep:bytes", "dep:async-trait", "dep:serde", "dep:serde_json"]
 ws-core = [
     # Shared WS infrastructure (WsMessage, server, session, traits, etc.)
     "wire-core",
     "types",
     "signal",
-    "dep:ekostd",
     "dep:async-trait",
     # Named directly, not taken through `signal`. Every feature has to name the
     # dependencies its own code uses or it does not compile alone, and this is
@@ -146,7 +123,6 @@ ws = [
     "nago-wss/reactor",
 ]
 signal = [
-    "dep:ekostd",
     "dep:futures",
     "dep:bytes",
     # The shutdown flag is `nagoya::sync::Notify` plus an `AtomicBool`, and
@@ -163,7 +139,6 @@ signal = [
     "dep:tracing",
 ]
 scheduler = [
-    "dep:ekostd",
     "dep:futures",
     "dep:bytes",
     # `tokio-cron-scheduler` is gone with the runtime: it was an entire
@@ -173,17 +148,12 @@ scheduler = [
     "dep:nagoya",
 ]
 log_reader = [
-    "std",
     "dep:futures",
     "dep:bytes",
-    "dep:tempfile",
-    "dep:regex",
-    "dep:rev_lines",
-    # The read is blocking and nagoya has no `spawn_blocking`, so it goes to a
-    # `std::thread` and comes back over a `futures` oneshot. nagoya is named
+    # The read is blocking and nagoya has no `spawn_blocking`, so it goes to an
+    # `eko::thread` and comes back over a `futures` oneshot. nagoya is named
     # for `block_on` in the tests.
     "dep:nagoya",
-    "dep:lazy_static",
     # `log_reader.rs` parses a tracing level and an RFC 3339 timestamp out of
     # each line, so it names both crates directly. Same reason as `signal`:
     # `types` supplied them in every set anyone built.
@@ -191,20 +161,17 @@ log_reader = [
     "dep:chrono",
 ]
 error_aggregation = [
-    "std",
+    "types",
     "dep:futures",
     "dep:bytes",
     # Runtime-independent bounded ingress and a Nagoya aggregation worker.
     "dep:async-channel",
     "dep:nagoya",
-    "dep:regex",
-    "dep:lazy_static",
 ]
 log_throttling = [
-    "std",
+    "types",
     "dep:futures",
     "dep:bytes",
-    "dep:tracing-throttle",
     # The metrics reporter in `log.rs` is a spawned loop:
     # `nagoya::runtime::background().spawn` plus `nagoya::sleep`.
     "dep:nagoya",
@@ -222,57 +189,38 @@ ws-http1 = ["ws"]
 ws-tls12 = ["ws"]
 
 [dependencies]
+# The operating system substrate: files, paths, sockets, threads, time, `eko::clock`. `no_std` itself.
+ekostd = { version = "^0.2.12", default-features = false }
+# House fork of parking_lot's Mutex and RwLock (`~/code/parking_lot_lite_hack`,
+# published as `parking_lot_lite_hack`). `package` keeps `use parking_lot::...`.
+# Call sites use `RwLock` and `Mutex` only, which the fork kept.
+parking_lot = { package = "parking_lot_lite_hack", version = "^0.12.10", default-features = false }
+
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"], optional = true }
 serde_json = { version = "1.0", default-features = false, features = ["alloc", "raw_value"], optional = true }
 derive_more = { version = "2.1.1", default-features = false, features = ["display"], optional = true }
 itertools = { version = "0.12", default-features = false, features = ["use_alloc"], optional = true }
-clap = { version = "4.5", features = ["derive", "env"], optional = true }
 futures = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
-async-channel = { version = "2.5", optional = true }
+async-channel = { version = "2.5", default-features = false, features = ["portable-atomic"], optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
-tracing-subscriber = { version = "0.3", features = [
-    "env-filter",
-    "std",
-    "fmt",
-], optional = true }
 bytes = { version = "1.7", default-features = false, optional = true }
 chrono = { version = "0.4.44", default-features = false, features = ["alloc", "oldtime"], optional = true }
 hex = { version = "0.4", default-features = false, features = ["alloc"], optional = true }
-tracing-appender = { version = "0.2", optional = true }
-serde_path_to_error = { version = "0.1", optional = true }
-alloy-primitives = { version = "1.3.0", features = [
-    "std",
-], default-features = false, optional = true }
+serde_path_to_error = { version = "0.1", default-features = false, optional = true }
+alloy-primitives = { version = "1.3.0", default-features = false, optional = true }
 
 # The I/O driver is behind Nagoya's `reactor` feature.
-nagoya = { version = "^0.1.22", default-features = false, features = ["reactor"], optional = true }
-# The door's operating system: sockets, threads, time, `eko::clock`. `no_std` itself.
-ekostd = { version = "^0.2.10", default-features = false, optional = true }
+nagoya = { version = "^0.1.25", default-features = false, features = ["reactor"], optional = true }
 # The WebSocket protocol itself: the RFC 6455 handshake and framing over a
 # nagoya socket, replacing hyper on the serving side and tokio-tungstenite on
 # the connecting side. `default-features = false` is load bearing: `ws-client`
 # turns on `reactor` and `ws-client-tls` turns on `tls` and `webpki-roots`.
-nago-wss = { version = "^0.3.2", default-features = false, features = [
+nago-wss = { version = "^0.3.3", default-features = false, features = [
     "simd-utf8",
 ], optional = true }
-nago-rustls = { version = "^0.2.2", default-features = false, optional = true }
+nago-rustls = { version = "^0.2.3", default-features = false, optional = true }
 ps-rustcrypto = { version = "^0.6.2", default-features = false, features = ["alloc", "tls12", "zeroize"], optional = true }
-# House fork of parking_lot's Mutex and RwLock (`~/code/parking_lot_lite_hack`,
-# published as `parking_lot_lite_hack`). `package` keeps `use parking_lot::...`.
-# Call sites use `RwLock` and `Mutex` only, which the fork kept.
-parking_lot = { package = "parking_lot_lite_hack", version = "^0.12.9", default-features = false }
-tempfile = { version = "3.19", optional = true }
-regex = { version = "1.5", optional = true }
-rev_lines = { version = "0.3", optional = true }
-lazy_static = { version = "1.5", optional = true }
 async-trait = { version = "0.1", optional = true }
-# `async` is a default feature and it is the crate's only tokio edge
-# (`async = ["tokio"]`). The one thing named here is `TracingRateLimitLayer`,
-# which the synchronous half provides, so the default set is off and
-# `human-readable` is asked for by name.
-tracing-throttle = { version = "0.4", default-features = false, features = [
-    "human-readable",
-], optional = true }
 
 [dev-dependencies]
 # TLS policy fixtures choose ring explicitly; nago-rustls leaves the provider to its host.
@@ -280,30 +228,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rcgen = "0.14"
 tempfile = "3.19"
 futures = { version = "0.3", default-features = false, features = ["alloc", "executor", "async-await"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "std", "fmt"] }
-# `async` is this crate's only tokio edge (`async = ["tokio"]`), so the dev
-# build asks for the same synchronous half the normal one does, plus the
-# helpers the tests need.
-tracing-throttle = { version = "0.4", default-features = false, features = [
-    "human-readable",
-    "test-helpers",
-] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [[example]]
 name = "mcp-output-schema"
 path = "examples/mcp-output-schema.rs"
-required-features = ["std", "types"]
+required-features = ["types"]
 
 [[example]]
 name = "config-log-acceptance"
 path = "examples/config-log-acceptance.rs"
-required-features = ["std", "types"]
+required-features = ["types"]
 
 [[example]]
 name = "ws_echo_server"
 path = "examples/ws-echo/main.rs"
-required-features = ["std", "ws"]
+required-features = ["ws"]
 
 [package.metadata.cargo-all-features]
 
@@ -314,8 +254,7 @@ always_include_features = ["types"]
 
 # Exclude certain features from the build matrix
 denylist = [
-    "full",           # full is redundant to include in the matrix
-    "log_throttling", # log_throttling is currently not working
+    "full", # full is redundant to include in the matrix
 ]
 
 # The maximum number of features to try at once. Does not count features from `always_include_features`.

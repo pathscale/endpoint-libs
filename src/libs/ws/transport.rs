@@ -83,14 +83,70 @@
 //! is the seam, and it is what this module is for.
 
 use alloc::boxed::Box;
-#[cfg(not(any(feature = "std", feature = "std-deps")))]
+use core::pin::Pin;
+use core::task::{Context, Poll};
+
 use crate::eyre::eyre;
-#[cfg(any(feature = "std", feature = "std-deps"))]
-use eyre::eyre;
 use futures::{Sink, SinkExt, Stream, StreamExt};
 
 use super::message::WireMessage;
 use super::traits::{MessageStream, StreamError};
+
+/// `no_std` poll-based byte reader trait over [`eko::compat::io::Error`].
+pub trait PollRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<eko::compat::io::Result<usize>>;
+}
+
+/// `no_std` poll-based byte writer trait over [`eko::compat::io::Error`].
+pub trait PollWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<eko::compat::io::Result<usize>>;
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<eko::compat::io::Result<()>>;
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<eko::compat::io::Result<()>>;
+}
+
+impl<R: PollRead + Unpin + ?Sized> PollRead for &mut R {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<eko::compat::io::Result<usize>> {
+        Pin::new(&mut **self).poll_read(cx, buf)
+    }
+}
+
+impl<W: PollWrite + Unpin + ?Sized> PollWrite for &mut W {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<eko::compat::io::Result<usize>> {
+        Pin::new(&mut **self).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<eko::compat::io::Result<()>> {
+        Pin::new(&mut **self).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<eko::compat::io::Result<()>> {
+        Pin::new(&mut **self).poll_close(cx)
+    }
+}
 
 /// A bidirectional, typed message channel.
 ///

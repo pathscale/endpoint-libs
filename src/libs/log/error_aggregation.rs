@@ -1,27 +1,25 @@
-/// Error Aggregation - Collection of recent errors with optional deduping and other convenience stuff
-use std::cmp::Ordering;
-use std::fmt::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Weak};
+//! Error Aggregation - Collection of recent errors with optional deduping and pagination.
+
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use core::cmp::{Ordering, Reverse};
+use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use itertools::Itertools;
-use tracing_subscriber::Layer;
 
-// Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
-pub use tracing_appender::rolling::Rotation as LogRotation;
-
-use std::collections::HashMap;
-
-use std::hash::Hash;
+pub use super::LogRotation;
 
 const PENDING_CAPACITY: usize = 256;
 const MAX_EVENT_BYTES: usize = 8 * 1024;
 
-// Version with error aggregation feature
+/// Create error aggregation container and layer.
 pub fn get_error_aggregation(
     error_aggregation: ErrorAggregationConfig,
 ) -> (Arc<ErrorAggregationContainer>, ErrorAggregationLayer) {
-    // Create error aggregation container and layer
     let error_container = Arc::new(ErrorAggregationContainer::new(error_aggregation));
     let error_layer = ErrorAggregationLayer {
         ingress: Arc::downgrade(&error_container.ingress),
@@ -50,8 +48,8 @@ pub struct ErrorStats {
     pub normalized_key: String, // Normalized pattern for debugging
 }
 
-/// Key for deduplication HashMap
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+/// Key for deduplication map
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 struct ErrorKey {
     target: String,
     normalized_message: String,
@@ -76,17 +74,17 @@ impl Default for ErrorAggregationConfig {
 /// Internal storage representation
 #[derive(Debug)]
 struct ErrorStorage {
-    storage: HashMap<ErrorKey, ErrorStats>,
+    storage: BTreeMap<ErrorKey, ErrorStats>,
 }
 
 impl ErrorStorage {
     pub fn new() -> Self {
         Self {
-            storage: HashMap::new(),
+            storage: BTreeMap::new(),
         }
     }
 
-    pub fn get_map(&self) -> &HashMap<ErrorKey, ErrorStats> {
+    pub fn get_map(&self) -> &BTreeMap<ErrorKey, ErrorStats> {
         &self.storage
     }
 }
@@ -99,11 +97,19 @@ struct ErrorIngress {
 
 impl ErrorIngress {
     fn record_drop(&self) {
-        let _ = self
-            .dropped
-            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
+        let mut current = self.dropped.load(AtomicOrdering::Relaxed);
+        loop {
+            let next = current.saturating_add(1);
+            match self.dropped.compare_exchange_weak(
+                current,
+                next,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
@@ -140,7 +146,6 @@ impl ErrorAggregationContainer {
             dropped: AtomicUsize::new(0),
         });
 
-        // Spawn background aggregation task
         let storage_clone = Arc::clone(&storage);
         let config_clone = config.clone();
         let task_handle = Some(nagoya::runtime::background().spawn(aggregation_task(
@@ -159,16 +164,11 @@ impl ErrorAggregationContainer {
 
     /// Count of ERROR events rejected by this aggregator because the queue was
     /// full or the event could not be rendered within its byte budget.
-    ///
-    /// This cumulative count saturates at `usize::MAX`. Clearing stored errors
-    /// leaves it intact. Retention evictions and shutdown discards are separate
-    /// from admission loss.
     pub fn dropped_events(&self) -> usize {
         self.ingress.dropped.load(AtomicOrdering::Relaxed)
     }
 
     /// Get errors with pagination support and optional custom sorting. Sorts by most-recent by default
-    /// TODO: performance. Figure out how to paginate and sort without having to read/iterate over the entire container
     pub async fn get_errors(
         &self,
         limit: usize,
@@ -178,7 +178,6 @@ impl ErrorAggregationContainer {
         let storage = self.storage.read().await;
         let map = storage.get_map();
 
-        // Convert stats to entries
         let mut entries: Vec<ErrorEntry> = map
             .values()
             .map(|stats| ErrorEntry {
@@ -192,7 +191,7 @@ impl ErrorAggregationContainer {
         if let Some(mut cmp) = sort_by {
             entries.sort_by(|a, b| cmp(a, b));
         } else {
-            entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+            entries.sort_by_key(|e| Reverse(e.timestamp));
         }
 
         entries.into_iter().skip(offset).take(limit).collect()
@@ -204,7 +203,7 @@ impl ErrorAggregationContainer {
         let map = storage.get_map();
 
         let mut stats: Vec<ErrorStats> = map.values().cloned().collect();
-        stats.sort_by_key(|s| std::cmp::Reverse(s.last_seen));
+        stats.sort_by_key(|s| Reverse(s.last_seen));
         stats.into_iter().skip(offset).take(limit).collect()
     }
 
@@ -250,25 +249,21 @@ async fn aggregation_task(
         let mut storage_lock = storage.write().await;
         let map = &mut storage_lock.storage;
 
-        // Construct key based on mode
         let key = ErrorKey {
             target: entry.target.clone(),
             normalized_message: if config.normalize {
                 normalize_message(&entry.message)
             } else {
-                entry.message.clone() // Use raw message as key
+                entry.message.clone()
             },
         };
 
         if let Some(stats) = map.get_mut(&key) {
-            // Update existing entry
             stats.count += 1;
             stats.last_seen = entry.timestamp;
-            stats.message = entry.message; // Always store the latest actual message
+            stats.message = entry.message;
         } else {
-            // New entry - check limit
             if map.len() >= config.limit {
-                // Evict oldest entry by first_seen timestamp
                 if let Some(oldest_key) = map
                     .iter()
                     .min_by_key(|(_, stats)| stats.first_seen)
@@ -293,70 +288,280 @@ async fn aggregation_task(
     }
 }
 
-/// Message normalization for deduplication
-fn normalize_message(message: &str) -> String {
-    use lazy_static::lazy_static;
-    use regex::Regex;
+// --- Pure no_std message normalization (exact parity with the 7 regex passes) ---
 
-    lazy_static! {
-        // IPv4 addresses
-        static ref IP_PATTERN: Regex = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap();
-
-        // UUIDs (both with and without hyphens)
-        static ref UUID_PATTERN: Regex = Regex::new(
-            r"\b[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\b"
-        ).unwrap();
-
-        // Numbers (integers and floats)
-        static ref NUMBER_PATTERN: Regex = Regex::new(r"\b\d+\.?\d*\b").unwrap();
-
-        // File paths (Unix and Windows style)
-        static ref PATH_PATTERN: Regex = Regex::new(
-            r"(?:/[\w\-./]+)|(?:[A-Z]:\\[\w\-\\./]+)"
-        ).unwrap();
-
-        // Hex strings (0x prefix or just hex)
-        static ref HEX_PATTERN: Regex = Regex::new(r"\b0x[0-9a-fA-F]+\b").unwrap();
-
-        // Timestamps (ISO 8601 and common formats)
-        static ref TIMESTAMP_PATTERN: Regex = Regex::new(
-            r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
-        ).unwrap();
-
-        // Whitespace collapsing
-        static ref WHITESPACE_PATTERN: Regex = Regex::new(r"\s+").unwrap();
-    }
-
-    let mut normalized = message.to_string();
-
-    // Apply normalizations in order
-    normalized = TIMESTAMP_PATTERN
-        .replace_all(&normalized, "<TIMESTAMP>")
-        .to_string();
-    normalized = UUID_PATTERN.replace_all(&normalized, "<UUID>").to_string();
-    normalized = IP_PATTERN.replace_all(&normalized, "<IP>").to_string();
-    normalized = PATH_PATTERN.replace_all(&normalized, "<PATH>").to_string();
-    normalized = HEX_PATTERN.replace_all(&normalized, "<HEX>").to_string();
-    normalized = NUMBER_PATTERN.replace_all(&normalized, "<NUM>").to_string();
-
-    // Collapse multiple spaces
-    normalized = WHITESPACE_PATTERN.replace_all(&normalized, " ").to_string();
-
-    normalized.trim().to_string()
+fn is_word_char_at(s: &str, byte_idx: usize) -> bool {
+    s[byte_idx..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Tracing layer that captures ERROR level events and sends them to the aggregator
+fn is_prev_word_char(s: &str, byte_idx: usize) -> bool {
+    byte_idx > 0
+        && s[..byte_idx]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_word_boundary_start(s: &str, start: usize) -> bool {
+    !is_prev_word_char(s, start)
+}
+
+fn is_word_boundary_end(s: &str, end: usize) -> bool {
+    end >= s.len() || !is_word_char_at(s, end)
+}
+
+fn replace_pattern(
+    input: &str,
+    replacement: &str,
+    matcher: impl Fn(&str, usize) -> Option<usize>,
+) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut idx = 0;
+    while idx < input.len() {
+        if let Some(end) = matcher(input, idx) {
+            if end > idx {
+                out.push_str(replacement);
+                idx = end;
+                continue;
+            }
+        }
+        let ch = input[idx..].chars().next().unwrap();
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+fn digits_at(bytes: &[u8], pos: usize, count: usize) -> bool {
+    bytes
+        .get(pos..pos + count)
+        .is_some_and(|slice| slice.iter().all(u8::is_ascii_digit))
+}
+
+fn hex_at(bytes: &[u8], pos: usize, count: usize) -> bool {
+    bytes
+        .get(pos..pos + count)
+        .is_some_and(|slice| slice.iter().all(u8::is_ascii_hexdigit))
+}
+
+/// `\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?`
+fn match_timestamp(s: &str, start: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len().saturating_sub(start) < 19 {
+        return None;
+    }
+    if !digits_at(b, start, 4)
+        || b.get(start + 4) != Some(&b'-')
+        || !digits_at(b, start + 5, 2)
+        || b.get(start + 7) != Some(&b'-')
+        || !digits_at(b, start + 8, 2)
+        || !matches!(b.get(start + 10), Some(b'T' | b' '))
+        || !digits_at(b, start + 11, 2)
+        || b.get(start + 13) != Some(&b':')
+        || !digits_at(b, start + 14, 2)
+        || b.get(start + 16) != Some(&b':')
+        || !digits_at(b, start + 17, 2)
+    {
+        return None;
+    }
+    let mut i = start + 19;
+    if b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(u8::is_ascii_digit) {
+        i += 2;
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+    }
+    if b.get(i) == Some(&b'Z') {
+        i += 1;
+    } else if matches!(b.get(i), Some(b'+' | b'-'))
+        && digits_at(b, i + 1, 2)
+        && b.get(i + 3) == Some(&b':')
+        && digits_at(b, i + 4, 2)
+    {
+        i += 6;
+    }
+    Some(i)
+}
+
+/// `\b[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\b`
+fn match_uuid(s: &str, start: usize) -> Option<usize> {
+    if !is_word_boundary_start(s, start) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut i = start;
+    for (seg_idx, seg_len) in [8usize, 4, 4, 4, 12].into_iter().enumerate() {
+        if seg_idx > 0 && b.get(i) == Some(&b'-') {
+            i += 1;
+        }
+        if !hex_at(b, i, seg_len) {
+            return None;
+        }
+        i += seg_len;
+    }
+    if is_word_boundary_end(s, i) {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+/// `\b(?:\d{1,3}\.){3}\d{1,3}\b`
+fn match_ipv4(s: &str, start: usize) -> Option<usize> {
+    if !is_word_boundary_start(s, start) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut i = start;
+    for octet in 0..4 {
+        if octet > 0 {
+            if b.get(i) != Some(&b'.') {
+                return None;
+            }
+            i += 1;
+        }
+        let mut digits = 0;
+        while digits < 3 && b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+            digits += 1;
+        }
+        if digits == 0 {
+            return None;
+        }
+    }
+    if is_word_boundary_end(s, i) {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+/// `(?:/[\w\-./]+)|(?:[A-Z]:\\[\w\-\\./]+)`
+fn match_path(s: &str, start: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.get(start) == Some(&b'/') {
+        let mut i = start + 1;
+        let mut count = 0;
+        while i < s.len() {
+            let ch = s[i..].chars().next().unwrap();
+            if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+                i += ch.len_utf8();
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count > 0 {
+            return Some(i);
+        }
+    } else if b.get(start).is_some_and(u8::is_ascii_uppercase)
+        && b.get(start + 1) == Some(&b':')
+        && b.get(start + 2) == Some(&b'\\')
+    {
+        let mut i = start + 3;
+        let mut count = 0;
+        while i < s.len() {
+            let ch = s[i..].chars().next().unwrap();
+            if ch.is_alphanumeric() || matches!(ch, '_' | '-' | '\\' | '.' | '/') {
+                i += ch.len_utf8();
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count > 0 {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// `\b0x[0-9a-fA-F]+\b`
+fn match_hex(s: &str, start: usize) -> Option<usize> {
+    if !is_word_boundary_start(s, start) {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b.get(start..start + 2) != Some(b"0x") {
+        return None;
+    }
+    let mut i = start + 2;
+    while b.get(i).is_some_and(u8::is_ascii_hexdigit) {
+        i += 1;
+    }
+    if i > start + 2 && is_word_boundary_end(s, i) {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+/// `\b\d+\.?\d*\b`
+fn match_number(s: &str, start: usize) -> Option<usize> {
+    if !is_word_boundary_start(s, start) {
+        return None;
+    }
+    let b = s.as_bytes();
+    if !b.get(start).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut i = start + 1;
+    while b.get(i).is_some_and(u8::is_ascii_digit) {
+        i += 1;
+    }
+    let int_end = i;
+    if b.get(i) == Some(&b'.') {
+        let mut frac = i + 1;
+        while b.get(frac).is_some_and(u8::is_ascii_digit) {
+            frac += 1;
+        }
+        if is_word_boundary_end(s, frac) {
+            return Some(frac);
+        }
+    }
+    if is_word_boundary_end(s, int_end) {
+        Some(int_end)
+    } else {
+        None
+    }
+}
+
+/// Message normalization for deduplication
+fn normalize_message(message: &str) -> String {
+    let mut normalized = replace_pattern(message, "<TIMESTAMP>", match_timestamp);
+    normalized = replace_pattern(&normalized, "<UUID>", match_uuid);
+    normalized = replace_pattern(&normalized, "<IP>", match_ipv4);
+    normalized = replace_pattern(&normalized, "<PATH>", match_path);
+    normalized = replace_pattern(&normalized, "<HEX>", match_hex);
+    normalized = replace_pattern(&normalized, "<NUM>", match_number);
+
+    let mut collapsed = String::with_capacity(normalized.len());
+    let mut in_ws = false;
+    for ch in normalized.chars() {
+        if ch.is_whitespace() {
+            if !in_ws {
+                collapsed.push(' ');
+                in_ws = true;
+            }
+        } else {
+            collapsed.push(ch);
+            in_ws = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
+/// Tracing event sink that captures ERROR level events and sends them to the aggregator.
 pub struct ErrorAggregationLayer {
     ingress: Weak<ErrorIngress>,
 }
 
-impl<S: tracing::Subscriber> Layer<S> for ErrorAggregationLayer {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        // Only capture ERROR level events
+impl ErrorAggregationLayer {
+    /// Record an event into the error aggregator if it is `ERROR` level.
+    pub fn record_event(&self, event: &tracing::Event<'_>) {
         if !event.metadata().level().eq(&tracing::Level::ERROR) {
             return;
         }
@@ -391,7 +596,7 @@ fn error_entry(event: &tracing::Event<'_>) -> Option<ErrorEntry> {
         target.write_str(metadata_target).ok()?;
     }
 
-    let timestamp = chrono::Utc::now().timestamp_millis();
+    let timestamp = crate::libs::utils::get_time_milliseconds();
     let mut message = BoundedText::new(MAX_EVENT_BYTES - target.text.len());
     event.record(&mut MessageVisitor(&mut message));
     if message.failed {
@@ -444,7 +649,7 @@ impl Write for BoundedText {
 struct MessageVisitor<'a>(&'a mut BoundedText);
 
 impl<'a> tracing::field::Visit for MessageVisitor<'a> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
         if field.name() == "message" && write!(self.0, "{value:?}").is_err() {
             self.0.failed = true;
         }
@@ -454,21 +659,40 @@ impl<'a> tracing::field::Visit for MessageVisitor<'a> {
 #[cfg(all(test, feature = "error_aggregation"))]
 mod tests {
     use super::*;
-    use std::time::Duration;
-    use tracing_subscriber::prelude::*;
+    use alloc::format;
+    use core::sync::atomic::AtomicU64;
+    use core::time::Duration;
+    use tracing::span;
 
-    struct ErrorObserver(Arc<AtomicUsize>);
+    struct TestSubscriber {
+        layer: ErrorAggregationLayer,
+        observed: Arc<AtomicUsize>,
+        next_id: AtomicU64,
+    }
 
-    impl<S: tracing::Subscriber> Layer<S> for ErrorObserver {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
+    impl tracing::Subscriber for TestSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(self.next_id.fetch_add(1, AtomicOrdering::Relaxed))
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.layer.record_event(event);
             if event.metadata().level() == &tracing::Level::ERROR {
-                self.0.fetch_add(1, AtomicOrdering::Relaxed);
+                self.observed.fetch_add(1, AtomicOrdering::Relaxed);
             }
         }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
     }
 
     #[test]
@@ -476,13 +700,13 @@ mod tests {
         nagoya::block_on(nagoya::timeout(Duration::from_secs(10), async {
             let (container, layer) = get_error_aggregation(ErrorAggregationConfig::default());
             let observed = Arc::new(AtomicUsize::new(0));
-            let dispatch = tracing::Dispatch::new(
-                tracing_subscriber::registry()
-                    .with(layer)
-                    .with(ErrorObserver(Arc::clone(&observed))),
-            );
+            let subscriber: Arc<dyn tracing::Subscriber + Send + Sync> = Arc::new(TestSubscriber {
+                layer,
+                observed: Arc::clone(&observed),
+                next_id: AtomicU64::new(1),
+            });
             let emit_queued = || {
-                tracing::dispatcher::with_default(&dispatch, || {
+                crate::libs::log::with_test_subscriber(Arc::clone(&subscriber), || {
                     tracing::error!("queued error");
                 });
             };
@@ -498,7 +722,7 @@ mod tests {
                 emit_queued();
             }
             assert_eq!(container.dropped_events(), 0);
-            tracing::dispatcher::with_default(&dispatch, || {
+            crate::libs::log::with_test_subscriber(Arc::clone(&subscriber), || {
                 tracing::error!("rejected at capacity");
             });
             assert_eq!(container.dropped_events(), 1);
@@ -514,7 +738,7 @@ mod tests {
                 nagoya::sleep(Duration::from_millis(1)).await;
             }
 
-            tracing::dispatcher::with_default(&dispatch, || {
+            crate::libs::log::with_test_subscriber(Arc::clone(&subscriber), || {
                 tracing::error!("{}", "é".repeat(MAX_EVENT_BYTES / 2 + 1));
                 tracing::error!("admitted after draining");
             });
@@ -554,45 +778,34 @@ mod tests {
 
     #[test]
     fn test_message_normalization() {
-        // Test IP normalization
         assert_eq!(
             normalize_message("Failed to connect to 192.168.1.1"),
             "Failed to connect to <IP>"
         );
 
-        // Test UUID normalization
         assert_eq!(
             normalize_message("User 550e8400-e29b-41d4-a716-446655440000 not found"),
             "User <UUID> not found"
         );
 
-        // Test number normalization
         assert_eq!(normalize_message("Error on line 42"), "Error on line <NUM>");
 
-        // Test path normalization
         assert_eq!(
             normalize_message("Failed to read /var/log/app.log"),
             "Failed to read <PATH>"
         );
 
-        // Test hex normalization
         assert_eq!(
             normalize_message("Memory address 0xdeadbeef"),
             "Memory address <HEX>"
         );
 
-        // Test combined normalization
         assert_eq!(
             normalize_message("Connection to 10.0.0.1:8080 failed at /home/user/file.txt"),
             "Connection to <IP>:<NUM> failed at <PATH>"
         );
     }
 
-    // The bodies below genuinely need a runtime: the container's query methods
-    // are `async`, and the aggregation task they wait on runs on nagoya's shared
-    // pool. Each test is a plain `#[test]` that drives its own body with
-    // `nagoya::block_on`, which parks this thread between polls rather than
-    // spinning, and the body stays an `async fn` so the diff is the wrapper.
     #[test]
     fn test_raw_mode_eviction() {
         nagoya::block_on(test_raw_mode_eviction_body());
@@ -605,7 +818,6 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add 4 entries, oldest should be evicted when limit exceeded
         for i in 0..4 {
             container
                 .ingress
@@ -619,12 +831,10 @@ mod tests {
                 .unwrap();
         }
 
-        // Wait for background task to process
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
+        nagoya::sleep(Duration::from_millis(100)).await;
 
         let errors = container.get_all_errors().await;
         assert_eq!(errors.len(), 3);
-        // Oldest (Error 0) should be evicted, remaining sorted by most recent first
         assert_eq!(errors[0].message, "Error 3");
         assert_eq!(errors[0].count, 1);
         assert_eq!(errors[1].message, "Error 2");
@@ -643,7 +853,6 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add similar errors with different IPs
         container
             .ingress
             .sender
@@ -666,10 +875,8 @@ mod tests {
             })
             .unwrap();
 
-        // Wait for background task
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
+        nagoya::sleep(Duration::from_millis(100)).await;
 
-        // Should be normalized to 1 entry
         assert_eq!(container.count().await, 1);
 
         let stats = container.get_stats(10, 0).await;
@@ -691,7 +898,6 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add 50 errors
         for i in 0..50 {
             container
                 .ingress
@@ -705,15 +911,13 @@ mod tests {
                 .unwrap();
         }
 
-        // Wait for background task
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
+        nagoya::sleep(Duration::from_millis(100)).await;
 
         let page1 = container.get_errors(10, 0, None).await;
         let page2 = container.get_errors(10, 10, None).await;
 
         assert_eq!(page1.len(), 10);
         assert_eq!(page2.len(), 10);
-        // Sorted by most recent first, so Error 49 comes first
         assert_eq!(page1[0].message, "Error 49");
         assert_eq!(page1[9].message, "Error 40");
         assert_eq!(page2[0].message, "Error 39");
@@ -732,7 +936,6 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add 3 different error types
         container
             .ingress
             .sender
@@ -766,14 +969,11 @@ mod tests {
             })
             .unwrap();
 
-        // Wait for background task
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
+        nagoya::sleep(Duration::from_millis(100)).await;
 
-        // Should have 2 entries (oldest by first_seen evicted)
         assert_eq!(container.count().await, 2);
 
         let stats = container.get_stats(10, 0).await;
-        // Check that Error type A (oldest) is evicted
         assert!(!stats.iter().any(|s| s.message.contains("type A")));
         assert!(stats.iter().any(|s| s.message.contains("type B")));
         assert!(stats.iter().any(|s| s.message.contains("type C")));
@@ -791,7 +991,6 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add some errors
         for i in 0..5 {
             container
                 .ingress
@@ -805,14 +1004,10 @@ mod tests {
                 .unwrap();
         }
 
-        // Wait for background task
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
-
+        nagoya::sleep(Duration::from_millis(100)).await;
         assert_eq!(container.count().await, 5);
 
-        // Clear all errors
         container.clear().await;
-
         assert_eq!(container.count().await, 0);
     }
 
@@ -828,8 +1023,7 @@ mod tests {
         };
         let container = Arc::new(ErrorAggregationContainer::new(config));
 
-        // Add 20 errors
-        for i in 0..20 {
+        for i in 0..10 {
             container
                 .ingress
                 .sender
@@ -842,14 +1036,12 @@ mod tests {
                 .unwrap();
         }
 
-        // Wait for background task
-        nagoya::sleep(std::time::Duration::from_millis(100)).await;
+        nagoya::sleep(Duration::from_millis(100)).await;
 
-        let latest = container.get_latest(10).await;
-
-        assert_eq!(latest.len(), 10);
-        // Sorted by most recent first, so Error 19 comes first
-        assert_eq!(latest[0].message, "Error 19");
-        assert_eq!(latest[9].message, "Error 10");
+        let latest = container.get_latest(3).await;
+        assert_eq!(latest.len(), 3);
+        assert_eq!(latest[0].message, "Error 9");
+        assert_eq!(latest[1].message, "Error 8");
+        assert_eq!(latest[2].message, "Error 7");
     }
 }

@@ -36,11 +36,14 @@ pub(crate) fn try_get_conn_id() -> Option<u32> {
 }
 
 fn next_conn_id(last: &AtomicU32) -> Option<u32> {
-    last.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        current.checked_add(1)
-    })
-    .ok()
-    .and_then(|previous| previous.checked_add(1))
+    let mut current = last.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1)?;
+        match last.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(next),
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[cfg(test)]

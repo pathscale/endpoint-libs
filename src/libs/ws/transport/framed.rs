@@ -59,15 +59,16 @@
 //! it. The bytes on the wire do not change, so a bridged peer and an unbridged peer
 //! still talk to each other.
 
+use alloc::format;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use nagoya::io::{self, ErrorKind, Read as AsyncRead, Write as AsyncWrite};
+use eko::compat::io::{self, ErrorKind};
 use futures::{Sink, Stream};
 
 use super::super::message::{CloseFrame, WireMessage};
-use super::Transport;
+use super::{PollRead, PollWrite, Transport};
 
 /// Default maximum frame length: 16 MiB.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -196,7 +197,7 @@ pub fn framed_json_neutral<S>(
     io: S,
 ) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: PollRead + PollWrite + Unpin + Send + 'static,
 {
     framed_json_neutral_with_max_frame(io, DEFAULT_MAX_FRAME_BYTES)
 }
@@ -210,7 +211,7 @@ pub fn framed_json_neutral_with_max_frame<S>(
     max_frame_bytes: usize,
 ) -> impl Transport<WireMessage, WireMessage, TransportError = FramedError> + Unpin + Send
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: PollRead + PollWrite + Unpin + Send + 'static,
 {
     NeutralFramed {
         io,
@@ -258,7 +259,13 @@ impl<S> NeutralFramed<S> {
         let frame_len = u32::from_be_bytes(prefix) as usize;
 
         if frame_len > self.max_frame_bytes {
-            return Err(FramedError::Io(io::Error::new(ErrorKind::InvalidData)));
+            return Err(FramedError::Io(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "frame of {frame_len} bytes exceeds the {} byte maximum",
+                    self.max_frame_bytes
+                ),
+            )));
         }
 
         if self.read_buf.len() < LENGTH_PREFIX_BYTES + frame_len {
@@ -272,7 +279,7 @@ impl<S> NeutralFramed<S> {
 
 impl<S> Stream for NeutralFramed<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: PollRead + PollWrite + Unpin,
 {
     type Item = Result<WireMessage, FramedError>;
 
@@ -294,14 +301,14 @@ where
                     Poll::Ready(None)
                 } else {
                     Poll::Ready(Some(Err(FramedError::Io(io::Error::new(
-                        ErrorKind::UnexpectedEof,
+                        ErrorKind::Other,
+                        "unexpected EOF: the stream ended in the middle of a frame",
                     )))))
                 };
             }
 
             let mut scratch = [0u8; READ_CHUNK_BYTES];
-            let mut fut = core::pin::pin!(this.io.read(&mut scratch));
-            match core::future::Future::poll(fut.as_mut(), cx) {
+            match Pin::new(&mut this.io).poll_read(cx, &mut scratch) {
                 Poll::Ready(Ok(0)) => {
                     this.read_eof = true;
                 }
@@ -319,7 +326,7 @@ where
 
 impl<S> Sink<WireMessage> for NeutralFramed<S>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: PollRead + PollWrite + Unpin,
 {
     type Error = FramedError;
 
@@ -340,15 +347,24 @@ where
         let payload = encode(item);
 
         if payload.len() > this.max_frame_bytes {
-            return Err(FramedError::Io(io::Error::new(ErrorKind::InvalidData)));
+            return Err(FramedError::Io(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "frame of {} bytes exceeds the {} byte maximum",
+                    payload.len(),
+                    this.max_frame_bytes
+                ),
+            )));
         }
 
         this.write_buf.reserve(LENGTH_PREFIX_BYTES + payload.len());
         this.write_buf
-            .put_u32(
-                u32::try_from(payload.len())
-                    .map_err(|_| FramedError::Io(io::Error::new(ErrorKind::InvalidData)))?,
-            );
+            .put_u32(u32::try_from(payload.len()).map_err(|_| {
+                FramedError::Io(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "frame length does not fit in u32",
+                ))
+            })?);
         this.write_buf.put_slice(&payload);
         Ok(())
     }
@@ -357,10 +373,12 @@ where
         let this = self.get_mut();
 
         while !this.write_buf.is_empty() {
-            let mut fut = core::pin::pin!(this.io.write(&this.write_buf));
-            match core::future::Future::poll(fut.as_mut(), cx) {
+            match Pin::new(&mut this.io).poll_write(cx, &this.write_buf) {
                 Poll::Ready(Ok(0)) => {
-                    return Poll::Ready(Err(FramedError::Io(io::Error::new(ErrorKind::WriteZero))));
+                    return Poll::Ready(Err(FramedError::Io(io::Error::new(
+                        ErrorKind::Other,
+                        "write zero: the destination accepted no bytes",
+                    ))));
                 }
                 Poll::Ready(Ok(written)) => this.write_buf.advance(written),
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(FramedError::Io(err))),
@@ -371,12 +389,20 @@ where
         if this.write_buf.is_empty() && this.write_buf.capacity() > READ_CHUNK_BYTES * 8 {
             this.write_buf = BytesMut::new();
         }
-        let mut fut = core::pin::pin!(this.io.flush());
-        core::future::Future::poll(fut.as_mut(), cx).map_err(FramedError::Io)
+        Pin::new(&mut this.io)
+            .poll_flush(cx)
+            .map_err(FramedError::Io)
     }
 
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.poll_flush(cx)
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self.as_mut().poll_flush(cx) {
+            Poll::Ready(Ok(())) => {}
+            other => return other,
+        }
+        let this = self.get_mut();
+        Pin::new(&mut this.io)
+            .poll_close(cx)
+            .map_err(FramedError::Io)
     }
 }
 
@@ -389,16 +415,8 @@ mod tests {
     use std::task::Waker;
 
     use futures::executor::block_on;
-    use futures::{AsyncReadExt, AsyncWriteExt, SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt};
 
-    /// One direction of [`duplex`]: bytes in at one end, out at the other.
-    ///
-    /// The async cases used to run over `tokio::io::duplex`, bridged into `futures-io`
-    /// with `tokio-util`'s `compat`. Both are gone with the tokio flavour, and a test
-    /// pipe is not worth a dependency that would put a runtime back in the graph — so
-    /// it is thirty lines here instead. Unbounded on purpose: a writer never blocks,
-    /// which is what lets a test send and then read back on one thread under
-    /// `block_on` without a second task to drain it.
     #[derive(Default)]
     struct Pipe {
         bytes: VecDeque<u8>,
@@ -429,16 +447,39 @@ mod tests {
     }
 
     impl DuplexEnd {
-        /// Mark the write side finished, so the peer's reader sees EOF rather than
-        /// waiting forever. Both `poll_close` and the drop go through here: dropping
-        /// a socket closes it, and a test that hangs up without closing first is
-        /// exactly the truncation case worth exercising.
         fn hang_up(&self) {
             let mut pipe = self.outgoing.lock().expect("pipe lock");
             pipe.writer_gone = true;
             if let Some(waker) = pipe.reader_waker.take() {
                 waker.wake();
             }
+        }
+
+        async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = core::future::poll_fn(|cx| {
+                    Pin::new(&mut *self).poll_read(cx, &mut buf[filled..])
+                })
+                .await?;
+                if n == 0 {
+                    return Err(io::Error::other("unexpected eof"));
+                }
+                filled += n;
+            }
+            Ok(())
+        }
+
+        async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+            let mut written = 0;
+            while written < buf.len() {
+                let n = core::future::poll_fn(|cx| {
+                    Pin::new(&mut *self).poll_write(cx, &buf[written..])
+                })
+                .await?;
+                written += n;
+            }
+            Ok(())
         }
     }
 
@@ -448,7 +489,7 @@ mod tests {
         }
     }
 
-    impl AsyncRead for DuplexEnd {
+    impl PollRead for DuplexEnd {
         fn poll_read(
             self: Pin<&mut Self>,
             cx: &mut Context<'_>,
@@ -471,7 +512,7 @@ mod tests {
         }
     }
 
-    impl AsyncWrite for DuplexEnd {
+    impl PollWrite for DuplexEnd {
         fn poll_write(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
@@ -684,8 +725,8 @@ mod tests {
                 .expect("a result")
                 .expect_err("must refuse");
             assert!(
-                matches!(err, FramedError::Io(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
-                "expected UnexpectedEof, got {err:?}"
+                matches!(err, FramedError::Io(ref e) if e.to_string().contains("unexpected EOF")),
+                "expected unexpected EOF error, got {err:?}"
             );
         });
     }

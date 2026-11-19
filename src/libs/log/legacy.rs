@@ -4,17 +4,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 
-#[cfg(feature = "std")]
-pub use std::path::PathBuf;
-#[cfg(not(feature = "std"))]
 pub use eko::path::PathBuf;
 
-#[cfg(feature = "std")]
-pub type WorkerGuard = tracing_appender::non_blocking::WorkerGuard;
-
-#[cfg(not(feature = "std"))]
-#[derive(Debug, Clone, Default)]
-pub struct WorkerGuard;
+pub use super::WorkerGuard;
 
 pub enum LoggingGuard {
     NonBlocking(WorkerGuard, PathBuf),
@@ -47,35 +39,16 @@ impl DynLogger {
     }
 }
 
-/// actually test writing, there is no direct way to check if the application has the ownership or the write access
-// Deprecated compatibility helper: this creates and removes an empty probe file
-// to report directory writability. It never writes configuration or credentials.
+/// Probe directory writability by creating and removing an empty file.
 #[allow(clippy::disallowed_methods)]
 pub fn can_create_file_in_directory(directory: &str) -> bool {
     let test_file_path: String = format!("{directory}/test_file.txt");
-    #[cfg(feature = "std")]
-    {
-        match std::fs::File::create(&test_file_path) {
-            Ok(file) => {
-                // File created successfully; remove it after checking
-                drop(file);
-                if let Err(err) = std::fs::remove_file(&test_file_path) {
-                    eprintln!("Error deleting test file: {err}");
-                }
-                true
-            }
-            Err(_) => false,
+    match eko::file::File::create(test_file_path.as_str()) {
+        Ok(file) => {
+            drop(file);
+            eko::fs::unlink(test_file_path.as_bytes());
+            true
         }
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        match eko::file::File::create(test_file_path.as_str()) {
-            Ok(file) => {
-                drop(file);
-                eko::fs::unlink(test_file_path.as_bytes());
-                true
-            }
-            Err(_) => false,
-        }
+        Err(_) => false,
     }
 }

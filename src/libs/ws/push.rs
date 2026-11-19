@@ -1,16 +1,10 @@
 #![allow(dead_code)]
 
-#[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap as HashMap;
 use alloc::vec::Vec;
 use core::hash::Hash;
-#[cfg(not(feature = "std"))]
-use eko::thread::RwLock;
-#[cfg(feature = "std")]
 use parking_lot::RwLock;
 use serde::Serialize;
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 use tracing::error;
 
 use crate::libs::toolbox::{ArcToolbox, RequestContext};

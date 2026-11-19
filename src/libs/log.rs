@@ -1,4 +1,4 @@
-//! Tracing-based logging setup with stdout and file logging
+//! Tracing-based logging setup with stdout and rolling file logging (`no_std` over `ekostd`).
 //!
 //! # OpenTelemetry
 //! There is no OTLP export here any more. The exporter stack this crate used --
@@ -16,37 +16,25 @@
 //! `enabled: true` now warns at setup and forwards nothing.
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::collections::BTreeMap as HashMap;
+#[cfg(feature = "log_throttling")]
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::fmt::{self, Write as _};
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 
-use alloc::collections::BTreeMap as HashMap;
-#[cfg(feature = "std")]
-use std::path::PathBuf;
-#[cfg(not(feature = "std"))]
-use eko::path::PathBuf;
-
-use crate::eyre::{self, DefaultHandler, EyreHandler, bail};
-
-#[cfg(feature = "std")]
 use chrono::SecondsFormat;
-#[cfg(feature = "std")]
-use tracing::Subscriber;
-#[cfg(feature = "std")]
-use tracing_appender::rolling::RollingFileAppender;
-#[cfg(feature = "std")]
-use tracing_subscriber::{
-    EnvFilter, Layer, Registry,
-    layer::SubscriberExt,
-    registry,
-    reload::{self, Handle},
-};
+use eko::channel::{SyncSender, sync_channel};
+use eko::path::PathBuf;
+use eko::thread::JoinHandle;
+use parking_lot::RwLock;
+use tracing::subscriber::Interest;
+use tracing::{Dispatch, Event, Level, Metadata, Subscriber, level_filters::LevelFilter, span};
 
-#[cfg(feature = "log_throttling")]
-use tracing_throttle::TracingRateLimitLayer;
-
-#[cfg(feature = "error_aggregation")]
-use {crate::libs::log::error_aggregation::*, std::sync::Arc};
+use crate::eyre::{self, DefaultHandler, EyreHandler, bail, eyre};
 
 #[deprecated(
     since = "1.3.0",
@@ -57,17 +45,18 @@ pub mod legacy;
 #[cfg(feature = "error_aggregation")]
 pub mod error_aggregation;
 pub mod level_filter;
+#[cfg(feature = "log_throttling")]
+pub mod throttling;
 
+#[cfg(feature = "error_aggregation")]
+pub use error_aggregation::*;
 pub use level_filter::*;
+#[cfg(feature = "log_throttling")]
+pub use throttling::TracingRateLimitLayer;
 
-// Public re-export of Rotation so clients don't need to include tracing_appender just for log setup
-#[cfg(feature = "std")]
-pub use tracing_appender::rolling::Rotation as LogRotation;
+const NON_BLOCKING_QUEUE_CAPACITY: usize = 4096;
 
-#[cfg(feature = "std")]
-pub use tracing_appender::non_blocking::WorkerGuard;
-
-#[cfg(not(feature = "std"))]
+/// Log file rotation schedule (`no_std` replacement for `tracing_appender::rolling::Rotation`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogRotation {
     MINUTELY,
@@ -76,22 +65,211 @@ pub enum LogRotation {
     NEVER,
 }
 
-#[cfg(not(feature = "std"))]
-pub use legacy::WorkerGuard;
+impl LogRotation {
+    pub const fn minutely() -> Self {
+        Self::MINUTELY
+    }
 
-/// Configuration for OpenTelemetry integration.
-///
-/// Inert. It used to drive an OTLP exporter; that exporter is gone (see the module
-/// docs for why), and nothing reads these fields any more except the `enabled` flag,
-/// which [`setup_logging`] warns about so an operator who configured a collector is
-/// told to their face that nothing is being sent.
-///
-/// It is kept, rather than deleted with the exporter, because it lives in the `types`
-/// feature and four backends name it in a `LoggingConfig` struct literal. It carries no
-/// dependency of its own -- a bool, two `Option<String>`s and a map -- so keeping it
-/// costs nothing and removing it would be a source break with no compile-time benefit.
-/// It is also the seam to reattach an exporter to, if one ever comes back on a
-/// tokio-free transport.
+    pub const fn hourly() -> Self {
+        Self::HOURLY
+    }
+
+    pub const fn daily() -> Self {
+        Self::DAILY
+    }
+
+    pub const fn never() -> Self {
+        Self::NEVER
+    }
+
+    fn period_key(&self, epoch_secs: i64) -> Option<String> {
+        let dt = chrono::DateTime::from_timestamp(epoch_secs, 0)?;
+        match self {
+            Self::MINUTELY => Some(dt.format("%Y-%m-%d-%H-%M").to_string()),
+            Self::HOURLY => Some(dt.format("%Y-%m-%d-%H").to_string()),
+            Self::DAILY => Some(dt.format("%Y-%m-%d").to_string()),
+            Self::NEVER => None,
+        }
+    }
+}
+
+enum WorkerCommand {
+    Write(String),
+    Shutdown,
+}
+
+/// Guard keeping a background non-blocking log writer alive; flushes queued records on drop.
+pub struct WorkerGuard {
+    sender: Option<SyncSender<WorkerCommand>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl fmt::Debug for WorkerGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkerGuard").finish_non_exhaustive()
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(WorkerCommand::Shutdown);
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct NonBlockingWriter {
+    sender: SyncSender<WorkerCommand>,
+}
+
+impl NonBlockingWriter {
+    fn send_line(&self, line: String) {
+        let _ = self.sender.send(WorkerCommand::Write(line));
+    }
+}
+
+fn spawn_non_blocking_stdout() -> (NonBlockingWriter, WorkerGuard) {
+    let (tx, rx) = sync_channel::<WorkerCommand>(NON_BLOCKING_QUEUE_CAPACITY);
+    let worker_tx = tx.clone();
+    let join = eko::thread::Builder::new()
+        .name("elibs-stdout-log")
+        .spawn(move || {
+            let mut stdout = eko::file::stdout();
+            while let Ok(cmd) = rx.recv() {
+                match cmd {
+                    WorkerCommand::Write(line) => {
+                        let _ = stdout.write_all(line.as_bytes());
+                    }
+                    WorkerCommand::Shutdown => break,
+                }
+            }
+            while let Some(WorkerCommand::Write(line)) = rx.try_recv() {
+                let _ = stdout.write_all(line.as_bytes());
+            }
+            let _ = stdout.flush();
+        })
+        .ok();
+
+    (
+        NonBlockingWriter { sender: worker_tx },
+        WorkerGuard {
+            sender: Some(tx),
+            join,
+        },
+    )
+}
+
+struct RollingFileWriter {
+    directory: PathBuf,
+    prefix: String,
+    suffix: &'static str,
+    rotation: LogRotation,
+    current_period: Option<String>,
+    file: eko::file::File,
+}
+
+impl RollingFileWriter {
+    fn new(
+        directory: PathBuf,
+        prefix: String,
+        suffix: &'static str,
+        rotation: LogRotation,
+    ) -> eyre::Result<Self> {
+        eko::fs::create_dir_all(&directory)
+            .map_err(|err| eyre!("failed to create log directory {}: {err}", directory.display()))?;
+        let now_secs = eko::time::epoch_secs();
+        let period = rotation.period_key(now_secs);
+        let file_path = Self::compose_path(&directory, &prefix, period.as_deref(), suffix);
+        let file = eko::file::File::append(&file_path)
+            .map_err(|err| eyre!("failed to open log file {}: {err}", file_path.display()))?;
+        Ok(Self {
+            directory,
+            prefix,
+            suffix,
+            rotation,
+            current_period: period,
+            file,
+        })
+    }
+
+    fn compose_path(
+        directory: &PathBuf,
+        prefix: &str,
+        period: Option<&str>,
+        suffix: &str,
+    ) -> PathBuf {
+        let mut filename = String::new();
+        if !prefix.is_empty() {
+            filename.push_str(prefix);
+        }
+        if let Some(period) = period {
+            if !filename.is_empty() {
+                filename.push('.');
+            }
+            filename.push_str(period);
+        }
+        if !suffix.is_empty() {
+            if !filename.is_empty() {
+                filename.push('.');
+            }
+            filename.push_str(suffix);
+        }
+        directory.join(filename.as_str())
+    }
+
+    fn write_record(&mut self, line: &str) {
+        if self.rotation != LogRotation::NEVER {
+            let next_period = self.rotation.period_key(eko::time::epoch_secs());
+            if next_period != self.current_period {
+                let next_path = Self::compose_path(
+                    &self.directory,
+                    &self.prefix,
+                    next_period.as_deref(),
+                    self.suffix,
+                );
+                if let Ok(new_file) = eko::file::File::append(&next_path) {
+                    self.file = new_file;
+                    self.current_period = next_period;
+                }
+            }
+        }
+        let _ = self.file.write_all(line.as_bytes());
+    }
+}
+
+fn spawn_non_blocking_file(mut appender: RollingFileWriter) -> (NonBlockingWriter, WorkerGuard) {
+    let (tx, rx) = sync_channel::<WorkerCommand>(NON_BLOCKING_QUEUE_CAPACITY);
+    let worker_tx = tx.clone();
+    let join = eko::thread::Builder::new()
+        .name("elibs-file-log")
+        .spawn(move || {
+            while let Ok(cmd) = rx.recv() {
+                match cmd {
+                    WorkerCommand::Write(line) => appender.write_record(&line),
+                    WorkerCommand::Shutdown => break,
+                }
+            }
+            while let Some(WorkerCommand::Write(line)) = rx.try_recv() {
+                appender.write_record(&line);
+            }
+            let _ = appender.file.sync_all();
+        })
+        .ok();
+
+    (
+        NonBlockingWriter { sender: worker_tx },
+        WorkerGuard {
+            sender: Some(tx),
+            join,
+        },
+    )
+}
+
+/// Configuration for OpenTelemetry integration (inert compatibility struct).
 #[derive(Debug, Clone, Default)]
 pub struct OtelConfig {
     /// Whether OTel log/trace forwarding was requested. Requesting it now only warns.
@@ -134,22 +312,9 @@ pub struct LogThrottlingConfig {
     pub summary_emission_interval: Option<Duration>,
     /// How often to throttling metrics as INFO events, set to None to disable entirely
     pub metrics_emission_interval: Option<Duration>,
-    /// Fields to exclude from uniqueness checks, set to None to disable entirely.<br><br>
-    /// Example:
-    /// ```ignore
-    /// tracing::info!(user_id=1, "User joined");
-    /// tracing::info!(user_id=2, "User joined");  
-    ///```
-    /// If the `user_id` field is excluded, these will be treated as exactly the same log, so multiple users join messages could be throttled
+    /// Fields to exclude from uniqueness checks, set to None to disable entirely.
     pub excluded_fields: Option<Vec<String>>,
-    /// Targets to exempt from any throttling. This allows the caller to ensure that any high priority logs are always displayed.<br><br>
-    /// Example:
-    /// ```ignore
-    /// let exemptions = Some(vec!["nothrottle"]); // Assuming this is passed during config stage
-    ///
-    /// tracing::error!(target: "nothrottle", user_id=1, "User joined"); // Will never be throttled
-    /// tracing::error!(user_id=2, "User joined");  // Can possibly be throttled
-    /// ```
+    /// Targets to exempt from any throttling.
     pub exemptions: Option<Vec<String>>,
 }
 
@@ -163,155 +328,302 @@ pub struct LogSetupReturn {
     pub log_throttling_handle: TracingRateLimitLayer,
 }
 
-/// Internal struct to hold the result of building the logging subscriber
-#[cfg(feature = "std")]
+/// Handle for reloading the global [`EnvFilter`] at runtime.
+pub type GlobalLogReloadHandle = Arc<RwLock<EnvFilter>>;
+
+/// Handle for reloading the global log level at runtime.
+#[derive(Clone)]
+pub struct LogReloadHandle(GlobalLogReloadHandle);
+
+impl fmt::Debug for LogReloadHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LogReloadHandle")
+            .field("inner", &"Arc<RwLock<EnvFilter>>")
+            .finish()
+    }
+}
+
+impl LogReloadHandle {
+    /// Sets a new global log level that applies to all sinks (stdout, file, etc.).
+    pub fn set_log_level(&self, level: LogLevel) -> eyre::Result<()> {
+        match build_env_filter(level) {
+            Ok(filter) => {
+                *self.0.write() = filter;
+                tracing::callsite::rebuild_interest_cache();
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "Error building new filter from given log level. Ignoring reload attempt"
+                );
+                bail!(
+                    "Error building new filter from given log level: {error}. Ignoring reload attempt"
+                )
+            }
+        }
+    }
+}
+
+struct EventFieldFormatter {
+    message: String,
+    fields: String,
+}
+
+impl EventFieldFormatter {
+    fn new() -> Self {
+        Self {
+            message: String::new(),
+            fields: String::new(),
+        }
+    }
+}
+
+impl tracing::field::Visit for EventFieldFormatter {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message.push_str(value);
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            let _ = write!(self.fields, "{}={:?}", field.name(), value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self.message, "{value:?}");
+        } else {
+            if !self.fields.is_empty() {
+                self.fields.push(' ');
+            }
+            let _ = write!(self.fields, "{}={value:?}", field.name());
+        }
+    }
+}
+
+fn format_timestamp_rfc3339() -> String {
+    let micros = crate::libs::utils::get_time_micros();
+    let secs = micros.div_euclid(1_000_000);
+    let sub_micros = (micros.rem_euclid(1_000_000) as u32) * 1_000;
+    if let Some(dt) = chrono::DateTime::from_timestamp(secs, sub_micros) {
+        dt.to_rfc3339_opts(SecondsFormat::Micros, true)
+    } else {
+        String::from("1970-01-01T00:00:00.000000Z")
+    }
+}
+
+fn format_event_line(event: &Event<'_>) -> String {
+    let meta = event.metadata();
+    let ts = format_timestamp_rfc3339();
+    let level_str = match *meta.level() {
+        Level::ERROR => "ERROR",
+        Level::WARN => " WARN",
+        Level::INFO => " INFO",
+        Level::DEBUG => "DEBUG",
+        Level::TRACE => "TRACE",
+    };
+    let tid = eko::thread::current_id().as_u64();
+    let target = meta.target();
+    let line_num = meta.line().unwrap_or(0);
+
+    let mut visitor = EventFieldFormatter::new();
+    event.record(&mut visitor);
+
+    let mut out = String::with_capacity(128 + visitor.message.len() + visitor.fields.len());
+    let _ = write!(out, "{ts} {level_str} thread-{tid:x} {target}: {line_num}:");
+    if !visitor.message.is_empty() {
+        out.push(' ');
+        out.push_str(&visitor.message);
+    }
+    if !visitor.fields.is_empty() {
+        out.push(' ');
+        out.push_str(&visitor.fields);
+    }
+    out.push('\n');
+    out
+}
+
+struct FileSink {
+    writer: NonBlockingWriter,
+    #[cfg(feature = "log_throttling")]
+    throttler: TracingRateLimitLayer,
+}
+
+struct EkoLoggingSubscriber {
+    filter: GlobalLogReloadHandle,
+    stdout: NonBlockingWriter,
+    file: Option<FileSink>,
+    #[cfg(feature = "error_aggregation")]
+    error_layer: ErrorAggregationLayer,
+    next_span_id: AtomicU64,
+}
+
+impl Subscriber for EkoLoggingSubscriber {
+    fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+        // Runtime reload via `LogReloadHandle` can change target filtering at any time.
+        Interest::sometimes()
+    }
+
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        self.filter.read().enabled(metadata)
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(self.filter.read().max_level_hint())
+    }
+
+    fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+        span::Id::from_u64(self.next_span_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        if !self.enabled(event.metadata()) {
+            return;
+        }
+
+        let formatted = format_event_line(event);
+        self.stdout.send_line(formatted.clone());
+
+        if let Some(file_sink) = &self.file {
+            #[cfg(feature = "log_throttling")]
+            {
+                let (allowed, summaries) = file_sink.throttler.check_event(event);
+                for summary in summaries {
+                    let ts = format_timestamp_rfc3339();
+                    let tid = eko::thread::current_id().as_u64();
+                    file_sink.writer.send_line(format!(
+                        "{ts}  WARN thread-{tid:x} tracing_throttle: 0: {summary}\n"
+                    ));
+                }
+                if allowed {
+                    file_sink.writer.send_line(formatted);
+                }
+            }
+            #[cfg(not(feature = "log_throttling"))]
+            {
+                file_sink.writer.send_line(formatted);
+            }
+        }
+
+        #[cfg(feature = "error_aggregation")]
+        self.error_layer.record_event(event);
+    }
+
+    fn enter(&self, _span: &span::Id) {}
+
+    fn exit(&self, _span: &span::Id) {}
+}
+
 struct LoggingSubscriberParts {
-    subscriber: Box<dyn Subscriber + Send + Sync + 'static>,
+    subscriber: Arc<dyn Subscriber + Send + Sync + 'static>,
     reload_handle: LogReloadHandle,
-    log_guards: (WorkerGuard, Option<WorkerGuard>), // Stdout and optional file log guards
+    log_guards: (WorkerGuard, Option<WorkerGuard>),
+    otel_warning_endpoint: Option<String>,
     #[cfg(feature = "error_aggregation")]
     errors_container: Arc<ErrorAggregationContainer>,
     #[cfg(feature = "log_throttling")]
     log_throttling_handle: TracingRateLimitLayer,
 }
 
-/// Internal function that builds the logging subscriber without initializing it.
-/// Returns the subscriber along with reload handles and guards that need to be retained.
-#[cfg(feature = "std")]
 fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscriberParts> {
-    // Build global env filter and wrap in reload::Layer for runtime reloading
     let global_env_filter = build_env_filter(config.level)?;
-    let (reloadable_global_filter, global_reload_handle) = reload::Layer::new(global_env_filter);
+    let filter_lock = Arc::new(RwLock::new(global_env_filter));
+    let reload_handle = LogReloadHandle(Arc::clone(&filter_lock));
 
-    let (non_blocking_stdout, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_thread_names(true)
-        .with_line_number(true)
-        .with_writer(non_blocking_stdout);
+    let (stdout_writer, stdout_guard) = spawn_non_blocking_stdout();
 
     #[cfg(feature = "error_aggregation")]
-    let error_aggregation_config = config.error_aggregation.clone();
+    let (errors_container, error_layer) = get_error_aggregation(config.error_aggregation.clone());
 
     #[cfg(feature = "log_throttling")]
-    let throttling_config = config.throttling_config.clone().unwrap_or_default();
+    let log_throttling_handle = {
+        let throttling_config = config.throttling_config.clone().unwrap_or_default();
+        let mut exemptions = alloc::vec!["tracing_throttle::infrastructure::layer".to_string()];
+        exemptions.extend(throttling_config.exemptions.unwrap_or_default());
 
-    #[cfg(feature = "log_throttling")]
-    let mut exemptions = vec!["tracing_throttle::infrastructure::layer".to_string()]; // It seems like it tries to throttle its own logs
-    #[cfg(feature = "log_throttling")]
-    exemptions.extend(throttling_config.exemptions.unwrap_or_default());
+        let layer = TracingRateLimitLayer::builder()
+            .with_excluded_fields(throttling_config.excluded_fields.unwrap_or_default())
+            .with_exempt_targets(exemptions)
+            .with_active_emission(throttling_config.summary_emission_interval.is_some())
+            .with_summary_interval(
+                throttling_config
+                    .summary_emission_interval
+                    .unwrap_or(Duration::from_secs(5 * 60)),
+            )
+            .build()?;
 
-    #[cfg(feature = "log_throttling")]
-    let rate_limit_filter = TracingRateLimitLayer::builder()
-        .with_excluded_fields(throttling_config.excluded_fields.unwrap_or_default())
-        .with_exempt_targets(exemptions)
-        .with_active_emission(throttling_config.summary_emission_interval.is_some())
-        .with_summary_interval(
-            throttling_config
-                .summary_emission_interval
-                .unwrap_or(Duration::from_secs(5 * 60)),
-        )
-        .build()
-        .expect("Error building tracing rate limit layer");
+        if let Some(metrics_duration) = throttling_config.metrics_emission_interval {
+            let metrics = Arc::clone(layer.metrics());
+            nagoya::runtime::background().spawn(async move {
+                loop {
+                    nagoya::sleep(metrics_duration).await;
+                    let snapshot = metrics.snapshot();
+                    tracing::info!(
+                        events_allowed = snapshot.events_allowed,
+                        events_suppressed = snapshot.events_suppressed,
+                        suppression_rate = format!("{:.1}%", snapshot.suppression_rate() * 100.0),
+                        "Rate limiting metrics"
+                    );
+                }
+            });
+        }
 
-    #[cfg(feature = "log_throttling")]
-    if let Some(metrics_duration) = throttling_config.metrics_emission_interval {
-        let metrics = rate_limit_filter.metrics().clone();
+        layer
+    };
 
-        // Periodic metrics reporting. Detached, as before: nothing collects this
-        // handle, and dropping a nagoya `JoinHandle` detaches rather than cancels.
-        nagoya::runtime::background().spawn(async move {
-            loop {
-                nagoya::sleep(metrics_duration).await;
-
-                let snapshot = metrics.snapshot();
-                tracing::info!(
-                    events_allowed = snapshot.events_allowed,
-                    events_suppressed = snapshot.events_suppressed,
-                    suppression_rate = format!("{:.1}%", snapshot.suppression_rate() * 100.0),
-                    "Rate limiting metrics"
-                );
-            }
-        });
-    }
-
-    #[cfg(feature = "log_throttling")]
-    let log_throttling_handle = rate_limit_filter.clone();
-
-    let (file_layer, file_guard) = match config.file_config {
+    let (file_sink, file_guard) = match config.file_config {
         None => (None, None),
         Some(file_config) => {
-            let appender = RollingFileAppender::builder()
-                .rotation(file_config.rotation.unwrap_or(LogRotation::NEVER))
-                .filename_prefix(file_config.file_prefix.unwrap_or_else(|| {
-                    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
-                })) // Default filename prefix is a timestamp. RollingFileAppender requires a prefix if we are using a simple suffix like ".log"
-                .filename_suffix("log")
-                .build(file_config.path)?;
-
-            let (non_blocking_appender, guard) = tracing_appender::non_blocking(appender);
-
-            let base_layer = tracing_subscriber::fmt::layer()
-                .with_thread_names(true)
-                .with_line_number(true)
-                .with_ansi(false)
-                .with_writer(non_blocking_appender);
-
-            #[cfg(feature = "log_throttling")]
-            let file_layer = base_layer.with_filter(rate_limit_filter);
-
-            #[cfg(not(feature = "log_throttling"))]
-            let file_layer = base_layer;
-
-            (Some(file_layer), Some(guard))
+            let default_prefix = || {
+                let secs = eko::time::epoch_secs();
+                chrono::DateTime::from_timestamp(secs, 0)
+                    .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+                    .unwrap_or_else(|| secs.to_string())
+            };
+            let prefix = file_config.file_prefix.unwrap_or_else(default_prefix);
+            let rotation = file_config.rotation.unwrap_or(LogRotation::NEVER);
+            let appender = RollingFileWriter::new(file_config.path, prefix, "log", rotation)?;
+            let (writer, guard) = spawn_non_blocking_file(appender);
+            let sink = FileSink {
+                writer,
+                #[cfg(feature = "log_throttling")]
+                throttler: log_throttling_handle.clone(),
+            };
+            (Some(sink), Some(guard))
         }
     };
 
-    let reload_handle = LogReloadHandle(global_reload_handle);
-
-    // There is no exporter to build any more, and no feature flag that brings one back.
-    // An operator who set `enabled: true` pointed this process at a collector and is
-    // entitled to find out that nothing arrives there, so the flag warns rather than
-    // being ignored. The warning fires once per `setup_logging` call, which is once per
-    // process in every consumer, and it names the config field so the fix is obvious.
-    if config.otel_config.enabled {
-        tracing::warn!(
-            target: "otel::setup",
-            endpoint = config.otel_config.endpoint.as_deref().unwrap_or("unset"),
-            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
-             no traces or logs will be forwarded to a collector"
-        );
-    }
-
-    // --- Subscriber Composition ---
-
-    // Start with Registry and Global Filter
-    let subscriber = registry().with(reloadable_global_filter);
-
-    // Compose the "Sink" layers (Stdout + File)
-    let sinks = stdout_layer.and_then(file_layer);
-
-    // Add Error Aggregation if enabled
-    #[cfg(feature = "error_aggregation")]
-    let (sinks, errors_container) = {
-        use crate::libs::log::error_aggregation::get_error_aggregation;
-        let (container, error_layer) = get_error_aggregation(error_aggregation_config);
-        (sinks.and_then(error_layer), container)
+    let otel_warning_endpoint = if config.otel_config.enabled {
+        Some(
+            config
+                .otel_config
+                .endpoint
+                .unwrap_or_else(|| String::from("unset")),
+        )
+    } else {
+        None
     };
 
-    // Combine Subscriber with Sinks
-    let subscriber = subscriber.with(sinks);
-
-    // The box is still here with no OTel arm to choose against: `setup_logging` and
-    // `setup_logging_test` install the same concrete type, and the erasure is what lets
-    // the feature-gated layers above change the subscriber's type without changing this
-    // function's signature.
-    let subscriber: Box<dyn Subscriber + Send + Sync + 'static> = Box::new(subscriber);
+    let subscriber: Arc<dyn Subscriber + Send + Sync + 'static> = Arc::new(EkoLoggingSubscriber {
+        filter: filter_lock,
+        stdout: stdout_writer,
+        file: file_sink,
+        #[cfg(feature = "error_aggregation")]
+        error_layer,
+        next_span_id: AtomicU64::new(1),
+    });
 
     Ok(LoggingSubscriberParts {
         subscriber,
         reload_handle,
         log_guards: (stdout_guard, file_guard),
+        otel_warning_endpoint,
         #[cfg(feature = "error_aggregation")]
         errors_container,
         #[cfg(feature = "log_throttling")]
@@ -319,31 +631,77 @@ fn build_logging_subscriber(config: LoggingConfig) -> eyre::Result<LoggingSubscr
     })
 }
 
-/// Sets up a fully filtered tracing logging system with a global env filter applied at the registry level.
-/// This ensures all layers (stdout, file, etc.) only receive events that pass the global filter.
-///
-/// By default with the minimal config a stdout layer is setup with a custom env filter that filters according to the specified log level,
-/// as well as according to a list of hardcoded crates. See [build_env_filter] for hardcoded crate log filtering.
-/// Optionally, file logging can be configured with [FileLoggingConfig], which minimally will create a timestamp prefixed log file in the given
-/// path that does not rotate (one log file per program execution)
-///
-/// Extra configuration for file logging is:
-/// - Log file rotation. See [LogRotation] for possible options
-///
-/// Returns [LogSetupReturn], which is a composite struct containing objects that need to be retained by the client such as:
-/// - [LogReloadHandle], for setting a new global log level during runtime
-/// - [WorkerGuard], so that the non-blocking file writer can continue writing. This cannot be dropped and needs to be kept alive for the duration of the program execution
-/// - [ErrorAggregationContainer], if the [error_aggregation] feature is enabled. This object allows recent errors to be queried from the logging framework
-///
-/// `otel_config.enabled` is accepted and warned about; there is no OTel guard to return
-/// any more because there is no exporter to flush.
-#[cfg(feature = "std")]
-pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
-    use tracing_subscriber::util::SubscriberInitExt;
+struct SharedSubscriber(Arc<dyn Subscriber + Send + Sync + 'static>);
 
+impl Subscriber for SharedSubscriber {
+    fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
+        self.0.register_callsite(metadata)
+    }
+
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        self.0.enabled(metadata)
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        self.0.max_level_hint()
+    }
+
+    fn new_span(&self, span: &span::Attributes<'_>) -> span::Id {
+        self.0.new_span(span)
+    }
+
+    fn record(&self, span: &span::Id, values: &span::Record<'_>) {
+        self.0.record(span, values);
+    }
+
+    fn record_follows_from(&self, span: &span::Id, follows: &span::Id) {
+        self.0.record_follows_from(span, follows);
+    }
+
+    fn event_enabled(&self, event: &Event<'_>) -> bool {
+        self.0.event_enabled(event)
+    }
+
+    fn event(&self, event: &Event<'_>) {
+        self.0.event(event);
+    }
+
+    fn enter(&self, span: &span::Id) {
+        self.0.enter(span);
+    }
+
+    fn exit(&self, span: &span::Id) {
+        self.0.exit(span);
+    }
+
+    fn clone_span(&self, id: &span::Id) -> span::Id {
+        self.0.clone_span(id)
+    }
+
+    fn try_close(&self, id: span::Id) -> bool {
+        self.0.try_close(id)
+    }
+}
+
+/// Sets up a filtered `tracing` logging subscriber writing formatted lines to non-blocking
+/// stdout and optional rolling log files, with live global level reloading via [`LogReloadHandle`].
+pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     let parts = build_logging_subscriber(config)?;
 
-    parts.subscriber.init();
+    tracing::dispatcher::set_global_default(Dispatch::new(SharedSubscriber(Arc::clone(
+        &parts.subscriber,
+    ))))
+    .map_err(|err| eyre!("failed to install global tracing subscriber: {err}"))?;
+    tracing::callsite::rebuild_interest_cache();
+
+    if let Some(endpoint) = parts.otel_warning_endpoint.as_deref() {
+        tracing::warn!(
+            target: "otel::setup",
+            endpoint = endpoint,
+            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
+             no traces or logs will be forwarded to a collector"
+        );
+    }
 
     Ok(LogSetupReturn {
         reload_handle: parts.reload_handle,
@@ -355,80 +713,8 @@ pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
     })
 }
 
-#[cfg(not(feature = "std"))]
-pub fn setup_logging(config: LoggingConfig) -> eyre::Result<LogSetupReturn> {
-    let _ = &config;
-    if config.otel_config.enabled {
-        tracing::warn!(
-            target: "otel::setup",
-            endpoint = config.otel_config.endpoint.as_deref().unwrap_or("unset"),
-            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
-             no traces or logs will be forwarded to a collector"
-        );
-    }
-    Ok(LogSetupReturn {
-        reload_handle: LogReloadHandle(()),
-        log_guards: (WorkerGuard, None),
-    })
-}
-
-/// Handle for reloading the global EnvFilter at runtime
-#[cfg(feature = "std")]
-pub type GlobalLogReloadHandle = Handle<EnvFilter, Registry>;
-#[cfg(not(feature = "std"))]
-pub type GlobalLogReloadHandle = ();
-
-/// Handle for reloading the global log level at runtime
-#[derive(Clone)]
-pub struct LogReloadHandle(GlobalLogReloadHandle);
-
-impl core::fmt::Debug for LogReloadHandle {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("LogReloadHandle")
-            .field("inner", &"Handle<EnvFilter, Registry>")
-            .finish()
-    }
-}
-
-impl LogReloadHandle {
-    /// Sets a new global log level that applies to all layers (stdout, file, etc.)
-    /// Errors will be logged by this function and can be safely ignored, but are returned for display purposes
-    pub fn set_log_level(&self, level: LogLevel) -> eyre::Result<()> {
-        #[cfg(feature = "std")]
-        {
-            match build_env_filter(level) {
-                Ok(filter) => match self.0.modify(|env_filter| *env_filter = filter) {
-                    Ok(_) => Ok(()),
-                    Err(error) => {
-                        tracing::error!(
-                            ?error,
-                            "Error setting new global log filter. Ignoring reload attempt"
-                        );
-                        bail!("Error setting new global log filter: {error}. Ignoring reload attempt")
-                    }
-                },
-                Err(error) => {
-                    tracing::error!(
-                        ?error,
-                        "Error building new filter from given log level. Ignoring reload attempt"
-                    );
-                    bail!(
-                        "Error building new filter from given log level: {error}. Ignoring reload attempt"
-                    )
-                }
-            }
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            let _ = level;
-            Ok(())
-        }
-    }
-}
-
-/// This is used to wrap the default EyreHandler but simply expose the [CustomEyreHandler::location] field via [CustomEyreHandler::get_location]
-/// This allows the code in [crate::libs::ws::internal_error_to_resp] to access the original caller location which is then stored in a [tracing::Field]
-/// for access within [error_aggregation::ErrorAggregationLayer::on_event] (see trait impl) so that the original caller can be recorded within the displayed target
+/// Used to wrap the default `EyreHandler` and expose [`CustomEyreHandler::location`] so
+/// `internal_error_to_resp` can forward caller location to error aggregation.
 pub struct CustomEyreHandler {
     default_handler: Box<dyn EyreHandler>,
     location: Option<&'static core::panic::Location<'static>>,
@@ -453,44 +739,158 @@ impl EyreHandler for CustomEyreHandler {
     fn display(
         &self,
         error: &(dyn core::error::Error + 'static),
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         self.default_handler.display(error, f)
     }
 
     fn debug(
         &self,
         error: &(dyn core::error::Error + 'static),
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
         self.default_handler.debug(error, f)
     }
 
     fn track_caller(&mut self, location: &'static core::panic::Location<'static>) {
-        self.location = Some(location); // Store the location for access later
+        self.location = Some(location);
         self.default_handler.track_caller(location);
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+// --- Test-only thread-local subscriber routing over pure no_std `tracing` ---
+
+#[cfg(test)]
+struct TestMuxSubscriber {
+    fallback: RwLock<Option<Arc<dyn Subscriber + Send + Sync + 'static>>>,
+}
+
+#[cfg(test)]
+eko::thread_local! {
+    static THREAD_TEST_SUBSCRIBER: core::cell::RefCell<Option<Arc<dyn Subscriber + Send + Sync + 'static>>> =
+        core::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+static TEST_MUX: eko::thread::OnceLock<&'static TestMuxSubscriber> = eko::thread::OnceLock::new();
+
+#[cfg(test)]
+fn ensure_test_mux() -> &'static TestMuxSubscriber {
+    *TEST_MUX.get_or_init(|| {
+        let mux = Box::leak(Box::new(TestMuxSubscriber {
+            fallback: RwLock::new(None),
+        }));
+        struct MuxProxy(&'static TestMuxSubscriber);
+        impl Subscriber for MuxProxy {
+            fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+                Interest::sometimes()
+            }
+            fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+                self.0.with_active(|sub| sub.enabled(metadata)).unwrap_or(false)
+            }
+            fn max_level_hint(&self) -> Option<LevelFilter> {
+                Some(LevelFilter::TRACE)
+            }
+            fn new_span(&self, span: &span::Attributes<'_>) -> span::Id {
+                self.0
+                    .with_active(|sub| sub.new_span(span))
+                    .unwrap_or_else(|| span::Id::from_u64(1))
+            }
+            fn record(&self, span: &span::Id, values: &span::Record<'_>) {
+                let _ = self.0.with_active(|sub| sub.record(span, values));
+            }
+            fn record_follows_from(&self, span: &span::Id, follows: &span::Id) {
+                let _ = self.0.with_active(|sub| sub.record_follows_from(span, follows));
+            }
+            fn event(&self, event: &Event<'_>) {
+                let _ = self.0.with_active(|sub| sub.event(event));
+            }
+            fn enter(&self, span: &span::Id) {
+                let _ = self.0.with_active(|sub| sub.enter(span));
+            }
+            fn exit(&self, span: &span::Id) {
+                let _ = self.0.with_active(|sub| sub.exit(span));
+            }
+        }
+        let _ = tracing::dispatcher::set_global_default(Dispatch::new(MuxProxy(mux)));
+        tracing::callsite::rebuild_interest_cache();
+        mux
+    })
+}
+
+#[cfg(test)]
+impl TestMuxSubscriber {
+    fn with_active<R>(
+        &self,
+        f: impl FnOnce(&dyn Subscriber) -> R,
+    ) -> Option<R> {
+        let tls_sub = THREAD_TEST_SUBSCRIBER.with_borrow(|slot| slot.clone());
+        if let Some(sub) = tls_sub {
+            return Some(f(&*sub));
+        }
+        let guard = self.fallback.read();
+        guard.as_ref().map(|sub| f(&**sub))
+    }
+}
+
+#[cfg(test)]
+pub struct DefaultSubscriberGuard {
+    prev: Option<Arc<dyn Subscriber + Send + Sync + 'static>>,
+}
+
+#[cfg(test)]
+impl Drop for DefaultSubscriberGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        THREAD_TEST_SUBSCRIBER.set(prev);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_subscriber(
+    subscriber: Arc<dyn Subscriber + Send + Sync + 'static>,
+) -> DefaultSubscriberGuard {
+    let _ = ensure_test_mux();
+    let prev = THREAD_TEST_SUBSCRIBER.replace(Some(subscriber));
+    tracing::callsite::rebuild_interest_cache();
+    DefaultSubscriberGuard { prev }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn with_test_subscriber<R>(
+    subscriber: Arc<dyn Subscriber + Send + Sync + 'static>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _guard = set_test_subscriber(subscriber);
+    f()
+}
+
+#[cfg(test)]
 pub struct LogSetupReturnTest {
-    _guard: tracing::subscriber::DefaultGuard,
-    reload_handle: LogReloadHandle,
+    _guard: DefaultSubscriberGuard,
+    pub reload_handle: LogReloadHandle,
     #[allow(dead_code)]
     log_guards: (WorkerGuard, Option<WorkerGuard>),
     #[cfg(feature = "error_aggregation")]
     #[allow(dead_code)]
-    errors_container: Arc<ErrorAggregationContainer>,
+    pub errors_container: Arc<ErrorAggregationContainer>,
 }
 
-/// Test-specific logging setup that uses thread-local scoped dispatcher instead of global
-/// This allows multiple tests to run without conflicting over the global subscriber
-#[cfg(all(test, feature = "std"))]
+/// Test-specific logging setup using thread-local dispatch so parallel tests stay isolated.
+#[cfg(test)]
 pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnTest> {
     let parts = build_logging_subscriber(config)?;
+    let guard = set_test_subscriber(parts.subscriber);
 
-    // Use thread-local default instead of global
-    let guard = tracing::subscriber::set_default(parts.subscriber);
+    if let Some(endpoint) = parts.otel_warning_endpoint.as_deref() {
+        tracing::warn!(
+            target: "otel::setup",
+            endpoint = endpoint,
+            "otel_config.enabled is true but OTLP export has been removed from endpoint-libs - \
+             no traces or logs will be forwarded to a collector"
+        );
+    }
 
     Ok(LogSetupReturnTest {
         _guard: guard,
@@ -501,7 +901,7 @@ pub fn setup_logging_test(config: LoggingConfig) -> eyre::Result<LogSetupReturnT
     })
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -515,10 +915,6 @@ mod tests {
         }
     }
 
-    /// Basic test that verifies logging setup succeeds and logs can be emitted
-    // These were `#[tokio::test]` only to have a runtime in scope; not one of
-    // them awaits anything, and the waits are `std::thread::sleep` for the
-    // non-blocking appender to drain. They are plain tests now.
     #[test]
     fn test_basic_logging_stdout() {
         let config = LoggingConfig {
@@ -534,15 +930,10 @@ mod tests {
         let _guard = setup_logging_test(config);
         assert!(_guard.is_ok(), "Failed to setup logging");
 
-        // Emit some logs to verify the system works
         info!("Test info message");
         error!("Test error message");
     }
 
-    /// Test file logging functionality including:
-    /// - Basic file logging
-    /// - Log level filtering (separate stdout vs file levels)
-    /// - Log level reloading at runtime
     #[test]
     fn test_file_logging_comprehensive() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -563,67 +954,40 @@ mod tests {
 
         let log_setup = setup_logging_test(config).unwrap();
 
-        // Test 1: Basic logging and level filtering (before reload)
         info!("info_message_before_reload");
         debug!("debug_message_before_reload");
         error!("error_message");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eko::sleep_ms(100);
 
-        // Test 2: Reload global log level to DEBUG
         let result = log_setup.reload_handle.set_log_level(LogLevel::Debug);
         assert!(result.is_ok());
 
-        // Test 3: Verify debug logs now appear after reload
         info!("info_message_after_reload");
         debug!("debug_message_after_reload");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eko::sleep_ms(100);
         drop(log_setup);
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Verify file was created and contains expected logs
         let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
         assert_eq!(log_files.len(), 1, "Expected exactly one log file");
 
         let log_file = log_files[0].as_ref().unwrap();
         let log_contents = fs::read_to_string(log_file.path()).unwrap();
 
-        // Verify messages before reload
         assert!(log_contents.contains("info_message_before_reload"));
         assert!(
             !log_contents.contains("debug_message_before_reload"),
             "Debug should not appear before reload"
         );
         assert!(log_contents.contains("error_message"));
-
-        // Verify messages after reload
         assert!(log_contents.contains("info_message_after_reload"));
-
-        // Global log level reload applies to all layers including file
         assert!(
             log_contents.contains("debug_message_after_reload"),
             "Debug should appear after reload to DEBUG level"
         );
     }
 
-    // === OTel config tests ===
-    //
-    // OTLP export is gone; `OtelConfig` remains as an inert config struct so
-    // the backends that build a `LoggingConfig` literal keep compiling. What
-    // is worth asserting is therefore no longer that an exporter came up, but
-    // that asking for one is accepted, warned about, and harmless.
-
-    /// A config with `enabled: true` must not fail setup, and must not take
-    /// the rest of the subscriber down with it.
-    ///
-    /// This replaces `test_otel_disabled_returns_none_guards` and
-    /// `test_otel_graceful_degradation_unreachable_endpoint`, which asserted
-    /// on `LogSetupReturn::otel_guards`. That field went with the exporter.
-    /// The endpoint is still the unreachable one those tests used, because the
-    /// property that matters is unchanged: nothing here may try to reach it at
-    /// setup time.
     #[test]
     fn enabling_otel_is_accepted_and_changes_nothing() {
         let config = LoggingConfig {
@@ -647,7 +1011,6 @@ mod tests {
         );
     }
 
-    /// The default config asks for nothing and is the common case.
     #[test]
     fn a_default_otel_config_sets_up_cleanly() {
         let config = LoggingConfig {
@@ -663,8 +1026,6 @@ mod tests {
         assert!(setup_logging_test(config).is_ok());
     }
 
-    /// Test that file logging works alongside OTel enabled (but with invalid endpoint)
-    /// This verifies that the layer composition doesn't break when OTel is attempted
     #[test]
     fn test_file_logging_with_otel_attempted() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -678,7 +1039,7 @@ mod tests {
             }),
             otel_config: OtelConfig {
                 enabled: true,
-                endpoint: Some("http://localhost:4317".to_string()), // Not running
+                endpoint: Some("http://localhost:4317".to_string()),
                 ..OtelConfig::default()
             },
             #[cfg(feature = "error_aggregation")]
@@ -689,15 +1050,12 @@ mod tests {
 
         let log_setup = setup_logging_test(config).unwrap();
 
-        // Emit logs - these should go to file regardless of OTel status
         info!("file_log_with_otel_attempted");
         error!("error_log_with_otel_attempted");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eko::sleep_ms(100);
         drop(log_setup);
-        std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Verify file was created and contains logs
         let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
         assert_eq!(log_files.len(), 1, "Expected exactly one log file");
 
@@ -706,7 +1064,6 @@ mod tests {
         assert!(log_contents.contains("error_log_with_otel_attempted"));
     }
 
-    /// Test that log level reload works correctly when OTel is enabled
     #[test]
     fn test_log_level_reload_with_otel_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -731,26 +1088,22 @@ mod tests {
 
         let log_setup = setup_logging_test(config).unwrap();
 
-        // Log at INFO level (should appear)
         info!("info_before_reload");
-        debug!("debug_before_reload"); // Should NOT appear
+        debug!("debug_before_reload");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eko::sleep_ms(100);
 
-        // Reload to DEBUG
         let result = log_setup.reload_handle.set_log_level(LogLevel::Debug);
         assert!(
             result.is_ok(),
             "Log level reload should succeed with OTel enabled"
         );
 
-        // Log at DEBUG level (should now appear)
         info!("info_after_reload");
         debug!("debug_after_reload");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        eko::sleep_ms(100);
         drop(log_setup);
-        std::thread::sleep(std::time::Duration::from_millis(100));
 
         let log_files: Vec<_> = fs::read_dir(temp_dir.path()).unwrap().collect();
         let log_contents = fs::read_to_string(log_files[0].as_ref().unwrap().path()).unwrap();
@@ -767,11 +1120,8 @@ mod tests {
         );
     }
 
-    /// Test that OTel config fields are correctly structured
     #[test]
     fn test_otel_config_fields() {
-        use std::collections::HashMap;
-
         let config = OtelConfig {
             enabled: true,
             service_name: Some("test-service".to_string()),
@@ -791,7 +1141,6 @@ mod tests {
             Some(&"secret-key".to_string())
         );
 
-        // Default config should be disabled
         let default_config = OtelConfig::default();
         assert!(!default_config.enabled);
         assert!(default_config.service_name.is_none());

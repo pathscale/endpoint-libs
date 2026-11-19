@@ -52,10 +52,7 @@ use core::net::SocketAddr;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-#[cfg(not(any(feature = "std", feature = "std-deps")))]
 use crate::eyre::{Result, eyre};
-#[cfg(any(feature = "std", feature = "std-deps"))]
-use eyre::{Result, eyre};
 use nago_wss::conn::{Connection, Error as ConnError, Role};
 use nago_wss::proto::handshake::{
     DEFAULT_MAX_HEAD, Method, Parsed, Request, UpgradeError, build_rejection, build_response,

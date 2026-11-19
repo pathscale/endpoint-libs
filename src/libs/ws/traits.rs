@@ -5,10 +5,7 @@ use core::fmt;
 use core::net::SocketAddr;
 
 use async_trait::async_trait;
-#[cfg(not(any(feature = "std", feature = "std-deps")))]
 use crate::eyre;
-#[cfg(any(feature = "std", feature = "std-deps"))]
-use eyre;
 #[cfg(feature = "ws-core")]
 use eyre::Result;
 #[cfg(feature = "ws-core")]

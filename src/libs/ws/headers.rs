@@ -445,7 +445,7 @@ pub(super) mod preauth_sanitization_regression {
     use serde_json::json;
 
     use tracing::field::{Field, Visit};
-    use tracing_subscriber::{Layer, layer::Context, prelude::*};
+    use tracing::span;
 
     use super::*;
     use crate::libs::peer::{Extensions, PeerIdentity};
@@ -473,8 +473,20 @@ pub(super) mod preauth_sanitization_regression {
 
     struct Capture(Arc<Mutex<Vec<CapturedEvent>>>);
 
-    impl<S: tracing::Subscriber> Layer<S> for Capture {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &span::Id, _values: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &span::Id, _follows: &span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
             let mut fields = EventFields::default();
             event.record(&mut fields);
             self.0.lock().unwrap().push(CapturedEvent {
@@ -482,14 +494,19 @@ pub(super) mod preauth_sanitization_regression {
                 fields,
             });
         }
+
+        fn enter(&self, _span: &span::Id) {}
+
+        fn exit(&self, _span: &span::Id) {}
     }
 
     pub(in crate::libs::ws) fn capture_events<T>(
         operation: impl FnOnce() -> T,
     ) -> (T, Vec<CapturedEvent>) {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&events)));
-        let result = tracing::subscriber::with_default(subscriber, operation);
+        let subscriber: Arc<dyn tracing::Subscriber + Send + Sync> =
+            Arc::new(Capture(Arc::clone(&events)));
+        let result = crate::libs::log::with_test_subscriber(subscriber, operation);
         let events = std::mem::take(&mut *events.lock().unwrap());
         (result, events)
     }

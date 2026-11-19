@@ -31,7 +31,6 @@
 
 use std::collections::VecDeque;
 use std::future::Future;
-use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -47,10 +46,10 @@ use endpoint_libs::libs::ws::{
     AuthController, AuthReply, MessageStream, WebsocketServer, WebsocketStates, WsClient,
     WsConnection, WsRequest, WsResponse, WsServerConfig,
 };
-use eyre::Result;
+use endpoint_libs::eyre::Result;
+use endpoint_libs::libs::ws::transport::{PollRead, PollWrite};
 use futures::FutureExt;
 use futures::future::{Either, LocalBoxFuture, select};
-use futures::io::{AsyncRead, AsyncWrite};
 use nagoya::reactor::TaskSet;
 use serde::{Deserialize, Serialize};
 
@@ -653,12 +652,12 @@ fn duplex(capacity: usize) -> (DuplexHalf, DuplexHalf) {
     )
 }
 
-impl AsyncRead for DuplexHalf {
+impl PollRead for DuplexHalf {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<eko::compat::io::Result<usize>> {
         let mut pipe = self.inbound.lock().expect("the pipe lock");
 
         if pipe.data.is_empty() {
@@ -691,26 +690,20 @@ impl AsyncRead for DuplexHalf {
     }
 }
 
-impl AsyncWrite for DuplexHalf {
+impl PollWrite for DuplexHalf {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<eko::compat::io::Result<usize>> {
         let mut pipe = self.outbound.lock().expect("the pipe lock");
 
         if pipe.read_closed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the reading half is gone",
-            )));
+            return Poll::Ready(Err(eko::compat::io::Error::other("the reading half is gone")));
         }
 
         let free = pipe.capacity - pipe.data.len();
         if free == 0 {
-            // Never `Ok(0)`: the framing layer reads that as a stream that will never
-            // accept anything and fails the send outright, where the truth is that it
-            // should wait for the reader.
             pipe.writer = Some(cx.waker().clone());
             return Poll::Pending;
         }
@@ -726,13 +719,11 @@ impl AsyncWrite for DuplexHalf {
         Poll::Ready(Ok(written))
     }
 
-    /// Nothing is held back, so there is nothing to push out: a write is visible to
-    /// the peer the moment it lands in the buffer.
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<eko::compat::io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<eko::compat::io::Result<()>> {
         let mut pipe = self.outbound.lock().expect("the pipe lock");
         pipe.write_closed = true;
         let reader = pipe.reader.take();

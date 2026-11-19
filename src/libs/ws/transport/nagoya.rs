@@ -1,38 +1,22 @@
-//! A Nagoya socket as a `futures-io` byte stream.
+//! A Nagoya socket as a [`PollRead`]/[`PollWrite`] byte stream.
 //!
 //! [`framed_json_neutral`](super::framed::framed_json_neutral) asks for
-//! [`futures::io::AsyncRead`]/[`AsyncWrite`], which is the trait pair that names no
-//! runtime. Nagoya's socket does not implement it: it implements Nagoya's own
-//! [`Stream`](nagoya::io::Stream), whose `read` and `write_all` are `async fn` rather
-//! than `poll_` methods. Nagoya's `io::Compat` does not close that gap either, since it
-//! runs the other way, presenting a `futures-io` stream to a Nagoya consumer.
-//!
-//! The adapter is thin because `TcpStream` already exposes the poll-shaped methods
-//! underneath its futures: `poll_read`, `poll_write`, and `poll_flush` are public and have
-//! exactly the `futures-io` signature. So this is delegation, not a bridge — no boxed
-//! future, no buffer, and no second copy of the readiness logic. Had those methods been
-//! private, this file would have had to poll an `async fn` borrowing `&mut self` from
-//! inside `poll_read`, which is not something a wrapper can do soundly.
-//!
-//! `TcpStream` is the type for a Unix-domain connection too, so there is one adapter
-//! rather than one per address family.
-//!
-//! ```no_run
-//! # use endpoint_libs::libs::ws::transport::{framed::framed_json_neutral, nagoya::NagoyaStream};
-//! # fn example(socket: nagoya::net::TcpStream) {
-//! let transport = framed_json_neutral(NagoyaStream::new(socket));
-//! # let _ = transport;
-//! # }
-//! ```
+//! [`PollRead`]/[`PollWrite`], which is the poll-based byte stream trait pair over
+//! `ekostd` that names no runtime and no `std`. `TcpStream` exposes `poll_read`,
+//! `poll_write`, and `poll_flush` directly, so this adapter delegates without a boxed
+//! future or extra buffer.
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
 
-use nagoya::io::{self, ErrorKind, Read as AsyncRead, Write as AsyncWrite};
+use eko::compat::io;
+use eko::Errno;
 use nagoya::io::StreamError;
 use nagoya::net::TcpStream;
 
-/// A Nagoya [`TcpStream`] presented as a `futures-io` byte stream.
+use super::{PollRead, PollWrite};
+
+/// A Nagoya [`TcpStream`] presented as a [`PollRead`]/[`PollWrite`] byte stream.
 #[derive(Debug)]
 pub struct NagoyaStream(TcpStream);
 
@@ -62,25 +46,33 @@ impl From<TcpStream> for NagoyaStream {
 }
 
 fn io_error(error: StreamError) -> io::Error {
-    if error.interrupted() {
-        io::Error::new(ErrorKind::Interrupted)
-    } else {
-        io::Error::new(ErrorKind::Other)
+    io::Error::from_errno(Errno(error.0), "socket")
+}
+
+impl PollRead for NagoyaStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().0.poll_read(cx, buffer).map_err(io_error)
     }
 }
 
-impl AsyncRead for NagoyaStream {
-    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, io::Error> {
-        core::future::poll_fn(|cx| self.0.poll_read(cx, buffer).map_err(io_error)).await
-    }
-}
-
-impl AsyncWrite for NagoyaStream {
-    async fn write(&mut self, buffer: &[u8]) -> Result<usize, io::Error> {
-        core::future::poll_fn(|cx| self.0.poll_write(cx, buffer).map_err(io_error)).await
+impl PollWrite for NagoyaStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.get_mut().0.poll_write(cx, buffer).map_err(io_error)
     }
 
-    async fn flush(&mut self) -> Result<(), io::Error> {
-        core::future::poll_fn(|cx| self.0.poll_flush(cx).map_err(io_error)).await
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.get_mut().0.poll_flush(cx).map_err(io_error)
+    }
+
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
